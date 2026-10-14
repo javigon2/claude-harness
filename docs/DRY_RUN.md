@@ -132,3 +132,223 @@ behaviour, beyond imports. This dry run says little about cross-order interface 
 - `.claude/agents/implementer.md`: start every Bash command with `cd <root> && ` (G5);
   run acceptance as `<cmd>; echo "exit=$?"` so the exit code is visible; the JSON block
   is mandatory, and a reply without one counts as `status: unknown` (G6).
+
+# T1.5: Worker
+
+Date: 2026-10-14. Plan: `plans/t1.5-worker/plan.json` (2 orders, 2 waves, every order on
+opus by the user's choice for this build). Orchestrator: Opus 5.5 in Claude Code. Workers:
+the `implementer` subagent with model opus, one worktree per order, created and merged
+with `harness.worktree.WorktreeManager` (run id `t15`). Review: the `reviewer` subagent
+(opus).
+
+## Result
+
+**2 of 2 orders passed on the first attempt**, in the orchestrator's own acceptance run
+and in review. Merged on main as `56409f1` (worker-core) and `029bf6b` (sdk-worker).
+Main: 96 tests, ruff clean.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | worker-core | opus | pass | pass | 17 | 46.6k | 124 s |
+| 2 | sdk-worker | opus | pass | pass | 7 | 33.5k | 88 s |
+
+Both diffs stayed inside `files_owned`. Both workers wrote the JSON block and printed
+real exit codes (`; echo "exit=$?"`). Both mentioned the global work-log rule in `notes`
+and skipped it (rule 9 works).
+
+## SDK interface as built (claude-agent-sdk 0.2.167, CLI 2.1.299 bundled)
+
+- `query(prompt=..., options=ClaudeAgentOptions(...))` returns an async iterator.
+  `SdkWorker.options()` sets `model`, `system_prompt` (a plain str, which replaces
+  Claude Code's prompt), `tools` and `allowed_tools` (the six tools), `permission_mode="acceptEdits"`,
+  `cwd`, `max_turns`, `setting_sources=[]`, `strict_mcp_config=True`,
+  `verbatim_prompts=True`, and `env` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`).
+- `setting_sources=None` (the default) loads **all** sources, including
+  `~/.claude/CLAUDE.md`. That is why earlier headless sessions wrote to the work log.
+  Auto memory and claude.ai connectors are not controlled by `setting_sources`.
+- A failed session yields its `ResultMessage(is_error=True)` and then raises
+  `ResultError`, so the worker keeps the usage it saw before the exception.
+- `ResultMessage.usage` covers the main loop only. `model_usage` (camelCase, per model)
+  covers every call. `total_cost_usd` is a client-side estimate.
+
+## Manual SdkWorker call (done-when)
+
+One real call: opus, a trivial order (create `greet.py`), in a throwaway `git init` repo,
+`max_turns=10`.
+
+- `status=done`, 3 turns, 11.3 s. The orchestrator's own acceptance run exited 0.
+- **Cost $0.0793.** opus $0.07919, plus $0.00016 for a Claude Code internal haiku call
+  that shows up only in `model_usage`.
+- Usage, summed over `model_usage`: input 1,450, output 533, cache read 16,332, cache
+  creation 8,214. The cache writes use the 1h TTL.
+- Isolation: init `tools` = exactly the six; `mcp_servers` = [] (no claude.ai connectors);
+  `permissionMode` = acceptEdits; no permission denials; work log hash unchanged.
+
+## Findings
+
+| # | Finding | Where | Kind |
+|---|---|---|---|
+| G7 | The order said to catch `JSONDecodeError` and `ValidationError` only, but `json.loads` raises a plain `ValueError` for ints over 4300 digits (and can hit `RecursionError`). That contradicts the order's own "never raises". The worker caught `(ValueError, RecursionError)` and said so. | worker-core | order gap (planner) |
+| G8 | With `setting_sources=[]` the init message still lists 19 built-in skills, 5 agents and 4 builtin plugins. They can't be called (no Skill or Agent tool), but they cost listing tokens. Possible hardening: `skills=[]`, `agents={}`. | SdkWorker | SDK behaviour |
+| G9 | The worker's Python run left `__pycache__/` in an otherwise clean repo. T1.6's "diff only touches files_owned" check must ignore untracked caches (respect `.gitignore`, or skip `__pycache__`/`.pytest_cache`/`.venv`), or every Python task fails. | T1.6 input | design note |
+| G10 | The 24 KB orders (byte-exact text inside) were handed to the implementer as a file path instead of pasted. The runner's `build_prompt` pastes them, so this applies only to Phase-0-style runs. | orchestration | process |
+
+None of these is a work-order format problem, so `work_order.md` and `plan-stage` are
+unchanged. Note for planners: when an order says a function "never raises" and also
+lists the exceptions to catch, check that the list really covers every case.
+
+# T1.6–T1.7: Verifier and router
+
+Date: 2026-10-14. Plan: `plans/t1.6-t1.7/plan.json` (3 orders, 3 waves, all opus by the
+user's choice for this build). Orchestrator: Opus 5.5 in Claude Code, running without the
+user (decisions recorded in the plan and the final report). Workers: the `implementer`
+subagent with model opus, one worktree per order via `WorktreeManager` (run id `t16`).
+Review: the `reviewer` subagent (opus). Each order was handed over as a JSON file path.
+
+## Result
+
+**3 of 3 orders passed on the first attempt**, in the orchestrator's own acceptance run and
+in review. Merged on main as `fbde06e` (review), `9683444` (verify) and `b2adf49` (router).
+Main: 196 tests, ruff clean.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | review | opus | pass | pass | 7 | 33.5k | 109 s |
+| 2 | verify | opus | pass | pass | 12 | 34.8k | 169 s |
+| 3 | router | opus | pass | pass | 9 | 38.1k | 134 s |
+
+Reviewer calls: 33.0k, 33.6k and 37.0k tokens. All diffs stayed inside `files_owned`; the
+pasted whole-file targets (`models.py`) matched byte for byte. Every worker printed real
+exit codes and wrote the JSON block, and every one mentioned the global work-log rule in
+`notes` and skipped it.
+
+## What the workers did beyond the order
+
+- **verify:** replaced the pinned `await asyncio.wait_for(proc.wait(), timeout_s)` with a
+  private `_wait_exit` that polls `proc.returncode` every 20 ms (see G11). It read
+  `asyncio/base_subprocess.py` to confirm, and said so in `notes`. The reviewer judged the
+  deviation necessary and within intent.
+- **router:** one extra test (a monkeypatched `verify` decides the outcome), which checks a
+  hook the order asked for. The usage test derives the review cost from the number of
+  reviewer calls instead of fixing it.
+
+## Order gaps
+
+| # | Gap | Order | Kind |
+|---|---|---|---|
+| G11 | The pinned `run_command` algorithm waited with `Process.wait()`, which on Python 3.12 only returns after every pipe closes, so a background child holding stdout blocks it. The order's own test (`sleep 30 & echo bg` returns within 10 s) could not pass as specified. | verify | order gap (planner) |
+
+G11 is planner knowledge, not a format problem, so `work_order.md` is unchanged. It is the
+second gap of this kind (after G7), so `plan-stage` got one self-check question: where an
+order pins both an algorithm and a test of it, or says "never raises" and lists the
+exceptions, run that algorithm against that test in a scratch file first.
+
+# T1.8–T1.9: Scheduler, CLI and report
+
+Date: 2026-10-14. Plan: `plans/t1.8-t1.9/plan.json` (5 orders, 3 waves, all opus). Same
+setup as T1.6–T1.7 (run id `t18`); the two orders of each of waves 1 and 2 ran in parallel.
+
+## Result
+
+**5 of 5 orders passed on the first attempt**, in the orchestrator's own acceptance run and
+in review. Merged on main as `5892353` (state), `ec12415` (worktree-discard), `19c6467`
+(report), `20fd8f7` (scheduler) and `8c0eda7` (cli). Main after the stage: 246 tests, ruff
+clean.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | state | opus | pass | pass | 6 | 18.0k | 72 s |
+| 1 | worktree-discard | opus | pass | pass | 9 | 20.6k | 69 s |
+| 2 | scheduler | opus | pass | pass | 12 | 44.8k | 261 s |
+| 2 | report | opus | pass | pass | 5 | 21.6k | 86 s |
+| 3 | cli | opus | pass | pass | 7 | 31.6k | 114 s |
+
+Reviewer calls: 16.8k, 17.8k, 37.7k, 21.2k and 29.9k tokens. All diffs stayed inside
+`files_owned`; `worktree.py` matched its pasted target byte for byte.
+
+## What the workers did beyond the order
+
+- **scheduler:** a private `_emit` helper; `_git_out` also turns an `OSError` into
+  `WorktreeError`, and `_run_task` also catches `OSError`, so "never raises" holds when
+  `create` fails writing `.git/info/exclude`. The reviewer judged all three within intent
+  and found no lock, semaphore or state-save bug. It read `worker.py` and `verify.py`, which
+  were not in `files_readonly` (G12).
+- **cli:** `raise AssertionError("unreachable")` after each `_fail(...)`, because the
+  pinned `_fail` is annotated `-> None` (G13).
+- **worktree-discard:** counts `git worktree list --porcelain` entries instead of searching
+  for the path, because macOS temp paths show up as `/private/var/...`.
+
+## Order gaps and orchestration findings
+
+| # | Gap | Order | Kind |
+|---|---|---|---|
+| G12 | The scheduler order pasted the router and worker interfaces but not `verify.py`'s or FakeWorker's full behaviour, so the worker opened both files to check details. | scheduler | order gap (minor) |
+| G13 | The pinned `_fail(message) -> None` always raises; it should have been `-> NoReturn`, so callers' return types narrow without dead `raise` lines. | cli | order gap (planner) |
+| O1 | `WorktreeManager.cleanup()` removes **every** worktree under `.harness/worktrees`, including those of other runs; only branches are filtered by run id. Cleaning up `t18` deleted the in-flight `t110/planner` worktree (its branch and commit survived and were re-attached). | worktree.py (T1.4) | harness bug, open |
+| O2 | The orchestrator's own scope check diffed against `main`, which had moved after a parallel merge, and reported the other order's files as "outside". Fixed by diffing against `git merge-base HEAD main`. The runner's verifier uses the recorded base sha, so it is not affected. | orchestration | process |
+
+No format change: G12 and G13 are planner care, covered by the existing "paste every
+interface the worker calls" and lint-the-skeleton rules.
+
+# T1.10: `harness plan`
+
+Date: 2026-10-14. Plan: `plans/t1.10-plan/plan.json` (2 orders, 2 waves, both opus; run id
+`t110`). `planner` ran in parallel with T1.8–T1.9's `cli` order (no shared files);
+`cli-plan` was regenerated after `cli` merged, so it pasted the current `cli.py`.
+
+## Result
+
+**2 of 2 orders passed on the first attempt**, in the orchestrator's own acceptance run and
+in review. Merged as `945f19c` (planner) and `6f91cdd` (cli-plan). Main: **279 tests**,
+ruff clean; `harness validate` accepts all five plans in `plans/`.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | planner | opus | pass | pass | 7 | 36.7k | 153 s |
+| 2 | cli-plan | opus | pass | pass | 10 | 25.8k | 124 s |
+
+Reviewer calls: 38.3k and 22.1k tokens.
+
+## SDK facts used (installed claude-agent-sdk 0.2.167 + docs, via a claude-code-guide agent)
+
+- Skills in `<dir>/.claude/skills/` load for `add_dirs=[dir]` when `setting_sources`
+  includes `"project"`; `add_dirs`' own CLAUDE.md files do not load.
+- With `skills=[...]` and `setting_sources=None`, the SDK silently sets
+  `setting_sources=["user", "project"]` (`_apply_skills_defaults` in
+  `subprocess_cli.py`), which would load `~/.claude`. The planner passes `["project"]`.
+- `"project"` also loads CLAUDE.md from every parent of `cwd` (e.g. `~/dev/CLAUDE.md`);
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` turns all CLAUDE.md loading off. Whether it also
+  affects skills is not documented: the first real `harness plan` must check the init
+  message's `skills` list.
+- In a `ClaudeSDKClient` session every turn has its own ResultMessage, but
+  `total_cost_usd` and `model_usage` are running totals, so the planner reports the last one.
+
+## What the workers did beyond the order
+
+- **planner:** catches `(PlanError, ValueError, OSError)` instead of the pinned
+  `(ValueError, OSError)` so the binding `PlanError` import is used (G14).
+- **cli-plan:** typer renders the argument as lowercase `{description}` in `--help`, so the
+  help test compares case-insensitively (the reviewer called it weak but acceptable). It
+  ran one acceptance command a second time with `>/dev/null`, against implementer rule 4
+  (no harm: the orchestrator's run is the one that counts).
+
+## Order gaps
+
+| # | Gap | Order | Kind |
+|---|---|---|---|
+| G14 | The pinned skeleton imported `PlanError` but the pinned flow never named it, so plain `ruff check` would fail (F401) unless the worker changed the flow. The skeleton was linted with F401 ignored, which hid this. | planner | order gap (planner) |
+| G15 | The order asserted `DESCRIPTION` in `plan --help`; the installed typer prints `{description}`. Exact CLI help text should be checked by the planner before pinning. | cli-plan | order gap (minor) |
+
+G14 is a hole in the skeleton lint rule: ignoring F401 for `...` bodies also hides imports
+that the pinned algorithm never uses. Fix applied to `plan-stage`: after linting a
+skeleton with F401 ignored, check that every import is used by the pinned decisions.
+
+# Build summary (T1.6–T1.10)
+
+- **10 of 10 orders passed on the first attempt**, all on Opus, with reviewer passes; no
+  retries, so the build itself never needed escalation. Main went from 96 to 279 tests.
+- Worker tokens 306k across 10 orders; reviewer tokens 288k across 10 reviews (subagent
+  token counts as reported by the Agent tool).
+- Not exercised for real (paid, needs the user): `SdkReviewer`, `SdkPlannerSession`, and
+  `harness run` with SdkWorker. T1.11 is their first real use; see `docs/RESULTS.md`.

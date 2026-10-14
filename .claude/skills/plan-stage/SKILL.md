@@ -61,6 +61,9 @@ yourself and record it as a `decision` item in the `context` of each order it af
      run `python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" <file>`, then
      the linter. Watch escapes inside docstrings: write `"\\n"` when you mean the
      two characters, not a newline.
+     If you lint a skeleton with unused-import warnings off (its bodies are `...`), check
+     by hand that the pinned steps and decisions use every import it keeps, or the
+     finished file fails the linter unless the worker changes the design.
    - **Placeholders and failures.** For every exact message, say what fills each
      `<placeholder>`. For every external command the code runs, including cleanup and
      abort commands, say whether its failure is ignored, raised or reported.
@@ -88,6 +91,9 @@ yourself and record it as a `decision` item in the `context` of each order it af
    - Is every new test file in `files_owned`?
    - Does every exact message say what fills each placeholder?
    - Does every external command say what happens when it fails?
+   - Where an order pins both an algorithm and a test of it, or says "never raises" and
+     lists the exceptions to catch, did I run that algorithm against that test in a
+     scratch file first?
 
    Fix any order that fails a check, then run the check again.
 
