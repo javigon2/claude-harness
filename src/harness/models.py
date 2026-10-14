@@ -63,6 +63,28 @@ class Usage(_Strict):
     cache_creation_tokens: int = 0
     cost_usd: float = 0.0
 
+    def plus(self, other: "Usage") -> "Usage":
+        """A new Usage whose every field is self's value plus other's. Neither is changed."""
+        return Usage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_creation_tokens=self.cache_creation_tokens + other.cache_creation_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+        )
+
+
+class AttemptRecord(_Strict):
+    """One worker attempt plus its verification, as stored in TaskState.history."""
+
+    attempt: int = Field(ge=1)
+    tier: Tier
+    worker_status: Literal["done", "failed", "unknown", "error"]
+    passed: bool
+    usage: Usage = Field(default_factory=Usage)
+    summary: str = ""
+    feedback: str = ""
+
 
 class TaskState(_Strict):
     task_id: str
@@ -70,6 +92,9 @@ class TaskState(_Strict):
     attempts: int = 0
     tier_used: Tier | None = None
     usage: Usage = Field(default_factory=Usage)
+    history: list[AttemptRecord] = Field(default_factory=list)
+    replan_note: str | None = None
+    error: str | None = None
 
 
 class Event(_Strict):
