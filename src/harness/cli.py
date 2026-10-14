@@ -24,6 +24,7 @@ from harness.scheduler import Scheduler, SchedulerError
 from harness.state import RunState, StateError, latest_run, load_state, new_run_id
 from harness.state import run_dir as run_dir_of
 from harness.state import runs_root as runs_root_of
+from harness.ui.server import make_server
 from harness.verify import DEFAULT_TIMEOUT_S
 from harness.worker import FakeWorker, SdkWorker, Worker, fake_result
 from harness.worktree import WorktreeError, ensure_excluded
@@ -165,6 +166,34 @@ def status(repo: RepoOpt = Path("."), run_id: RunIdOpt = None) -> None:
 def report(repo: RepoOpt = Path("."), run_id: RunIdOpt = None) -> None:
     """Show tokens and cost per task and per tier."""
     typer.echo(report_text(_load_run_or_exit(repo.resolve(), run_id)))
+
+
+@app.command("ui")
+def ui_cmd(
+    repo: RepoOpt = Path("."),
+    run_id: RunIdOpt = None,
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, help="Port on 127.0.0.1.")
+    ] = 8765,
+) -> None:
+    """Serve the read-only run viewer on 127.0.0.1."""
+    repo_path = repo.resolve()
+    if not repo_path.is_dir():
+        _fail(f"Not a directory: {repo_path}")
+    try:
+        server = make_server(repo_path, port)
+    except OSError as err:
+        _fail(f"Cannot listen on 127.0.0.1:{port}: {err}")
+    url = f"http://127.0.0.1:{port}/"
+    if run_id:
+        url += f"#{run_id}"
+    typer.echo(f"Serving {url} (read-only; Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 @app.command()
