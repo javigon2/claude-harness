@@ -75,7 +75,10 @@ class Usage(_Strict):
 
 
 class AttemptRecord(_Strict):
-    """One worker attempt plus its verification, as stored in TaskState.history."""
+    """One worker attempt plus its verification, as stored in TaskState.history. `usage` is
+    the worker session only; the review of this attempt (if one ran) is `review_usage`, on
+    `review_tier`. Records written before review_tier existed have the review inside
+    `usage` and review_tier None."""
 
     attempt: int = Field(ge=1)
     tier: Tier
@@ -84,6 +87,8 @@ class AttemptRecord(_Strict):
     usage: Usage = Field(default_factory=Usage)
     summary: str = ""
     feedback: str = ""
+    review_tier: Tier | None = None
+    review_usage: Usage = Field(default_factory=Usage)
 
 
 class TaskState(_Strict):

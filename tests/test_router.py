@@ -6,7 +6,7 @@ import pytest
 
 from harness.config import Tier
 from harness.events import EventLog, read_events
-from harness.models import AttemptRecord, TaskState, WorkOrder
+from harness.models import AttemptRecord, TaskState, Usage, WorkOrder
 from harness.review import FakeReviewer, fake_review
 from harness.router import Router, replan_note, tier_for_attempt
 from harness.verify import FEEDBACK_HEADER, CommandResult, VerifyResult, format_feedback
@@ -274,8 +274,32 @@ async def test_usage_summed_across_attempts_and_review(env: _Env):
     # The reviewer only runs once acceptance passes, so only on attempt 2.
     review_cost = 0.05 * len(reviewer.calls)
     assert state.usage.cost_usd == pytest.approx(0.3 + review_cost)
-    assert sum(r.usage.cost_usd for r in state.history) == pytest.approx(state.usage.cost_usd)
+    assert sum(r.usage.cost_usd + r.review_usage.cost_usd for r in state.history) == (
+        pytest.approx(state.usage.cost_usd)
+    )
     assert env.events("task_done")[0]["cost_usd"] == pytest.approx(state.usage.cost_usd)
+
+
+async def test_review_usage_kept_apart(env: _Env):
+    worker = FakeWorker(
+        {
+            "t1": [
+                fake_result("done", cost_usd=0.1),
+                _writes(cost_usd=0.2),
+            ]
+        }
+    )
+    reviewer = FakeReviewer(default=fake_review("pass", cost_usd=0.05))
+    state = await env.router(worker, reviewer=reviewer, review_tier="opus").route(
+        _order(), env.repo, TaskState(task_id="t1")
+    )
+    assert state.status == "done"
+    assert state.history[0].review_tier is None
+    assert state.history[0].review_usage == Usage()
+    assert state.history[1].usage.cost_usd == pytest.approx(0.2)
+    assert state.history[1].review_tier == "opus"
+    assert state.history[1].review_usage.cost_usd == pytest.approx(0.05)
+    assert state.usage.cost_usd == pytest.approx(0.35)
 
 
 async def test_reviewer_fail_then_pass_retries_with_review_feedback(env: _Env):

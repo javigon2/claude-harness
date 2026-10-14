@@ -167,9 +167,11 @@ class Router:
                     tier=tier,
                     worker_status=result.status,
                     passed=vr.passed,
-                    usage=result.usage.plus(review_usage),
+                    usage=result.usage,
                     summary=result.summary,
                     feedback=fb,
+                    review_tier=self.review_tier if vr.review is not None else None,
+                    review_usage=review_usage,
                 )
             )
 
