@@ -33,8 +33,8 @@ class WorktreeManager:
         return f"harness/{self.run_id}/{task_id}"
 
     def path(self, task_id: str) -> Path:
-        """<repo>/.harness/worktrees/<task_id>"""
-        return self.repo / ".harness" / "worktrees" / task_id
+        """<repo>/.harness/worktrees/<run_id>/<task_id>"""
+        return self.repo / ".harness" / "worktrees" / self.run_id / task_id
 
     def _ensure_excluded(self) -> None:
         out = _check(_git("rev-parse", "--git-common-dir", cwd=self.repo)).strip()

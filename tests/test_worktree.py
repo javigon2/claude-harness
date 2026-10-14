@@ -31,7 +31,7 @@ def test_create(tmp_path: Path):
     repo = _repo(tmp_path)
     mgr = WorktreeManager(repo, "r1")
     path = mgr.create("t1")
-    assert path == repo / ".harness" / "worktrees" / "t1"
+    assert path == repo / ".harness" / "worktrees" / "r1" / "t1"
     assert path.is_dir()
     assert "harness/r1/t1" in _out(repo, "branch", "--list", "harness/r1/t1")
     assert _out(repo, "status", "--porcelain") == ""
@@ -198,3 +198,21 @@ def test_discard_plain_directory(tmp_path: Path):
     (path / "junk.txt").write_text("junk\n")
     mgr.discard("t1")
     assert not path.exists()
+
+
+def test_same_task_id_in_two_runs(tmp_path: Path):
+    repo = _repo(tmp_path)
+    r1 = WorktreeManager(repo, "r1")
+    r2 = WorktreeManager(repo, "r2")
+    p1 = r1.create("t")
+    p2 = r2.create("t")
+    assert p1 != p2
+    assert p1.is_dir()
+    assert p2.is_dir()
+    r1.cleanup()
+    assert not p1.exists()
+    assert p2.is_dir()
+    assert "harness/r2/t" in _out(repo, "branch", "--list", "harness/r2/t")
+    r2.discard("t")
+    assert not p2.exists()
+    assert _out(repo, "branch", "--list", "harness/r2/t") == ""
