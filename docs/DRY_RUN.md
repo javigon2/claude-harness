@@ -475,3 +475,72 @@ Reviewer calls: 18.3k, 14.5k, 19.1k and 36.9k tokens.
 None. The pinned table text was produced by running the algorithm in a scratch file first,
 and the pinned snippets were linted and grepped for model ids (the G16 check) before
 handing off.
+
+# Backend stage: progress, rate limits, cost cap
+
+Done in one session by a single Sonnet 5.5 agent (no orders), each step on its own task branch
+via `WorktreeManager` (run id `be1`), merged fast-forward. No paid model calls; no changes to
+`pyproject.toml`/`uv.lock`.
+
+| Step | Task | Main sha | Tests |
+|---|---|---|---|
+| 1 | worker-progress | `bef6ad9` | 330 |
+| 2a | rate-limit-core (models, worker, review) | `f0d3cb9` | 340 |
+| 2b | rate-limit-pause (router, scheduler, report, cli) | `9c112b0` | 348 |
+| 3 | cost-cap | `a87b77a` | 355 |
+
+Baseline was 319 tests (main moved only by docs commits meanwhile).
+
+## Where the prompt was wrong or silent
+
+- **Exit code for a cost stop.** The prompt reused "any task `paused`" for exit 3, but a cost
+  stop at a task boundary leaves only `pending` tasks, so no task is paused. `Scheduler` now
+  has a public `stop_reason`; the CLI exits 3 with the resume hint when a task is paused *or*
+  `stop_reason` is set. The message uses the paused task's error, else `stop_reason`.
+- **Step 2 split into two branches** (core, then pause), as the prompt allowed.
+- **`rate_limited` forces status `"error"`** even if the session ended with a successful
+  result after a `rejected` event (the prompt says any of the three signals counts).
+- **Reviewer rate limit:** the worker usage is already in `state.usage` before verification,
+  so only the review usage is added on pause (no double count).
+- **Cap text rounds to cents:** `--max-cost 0.015` prints "passed the $0.01 cap". The
+  `budget_exceeded` payload keeps the exact floats.
+- **`budget_exceeded` ordering:** it is queued by the sync `_should_stop()` and emitted from
+  `_run_task` (before a task starts, and right after `router.route` returns), so it can come
+  after the router's own `task_paused` for the same stop.
+- **Stale base:** the prompt said main was at `cb4ba98`; the work started from `cf040e3`
+  (plus a docs commit `74a0ca7` landed meanwhile). No code contradiction.
+
+## New status and events (for the UI)
+
+`TaskStatus` gains **`paused`**: the task stopped on purpose (rate limit, cost cap, stop
+reason); its worktree is kept, `attempts` does not count the interrupted attempt, `error`
+holds the reason. `--resume` restarts it from attempt 1. Tasks never started stay `pending`.
+
+| Event | `task_id` | Payload |
+|---|---|---|
+| `worker_progress` | yes | `{"attempt": int, "tier": str, "tool": str, "detail": str}` (`detail` <= 80 chars, may be `""`; emitted at most every 2 s unless the tool name changes) |
+| `task_paused` | yes | `{"attempt": int, "tier": str, "reason": str, "resets_at": int \| null}` (`resets_at` = unix timestamp, only for rate limits) |
+| `run_stopping` | no | `{"reason": str}` (after the wave in which the stop was set; later waves never start) |
+| `budget_exceeded` | no | `{"cost_usd": float, "max_cost_usd": float}` (once per run) |
+| `run_finished` | no | adds `"paused": int` and `"stopped_reason": str \| null` to `done/failed/blocked/cost_usd` |
+
+Rate-limit `reason`: `rate limited; resets at <ISO-8601 UTC>` or `... resets at unknown`.
+Cost `reason`: `estimated cost $X.XX passed the $Y.YY cap`.
+
+## CLI
+
+`harness run ... --max-cost USD` (must be > 0, else exit 1). Exit **3** = the run stopped
+(paused task or stop reason) and the last line is
+`Run stopped: <reason>. Resume with: harness run <plan> --repo <repo> --resume [--review]`.
+Exit 1 stays "finished but not all done". `Totals:` now reads
+`..., {blocked} blocked, {paused} paused, {other} not run; ...`.
+
+## Rehearsal (free, `--fake`)
+
+3 chained orders on a copy of `examples/toy_repo`, fake worker costing $0.01 per attempt,
+`--max-cost 0.015` (worker patched through `harness.cli._make_worker`, since `--fake` costs
+nothing): a and b merged, c stayed `pending`, exit 3, the resume hint printed, events
+`budget_exceeded` -> `wave_finished` -> `run_stopping` -> `run_finished` (`stopped_reason` set),
+`harness report` showed "2 done, 0 paused, 1 not run". `--resume` without the cap ran c and
+finished 3/3 done. The rate-limit pause path is covered by the tests only (no way to trigger a
+real one for free).
