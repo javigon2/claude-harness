@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 
 from harness.config import MODEL_IDS
 from harness.models import Usage
@@ -11,6 +11,7 @@ from harness.planner import (
     FIX_PROMPT,
     HARNESS_ROOT,
     PLANNER_APPEND,
+    PLANNER_INIT_FILE,
     PLANNER_MAX_TURNS,
     PLANNER_SKILLS,
     PLANNER_TOOLS,
@@ -23,6 +24,7 @@ from harness.planner import (
     PlannerTurn,
     SdkPlannerSession,
     check_skills,
+    format_session_init,
     is_approved,
     run_planner,
 )
@@ -485,3 +487,83 @@ async def test_run_planner_closes_on_session_exception(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="no scripted planner turn left"):
         await run_planner("d", tmp_path, session, ask, lambda _t: None)
     assert session.closed
+
+
+# ---------------------------------------------------------------- session init facts
+
+FACTS: dict[str, Any] = {
+    "model": MODEL_IDS["opus"],
+    "tools": ["Read", "Write"],
+    "skills": ["plan-project", "plan-stage"],
+    "mcp_servers": [],
+    "permissionMode": "acceptEdits",
+    "apiKeySource": "none",
+}
+
+
+def test_format_session_init_lines() -> None:
+    assert format_session_init(FACTS).split("\n") == [
+        f"Planner session: model={MODEL_IDS['opus']} apiKeySource=none permissionMode=acceptEdits",
+        "  skills: plan-project, plan-stage",
+        "  tools: Read, Write",
+        "  mcp_servers: none",
+    ]
+
+
+def test_format_session_init_mcp_names() -> None:
+    facts = {**FACTS, "mcp_servers": [{"name": "a", "status": "connected"}]}
+    assert format_session_init(facts).split("\n")[3] == "  mcp_servers: a"
+
+
+def test_format_session_init_empty() -> None:
+    assert format_session_init({}).split("\n") == [
+        "Planner session: model=None apiKeySource=None permissionMode=None",
+        "  skills: none",
+        "  tools: none",
+        "  mcp_servers: none",
+    ]
+
+
+async def test_send_returns_session_init(tmp_path: Path) -> None:
+    data = {**FACTS, "cwd": "/x", "agents": []}
+    make, _ = factory(
+        scripts=[
+            [SystemMessage(subtype="init", data=data), text_msg("hi"), result_msg()],
+            [text_msg("hi"), result_msg()],
+        ]
+    )
+    s = SdkPlannerSession(tmp_path, client_factory=make)
+    t1 = await s.send("one")
+    t2 = await s.send("two")
+    assert t1.error is None and t1.session_init == FACTS
+    assert t2.error is None and t2.session_init is None
+
+
+async def test_run_planner_reports_session_init_once(tmp_path: Path) -> None:
+    steps = happy_steps(tmp_path)
+
+    def first(_msg: str) -> PlannerTurn:
+        return PlannerTurn(text="Some questions?", usage=Usage(cost_usd=0.1), session_init=FACTS)
+
+    def third(_msg: str) -> PlannerTurn:
+        write_project(tmp_path, "approved 2026-10-14")
+        return PlannerTurn(
+            text="Approved.", usage=Usage(cost_usd=0.3), session_init={**FACTS, "model": "x"}
+        )
+
+    steps[0] = first
+    steps[2] = third
+    session = FakePlannerSession(steps)
+    ask, _ = asker(["defaults", "approve"])
+    said: list[str] = []
+    result = await run_planner("build", tmp_path, session, ask, said.append)
+    assert said[0] == format_session_init(FACTS)
+    assert said[1:] == [
+        "Some questions?",
+        "Draft plan written. Approve?",
+        "Approved.",
+        "Stage plan written.",
+    ]
+    saved = tmp_path.resolve() / PLANNER_INIT_FILE
+    assert json.loads(saved.read_text(encoding="utf-8")) == FACTS
+    assert result.session_init == FACTS

@@ -4,8 +4,9 @@ plan.json that load_plan accepts."""
 
 import asyncio
 import hashlib
+import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -14,6 +15,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TextBlock,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from harness.config import MODEL_IDS
 from harness.models import Usage
 from harness.plan import PlanError, load_plan
-from harness.worker import WORKER_ENV, usage_from_result
+from harness.worker import WORKER_ENV, session_init_facts, usage_from_result
 
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
 
@@ -63,6 +65,37 @@ FIX_PROMPT = (
     "Fix the plan and write it again to the same path."
 )
 
+PLANNER_INIT_FILE = Path(".harness") / "planner" / "session_init.json"
+
+
+def _names(value: Any) -> str:
+    """Comma-separated names of a list (an item's "name" if it is a dict that has one,
+    else str(item)); "none" if value is not a non-empty list."""
+    if not isinstance(value, list) or not value:
+        return "none"
+    return ", ".join(
+        str(item["name"]) if isinstance(item, dict) and "name" in item else str(item)
+        for item in value
+    )
+
+
+def format_session_init(facts: Mapping[str, Any]) -> str:
+    """Four lines for the terminal, e.g.
+    Planner session: model=<model id> apiKeySource=none permissionMode=acceptEdits
+      skills: plan-project, plan-stage
+      tools: Read, Write
+      mcp_servers: none"""
+    return "\n".join(
+        [
+            f"Planner session: model={facts.get('model')} "
+            f"apiKeySource={facts.get('apiKeySource')} "
+            f"permissionMode={facts.get('permissionMode')}",
+            f"  skills: {_names(facts.get('skills'))}",
+            f"  tools: {_names(facts.get('tools'))}",
+            f"  mcp_servers: {_names(facts.get('mcp_servers'))}",
+        ]
+    )
+
 
 class PlannerError(RuntimeError):
     """The planner stopped without a valid plan. The message says why."""
@@ -77,6 +110,7 @@ class PlannerTurn(BaseModel):
     text: str = ""
     usage: Usage = Field(default_factory=Usage)
     error: str | None = None
+    session_init: dict[str, Any] | None = None
 
 
 class PlanResult(BaseModel):
@@ -88,6 +122,7 @@ class PlanResult(BaseModel):
     plan_path: Path
     usage: Usage = Field(default_factory=Usage)
     rounds: int = 0
+    session_init: dict[str, Any] | None = None
 
 
 @runtime_checkable
@@ -182,6 +217,7 @@ class SdkPlannerSession:
         result_msg: ResultMessage | None = None
         last_text = ""
         error: str | None = None
+        session_init: dict[str, Any] | None = None
         try:
             await self._client.query(text)
             async for message in self._client.receive_response():
@@ -192,6 +228,9 @@ class SdkPlannerSession:
                         )
                         if joined.strip():
                             last_text = joined
+                elif isinstance(message, SystemMessage):
+                    if session_init is None:
+                        session_init = session_init_facts(message)
                 elif isinstance(message, ResultMessage):
                     result_msg = message
         except Exception as err:
@@ -218,7 +257,7 @@ class SdkPlannerSession:
                 if isinstance(errors, list) and errors:
                     error += ": " + "; ".join(str(e) for e in errors)
 
-        return PlannerTurn(text=reply, usage=self._usage, error=error)
+        return PlannerTurn(text=reply, usage=self._usage, error=error, session_init=session_init)
 
     async def close(self) -> None:
         """If connected: await self._client.disconnect() (Exception ignored), then
@@ -275,14 +314,24 @@ async def run_planner(
     plan_path = stage_dir / "plan.json"
     rounds = 0
     usage = Usage()
+    session_init: dict[str, Any] | None = None
 
     async def turn(msg: str) -> None:
-        nonlocal rounds, usage
+        nonlocal rounds, usage, session_init
         rounds += 1
         if rounds > max_rounds:
             raise PlannerError(f"no valid plan after {max_rounds} rounds")
         t = await session.send(msg)
         usage = t.usage
+        if t.session_init is not None and session_init is None:
+            session_init = t.session_init
+            say(format_session_init(session_init))
+            init_path = repo / PLANNER_INIT_FILE
+            try:
+                init_path.parent.mkdir(parents=True, exist_ok=True)
+                init_path.write_text(json.dumps(session_init, indent=2) + "\n", encoding="utf-8")
+            except OSError:
+                pass
         if t.text.strip():
             say(t.text)
         if t.error:
@@ -326,7 +375,11 @@ async def run_planner(
                     msg = FIX_PROMPT.format(plan_path=plan_path, error=err)
                     continue
                 return PlanResult(
-                    project_plan=project_plan, plan_path=plan_path, usage=usage, rounds=rounds
+                    project_plan=project_plan,
+                    plan_path=plan_path,
+                    usage=usage,
+                    rounds=rounds,
+                    session_init=session_init,
                 )
             msg = await answer()
     finally:
