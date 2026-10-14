@@ -15,6 +15,9 @@ from harness.state import RunState, run_dir, save_state
 PLAN_PATH = "plans/plan.json"
 STAGE = "UI fixture stage"
 FAIL_FEEDBACK = "FAILED: uv run pytest -q (exit 1)"
+RATE_LIMIT_RESETS_AT = 1792000800  # 2026-10-14T18:00:00 UTC
+RATE_LIMIT_REASON = "rate limited; resets at 2026-10-14T18:00:00+00:00"
+CAP_REASON = "estimated cost $1.20 passed the $1.00 cap"
 
 _EventTuple = tuple[str, str | None, dict[str, Any]]
 
@@ -299,6 +302,101 @@ def write_running_run(repo: Path, run_id: str = "running1") -> str:
         ("attempt_started", "b", {"attempt": 1, "tier": "haiku"}),
     ]
     return _write(repo, run_id, False, tasks, events)
+
+
+def write_paused_run(repo: Path, run_id: str = "paused1") -> str:
+    """Write a finished run stopped by a rate limit: a done, b paused (with three
+    worker_progress events before the pause), c pending. Returns run_id. 21 events."""
+    a = _task("a", "done", "haiku", _A_DONE)
+    tasks = {
+        "a": a,
+        "b": TaskState(
+            task_id="b",
+            status="paused",
+            attempts=0,
+            tier_used="haiku",
+            usage=Usage(input_tokens=50, output_tokens=5, cost_usd=0.005),
+            error=RATE_LIMIT_REASON,
+        ),
+        "c": TaskState(task_id="c"),
+    }
+    progress = [
+        (
+            "worker_progress",
+            "b",
+            {"attempt": 1, "tier": "haiku", "tool": tool, "detail": detail},
+        )
+        for tool, detail in (
+            ("Read", "src/b.py"),
+            ("Edit", "src/b.py"),
+            ("Bash", "uv run pytest -q"),
+        )
+    ]
+    events: list[_EventTuple] = [
+        _run_started(),
+        *_done_block(repo, run_id, 1, "a", "haiku", a),
+        _wave_started(2, "b"),
+        _task_started(repo, run_id, "b", "haiku"),
+        ("attempt_started", "b", {"attempt": 1, "tier": "haiku"}),
+        *progress,
+        (
+            "task_paused",
+            "b",
+            {
+                "attempt": 1,
+                "tier": "haiku",
+                "reason": RATE_LIMIT_REASON,
+                "resets_at": RATE_LIMIT_RESETS_AT,
+            },
+        ),
+        _wave_finished(2, "b", "paused"),
+        ("run_stopping", None, {"reason": RATE_LIMIT_REASON}),
+        (
+            "run_finished",
+            None,
+            {
+                "done": 1,
+                "failed": 0,
+                "blocked": 0,
+                "paused": 1,
+                "stopped_reason": RATE_LIMIT_REASON,
+                "cost_usd": 0.015,
+            },
+        ),
+    ]
+    return _write(repo, run_id, True, tasks, events)
+
+
+def write_capped_run(repo: Path, run_id: str = "capped1") -> str:
+    """Write a finished run stopped by the --max-cost cap after a: a done ($1.20), b and c
+    pending. Returns run_id. 14 events."""
+    a = _task("a", "done", "haiku", [_record(1, "haiku", True, 1000, 100, 1.2)])
+    tasks = {"a": a, "b": TaskState(task_id="b"), "c": TaskState(task_id="c")}
+    done, merged = _done(run_id, "a", a)
+    events: list[_EventTuple] = [
+        _run_started(),
+        _wave_started(1, "a"),
+        _task_started(repo, run_id, "a", "haiku"),
+        *_attempts("a", a.history),
+        done,
+        ("budget_exceeded", None, {"cost_usd": 1.2, "max_cost_usd": 1.0}),
+        merged,
+        _wave_finished(1, "a", "done"),
+        ("run_stopping", None, {"reason": CAP_REASON}),
+        (
+            "run_finished",
+            None,
+            {
+                "done": 1,
+                "failed": 0,
+                "blocked": 0,
+                "paused": 0,
+                "stopped_reason": CAP_REASON,
+                "cost_usd": 1.2,
+            },
+        ),
+    ]
+    return _write(repo, run_id, True, tasks, events)
 
 
 def append_event(

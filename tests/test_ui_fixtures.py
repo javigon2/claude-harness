@@ -1,12 +1,18 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from ui_fixtures import (
+    CAP_REASON,
     PLAN_PATH,
+    RATE_LIMIT_REASON,
+    RATE_LIMIT_RESETS_AT,
     STAGE,
     append_event,
     write_blocked_run,
+    write_capped_run,
     write_happy_run,
+    write_paused_run,
     write_plan,
     write_running_run,
 )
@@ -171,3 +177,96 @@ def test_append_event_creates_log(tmp_path: Path) -> None:
     append_event(tmp_path, "fresh", "note")
     path = run_dir(tmp_path, "fresh") / EVENTS_FILE
     assert [e.type for e in read_events(path)] == ["note"]
+
+
+PAUSED_TYPES = (
+    "run_started wave_started task_started attempt_started session_init worker_finished "
+    "verify_started verify_finished task_done merged wave_finished wave_started "
+    "task_started attempt_started worker_progress worker_progress worker_progress "
+    "task_paused wave_finished run_stopping run_finished"
+).split()
+CAPPED_TYPES = (
+    "run_started wave_started task_started attempt_started session_init worker_finished "
+    "verify_started verify_finished task_done budget_exceeded merged wave_finished "
+    "run_stopping run_finished"
+).split()
+
+
+def test_paused_run(tmp_path: Path) -> None:
+    assert write_paused_run(tmp_path) == "paused1"
+    assert write_paused_run(tmp_path, "p2") == "p2"
+    assert run_dir(tmp_path, "p2").is_dir()
+    directory = run_dir(tmp_path, "paused1")
+    state = load_state(directory)
+    assert state.finished is True
+    a, b, c = (state.tasks[t] for t in "abc")
+    assert (a.status, a.attempts, a.tier_used, a.error) == ("done", 1, "haiku", None)
+    assert (b.status, b.attempts, b.tier_used, b.error) == (
+        "paused",
+        0,
+        "haiku",
+        RATE_LIMIT_REASON,
+    )
+    assert (c.status, c.attempts, c.tier_used) == ("pending", 0, None)
+    events = read_events(directory / EVENTS_FILE)
+    assert [e.type for e in events] == PAUSED_TYPES
+    assert len(events) == 21
+    progress = [e.payload for e in events if e.type == "worker_progress"]
+    assert progress == [
+        {"attempt": 1, "tier": "haiku", "tool": "Read", "detail": "src/b.py"},
+        {"attempt": 1, "tier": "haiku", "tool": "Edit", "detail": "src/b.py"},
+        {"attempt": 1, "tier": "haiku", "tool": "Bash", "detail": "uv run pytest -q"},
+    ]
+    paused = next(e for e in events if e.type == "task_paused")
+    assert paused.task_id == "b"
+    assert paused.payload == {
+        "attempt": 1,
+        "tier": "haiku",
+        "reason": RATE_LIMIT_REASON,
+        "resets_at": RATE_LIMIT_RESETS_AT,
+    }
+    stopping = next(e for e in events if e.type == "run_stopping")
+    assert stopping.payload == {"reason": RATE_LIMIT_REASON}
+    assert events[-1].payload == {
+        "done": 1,
+        "failed": 0,
+        "blocked": 0,
+        "paused": 1,
+        "stopped_reason": RATE_LIMIT_REASON,
+        "cost_usd": 0.015,
+    }
+
+
+def test_rate_limit_constants() -> None:
+    iso = datetime.fromtimestamp(RATE_LIMIT_RESETS_AT, UTC).isoformat()
+    assert RATE_LIMIT_REASON == f"rate limited; resets at {iso}"
+
+
+def test_capped_run(tmp_path: Path) -> None:
+    assert write_capped_run(tmp_path) == "capped1"
+    assert write_capped_run(tmp_path, "c2") == "c2"
+    assert run_dir(tmp_path, "c2").is_dir()
+    directory = run_dir(tmp_path, "capped1")
+    state = load_state(directory)
+    assert state.finished is True
+    a, b, c = (state.tasks[t] for t in "abc")
+    assert (a.status, a.attempts, a.tier_used, a.error) == ("done", 1, "haiku", None)
+    assert a.usage.cost_usd == pytest.approx(1.2)
+    assert (b.status, b.attempts) == ("pending", 0)
+    assert (c.status, c.attempts) == ("pending", 0)
+    events = read_events(directory / EVENTS_FILE)
+    assert [e.type for e in events] == CAPPED_TYPES
+    assert len(events) == 14
+    exceeded = next(e for e in events if e.type == "budget_exceeded")
+    assert exceeded.task_id is None
+    assert exceeded.payload == {"cost_usd": 1.2, "max_cost_usd": 1.0}
+    stopping = next(e for e in events if e.type == "run_stopping")
+    assert stopping.payload == {"reason": CAP_REASON}
+    assert events[-1].payload == {
+        "done": 1,
+        "failed": 0,
+        "blocked": 0,
+        "paused": 0,
+        "stopped_reason": CAP_REASON,
+        "cost_usd": 1.2,
+    }
