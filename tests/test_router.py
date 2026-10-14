@@ -322,3 +322,61 @@ async def test_monkeypatched_verify_drives_the_outcome(env: _Env, monkeypatch):
     assert calls == ["t1"]
     assert state.status == "failed"
     assert state.history[0].feedback == format_feedback(failing)
+
+
+# --- session_init events ---------------------------------------------------------------
+
+FACTS: dict[str, Any] = {
+    "model": "m",
+    "tools": ["Read"],
+    "skills": [],
+    "mcp_servers": [],
+    "permissionMode": "acceptEdits",
+    "apiKeySource": "none",
+}
+
+
+async def test_session_init_event_for_worker(env: _Env):
+    def step(order, tier, cwd, feedback) -> WorkerResult:
+        (cwd / "done.txt").write_text("ok\n")
+        return fake_result("done").model_copy(update={"session_init": FACTS})
+
+    worker = FakeWorker({"t1": [step]})
+    state = await env.router(worker).route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "done"
+    assert env.types() == [
+        "attempt_started",
+        "session_init",
+        "worker_finished",
+        "verify_started",
+        "verify_finished",
+        "task_done",
+    ]
+    assert env.events("session_init") == [
+        {"role": "worker", "attempt": 1, "tier": "haiku", **FACTS}
+    ]
+
+
+async def test_session_init_event_for_reviewer(env: _Env):
+    worker = FakeWorker({"t1": [_writes()]})
+    review = fake_review("pass").model_copy(update={"session_init": FACTS})
+    reviewer = FakeReviewer(default=review)
+    state = await env.router(worker, reviewer=reviewer, review_tier="opus").route(
+        _order(), env.repo, TaskState(task_id="t1")
+    )
+    assert state.status == "done"
+    assert env.events("session_init") == [
+        {"role": "reviewer", "attempt": 1, "tier": "opus", **FACTS}
+    ]
+    types = env.types()
+    i = types.index("session_init")
+    assert types.index("verify_started") < i < types.index("verify_finished")
+
+
+async def test_no_session_init_event_without_init(env: _Env):
+    worker = FakeWorker({"t1": [fake_result("done"), _writes()]})
+    state = await env.router(worker).route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "done"
+    assert state.attempts == 2
+    assert "escalated" in env.types()
+    assert "session_init" not in env.types()

@@ -101,6 +101,11 @@ class Router:
                 result = await self.worker.run(order, tier, cwd, feedback)
             except Exception as err:
                 result = WorkerResult(status="error", error=f"{type(err).__name__}: {err}"[:2000])
+            if result.session_init is not None:
+                await emit(
+                    "session_init",
+                    {"role": "worker", "attempt": n, "tier": tier, **result.session_init},
+                )
             await emit(
                 "worker_finished",
                 {
@@ -132,6 +137,16 @@ class Router:
             )
             review_usage = vr.review.usage if vr.review is not None else Usage()
             fb = format_feedback(vr)
+            if vr.review is not None and vr.review.session_init is not None:
+                await emit(
+                    "session_init",
+                    {
+                        "role": "reviewer",
+                        "attempt": n,
+                        "tier": self.review_tier,
+                        **vr.review.session_init,
+                    },
+                )
             await emit(
                 "verify_finished",
                 {
