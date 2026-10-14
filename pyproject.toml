@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Plan-and-execute harness for Claude agents"
 requires-python = ">=3.12"
 dependencies = [
+    "claude-agent-sdk>=0.2.166",
     "pydantic>=2",
     "typer>=0.12",
 ]

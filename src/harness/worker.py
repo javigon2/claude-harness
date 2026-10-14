@@ -3,19 +3,35 @@
 import inspect
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    query,
+)
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from harness.config import Tier
+from harness.config import MODEL_IDS, Tier
 from harness.models import Usage, WorkOrder
 
 WorkerStatus = Literal["done", "failed", "unknown", "error"]
 
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "worker_system.md"
+
+WORKER_TOOLS: tuple[str, ...] = ("Read", "Edit", "Write", "Glob", "Grep", "Bash")
+
+WORKER_ENV: dict[str, str] = {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+}
+
+QueryFn = Callable[..., AsyncIterator[Any]]
 
 _JSON_BLOCK = re.compile(r"^```json[ \t]*\n(.*?)\n```[ \t]*$", re.DOTALL | re.MULTILINE)
 
@@ -144,6 +160,131 @@ def build_prompt(order: WorkOrder, cwd: Path, retry_feedback: str | None = None)
     if retry_feedback is not None and retry_feedback.strip():
         parts += ["## Retry feedback", retry_feedback.strip()]
     return "\n\n".join(parts)
+
+
+def _int(value: Any) -> int:
+    return int(value) if value is not None else 0
+
+
+def usage_from_result(message: ResultMessage | None) -> Usage:
+    """Token counts and cost of one session, from its ResultMessage. Rules in the order's
+    `decision: usage` context item. Usage() (all zeros) if message is None."""
+    if message is None:
+        return Usage()
+    model_usage = message.model_usage
+    has_model_usage = isinstance(model_usage, dict) and bool(model_usage)
+    if has_model_usage:
+        values = list(model_usage.values())
+        input_tokens = sum(_int(v.get("inputTokens")) for v in values)
+        output_tokens = sum(_int(v.get("outputTokens")) for v in values)
+        cache_read = sum(_int(v.get("cacheReadInputTokens")) for v in values)
+        cache_creation = sum(_int(v.get("cacheCreationInputTokens")) for v in values)
+    else:
+        raw = message.usage or {}
+        input_tokens = _int(raw.get("input_tokens"))
+        output_tokens = _int(raw.get("output_tokens"))
+        cache_read = _int(raw.get("cache_read_input_tokens"))
+        cache_creation = _int(raw.get("cache_creation_input_tokens"))
+    if message.total_cost_usd is not None:
+        cost = float(message.total_cost_usd)
+    elif has_model_usage:
+        cost = sum(float(v.get("costUSD") or 0.0) for v in model_usage.values())
+    else:
+        cost = 0.0
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_creation,
+        cost_usd=cost,
+    )
+
+
+class SdkWorker:
+    """A Worker backed by the Claude Agent SDK: one query() session per attempt."""
+
+    def __init__(self, shared_context: str = "", query_fn: QueryFn | None = None) -> None:
+        """self.system_prompt = load_system_prompt(shared_context), computed once here.
+        self._query = query_fn or query (tests pass a fake with the same keyword call shape:
+        query_fn(prompt=<str>, options=<ClaudeAgentOptions>))."""
+        self.system_prompt = load_system_prompt(shared_context)
+        self._query: QueryFn = query_fn or query
+
+    def options(self, order: WorkOrder, tier: Tier, cwd: Path) -> ClaudeAgentOptions:
+        """The exact ClaudeAgentOptions for one attempt; field values in the order's
+        `decision: SDK options` context item."""
+        return ClaudeAgentOptions(
+            model=MODEL_IDS[tier],
+            system_prompt=self.system_prompt,
+            tools=list(WORKER_TOOLS),
+            allowed_tools=list(WORKER_TOOLS),
+            permission_mode="acceptEdits",
+            cwd=str(Path(cwd).resolve()),
+            max_turns=order.budget.max_turns,
+            setting_sources=[],
+            strict_mcp_config=True,
+            verbatim_prompts=True,
+            env=dict(WORKER_ENV),
+        )
+
+    async def run(
+        self, order: WorkOrder, tier: Tier, cwd: Path, retry_feedback: str | None = None
+    ) -> WorkerResult:
+        """Run one session and turn it into a WorkerResult; algorithm in the order's
+        `decision: run algorithm` context item. Never raises for SDK or model failures
+        (catches Exception, not BaseException, so cancellation still propagates)."""
+        prompt = build_prompt(order, cwd, retry_feedback)
+        options = self.options(order, tier, cwd)
+        result_msg: ResultMessage | None = None
+        last_text = ""
+        error: str | None = None
+        try:
+            async for message in self._query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                    text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+                    if text.strip():
+                        last_text = text
+                elif isinstance(message, ResultMessage):
+                    result_msg = message
+        except Exception as err:  # not BaseException: cancellation must propagate
+            error = f"{type(err).__name__}: {err}"[:2000]
+
+        if (
+            result_msg is not None
+            and isinstance(result_msg.result, str)
+            and result_msg.result.strip()
+        ):
+            final_text = result_msg.result
+        else:
+            final_text = last_text
+        report = parse_report(final_text)
+
+        status: WorkerStatus
+        if error is not None:
+            status = "error"
+        elif result_msg is None:
+            status = "error"
+            error = "session ended without a result message"
+        elif result_msg.is_error:
+            status = "error"
+            error = f"result {result_msg.subtype}"
+            if isinstance(result_msg.errors, list) and result_msg.errors:
+                error += ": " + "; ".join(str(e) for e in result_msg.errors)
+        elif report is None:
+            status = "unknown"
+        else:
+            status = report.status
+
+        result = WorkerResult(
+            status=status,
+            usage=usage_from_result(result_msg),
+            num_turns=result_msg.num_turns if result_msg else 0,
+            duration_ms=result_msg.duration_ms if result_msg else 0,
+            session_id=result_msg.session_id if result_msg else None,
+            final_text=final_text,
+            error=error,
+        )
+        return apply_report(result, report)
 
 
 FakeStep = (
