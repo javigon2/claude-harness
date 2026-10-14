@@ -111,3 +111,52 @@ def test_cleanup(tmp_path: Path):
     assert _out(repo, "branch", "--list", "harness/r1/*") == ""
     listing = _out(repo, "worktree", "list", "--porcelain")
     assert listing.count("worktree ") == 1
+
+
+def test_discard_after_create(tmp_path: Path):
+    repo = _repo(tmp_path)
+    mgr = WorktreeManager(repo, "r1")
+    wt = mgr.create("t1")
+    mgr.discard("t1")
+    assert not wt.exists()
+    assert _out(repo, "branch", "--list", "harness/r1/t1") == ""
+    listing = _out(repo, "worktree", "list", "--porcelain")
+    assert listing.count("worktree ") == 1
+
+
+def test_discard_with_uncommitted_changes(tmp_path: Path):
+    repo = _repo(tmp_path)
+    mgr = WorktreeManager(repo, "r1")
+    wt = mgr.create("t1")
+    (wt / "a.txt").write_text("a\n")
+    (wt / "README.md").write_text("changed\n")
+    mgr.discard("t1")
+    assert not wt.exists()
+    assert _out(repo, "branch", "--list", "harness/r1/t1") == ""
+
+
+def test_discard_missing_task_does_not_raise(tmp_path: Path):
+    repo = _repo(tmp_path)
+    mgr = WorktreeManager(repo, "r1")
+    mgr.discard("never")
+    assert not mgr.path("never").exists()
+
+
+def test_create_after_discard(tmp_path: Path):
+    repo = _repo(tmp_path)
+    mgr = WorktreeManager(repo, "r1")
+    mgr.create("t1")
+    mgr.discard("t1")
+    wt = mgr.create("t1")
+    assert wt.is_dir()
+    assert "harness/r1/t1" in _out(repo, "branch", "--list", "harness/r1/t1")
+
+
+def test_discard_plain_directory(tmp_path: Path):
+    repo = _repo(tmp_path)
+    mgr = WorktreeManager(repo, "r1")
+    path = mgr.path("t1")
+    path.mkdir(parents=True)
+    (path / "junk.txt").write_text("junk\n")
+    mgr.discard("t1")
+    assert not path.exists()

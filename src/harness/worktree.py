@@ -1,5 +1,6 @@
 """Git worktrees for parallel tasks: create, commit, merge back, clean up."""
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Literal
@@ -94,6 +95,16 @@ class WorktreeManager:
             return "conflict"
         _check(_git("merge", "--ff-only", self.branch(task_id), cwd=self.repo))
         return "merged"
+
+    def discard(self, task_id: str) -> None:
+        """Remove this task's worktree and branch if they exist, so the task can start over.
+        Every git failure here is ignored (the worktree or branch may not exist)."""
+        path = self.path(task_id)
+        _git("worktree", "remove", "--force", str(path), cwd=self.repo)
+        _git("branch", "-D", self.branch(task_id), cwd=self.repo)
+        _git("worktree", "prune", cwd=self.repo)
+        if path.exists():
+            shutil.rmtree(path)
 
     def cleanup(self) -> None:
         """git worktree remove --force every worktree under <repo>/.harness/worktrees (from
