@@ -4,17 +4,25 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 
 from harness.config import MODEL_IDS, Tier
 from harness.models import Budget, ContextItem, Usage, WorkOrder
 from harness.worker import (
+    PROGRESS_DETAIL_MAX,
     SESSION_INIT_KEYS,
     WORKER_ENV,
     WORKER_TOOLS,
     SdkWorker,
     Worker,
     build_prompt,
+    describe_tool,
     load_system_prompt,
     session_init_facts,
 )
@@ -324,3 +332,97 @@ async def test_run_exception_after_init_keeps_facts(tmp_path: Path) -> None:
     result = await SdkWorker(query_fn=fake).run(make_order(), "haiku", tmp_path)
     assert result.status == "error"
     assert result.session_init == INIT_FACTS
+
+
+# --- describe_tool ----------------------------------------------------------------------
+
+
+def test_describe_tool_relative_path(tmp_path: Path) -> None:
+    got = describe_tool("Edit", {"file_path": str(tmp_path.resolve() / "src" / "x.py")}, tmp_path)
+    assert got == {"tool": "Edit", "detail": "src/x.py"}
+
+
+def test_describe_tool_outside_path_kept(tmp_path: Path) -> None:
+    got = describe_tool("Read", {"file_path": "/etc/hosts"}, tmp_path)
+    assert got == {"tool": "Read", "detail": "/etc/hosts"}
+
+
+def test_describe_tool_pattern(tmp_path: Path) -> None:
+    assert describe_tool("Grep", {"pattern": "def f"}, tmp_path)["detail"] == "def f"
+    assert describe_tool("Glob", {"pattern": "**/*.py"}, tmp_path)["detail"] == "**/*.py"
+
+
+def test_describe_tool_bash_strips_cd(tmp_path: Path) -> None:
+    got = describe_tool("Bash", {"command": "cd /a/b && uv run pytest -q\necho hi"}, tmp_path)
+    assert got == {"tool": "Bash", "detail": "uv run pytest -q"}
+
+
+def test_describe_tool_truncates(tmp_path: Path) -> None:
+    got = describe_tool("Grep", {"pattern": "x" * 200}, tmp_path)["detail"]
+    assert len(got) == PROGRESS_DETAIL_MAX
+    assert got.endswith("…")
+
+
+def test_describe_tool_unknown_and_missing_key(tmp_path: Path) -> None:
+    assert describe_tool("WebFetch", {"url": "u"}, tmp_path) == {"tool": "WebFetch", "detail": ""}
+    assert describe_tool("Edit", {}, tmp_path)["detail"] == ""
+    assert describe_tool("Bash", {"command": 5}, tmp_path)["detail"] == ""
+
+
+# --- progress ---------------------------------------------------------------------------
+
+
+def tool_msg(name: str, **tool_input: Any) -> AssistantMessage:
+    return AssistantMessage(content=[ToolUseBlock(id="t", name=name, input=tool_input)], model="m")
+
+
+class _Recorder:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.fail = fail
+
+    async def __call__(self, p: dict[str, Any]) -> None:
+        self.calls.append(p)
+        if self.fail:
+            raise RuntimeError("boom")
+
+
+async def test_progress_every_block_with_zero_interval(tmp_path: Path) -> None:
+    fake, _ = scripted(
+        tool_msg("Edit", file_path="a.py"), tool_msg("Edit", file_path="b.py"), result_msg()
+    )
+    rec = _Recorder()
+    await SdkWorker(query_fn=fake, progress_interval_s=0).run(
+        make_order(), "haiku", tmp_path, progress=rec
+    )
+    assert [c["detail"] for c in rec.calls] == ["a.py", "b.py"]
+
+
+async def test_progress_throttled_by_interval_and_tool_change(tmp_path: Path) -> None:
+    fake, _ = scripted(
+        tool_msg("Edit", file_path="a.py"), tool_msg("Edit", file_path="b.py"), result_msg()
+    )
+    rec = _Recorder()
+    await SdkWorker(query_fn=fake, progress_interval_s=3600).run(
+        make_order(), "haiku", tmp_path, progress=rec
+    )
+    assert [c["tool"] for c in rec.calls] == ["Edit"]
+
+    fake, _ = scripted(
+        tool_msg("Edit", file_path="a.py"), tool_msg("Bash", command="ls"), result_msg()
+    )
+    rec = _Recorder()
+    await SdkWorker(query_fn=fake, progress_interval_s=3600).run(
+        make_order(), "haiku", tmp_path, progress=rec
+    )
+    assert [c["tool"] for c in rec.calls] == ["Edit", "Bash"]
+
+
+async def test_progress_exception_is_ignored(tmp_path: Path) -> None:
+    fake, _ = scripted(tool_msg("Edit", file_path="a.py"), result_msg())
+    rec = _Recorder(fail=True)
+    result = await SdkWorker(query_fn=fake, progress_interval_s=0).run(
+        make_order(), "haiku", tmp_path, progress=rec
+    )
+    assert result.status == "done"
+    assert len(rec.calls) == 1

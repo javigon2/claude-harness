@@ -343,3 +343,12 @@ def test_fake_result_fields() -> None:
     assert result.files_changed == ["a.py"]
     assert result.usage == Usage(input_tokens=10, output_tokens=20, cost_usd=0.5)
     assert result.cost_usd == 0.5
+
+
+async def test_fake_accepts_progress(tmp_path: Path) -> None:
+    async def never(p: dict) -> None:
+        raise AssertionError("FakeWorker must not report progress")
+
+    worker = FakeWorker(default=fake_result("done"))
+    result = await worker.run(make_order(), "haiku", tmp_path, progress=never)
+    assert result.status == "done"

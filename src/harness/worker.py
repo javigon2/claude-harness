@@ -3,6 +3,7 @@
 import inspect
 import json
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolUseBlock,
     query,
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -35,6 +37,9 @@ WORKER_ENV: dict[str, str] = {
 }
 
 QueryFn = Callable[..., AsyncIterator[Any]]
+ProgressFn = Callable[[dict[str, Any]], Awaitable[None]]
+
+PROGRESS_DETAIL_MAX = 80
 
 _JSON_BLOCK = re.compile(r"^```json[ \t]*\n(.*?)\n```[ \t]*$", re.DOTALL | re.MULTILINE)
 
@@ -58,6 +63,38 @@ def session_init_facts(message: Any) -> dict[str, Any] | None:
     if not isinstance(message.data, dict):
         return None
     return {key: message.data.get(key) for key in SESSION_INIT_KEYS}
+
+
+def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[str, str]:
+    """{"tool": name, "detail": <detail>} for one tool call. Detail: the file path (relative
+    to cwd when inside it) for Read/Edit/Write, the pattern for Glob/Grep, the first command
+    line (a leading `cd <dir> && ` removed) for Bash, "" for anything else or when the key is
+    missing or not a string; cut to PROGRESS_DETAIL_MAX characters with a trailing `…`.
+    Never raises."""
+    try:
+        detail = ""
+        if name in ("Read", "Edit", "Write"):
+            value = tool_input.get("file_path")
+            if isinstance(value, str):
+                detail = value
+                try:
+                    detail = str(Path(value).relative_to(Path(cwd).resolve()))
+                except ValueError:
+                    pass
+        elif name in ("Glob", "Grep"):
+            value = tool_input.get("pattern")
+            if isinstance(value, str):
+                detail = value
+        elif name == "Bash":
+            value = tool_input.get("command")
+            if isinstance(value, str):
+                lines = value.strip().splitlines()
+                detail = re.sub(r"^cd .*? && ", "", lines[0]) if lines else ""
+        if len(detail) > PROGRESS_DETAIL_MAX:
+            detail = detail[: PROGRESS_DETAIL_MAX - 1] + "…"
+        return {"tool": str(name), "detail": detail}
+    except Exception:
+        return {"tool": str(name), "detail": ""}
 
 
 class SelfReportedCommand(BaseModel):
@@ -110,10 +147,17 @@ class WorkerResult(BaseModel):
 @runtime_checkable
 class Worker(Protocol):
     async def run(
-        self, order: WorkOrder, tier: Tier, cwd: Path, retry_feedback: str | None = None
+        self,
+        order: WorkOrder,
+        tier: Tier,
+        cwd: Path,
+        retry_feedback: str | None = None,
+        *,
+        progress: ProgressFn | None = None,
     ) -> WorkerResult:
         """Run one attempt of `order` on `tier` in the worktree `cwd`. Model and SDK
-        failures come back as status "error", never as an exception."""
+        failures come back as status "error", never as an exception. `progress`, if given,
+        may be awaited zero or more times during the attempt."""
         ...
 
 
@@ -228,12 +272,18 @@ def usage_from_result(message: ResultMessage | None) -> Usage:
 class SdkWorker:
     """A Worker backed by the Claude Agent SDK: one query() session per attempt."""
 
-    def __init__(self, shared_context: str = "", query_fn: QueryFn | None = None) -> None:
+    def __init__(
+        self,
+        shared_context: str = "",
+        query_fn: QueryFn | None = None,
+        progress_interval_s: float = 2.0,
+    ) -> None:
         """self.system_prompt = load_system_prompt(shared_context), computed once here.
         self._query = query_fn or query (tests pass a fake with the same keyword call shape:
         query_fn(prompt=<str>, options=<ClaudeAgentOptions>))."""
         self.system_prompt = load_system_prompt(shared_context)
         self._query: QueryFn = query_fn or query
+        self.progress_interval_s = progress_interval_s
 
     def options(self, order: WorkOrder, tier: Tier, cwd: Path) -> ClaudeAgentOptions:
         """The exact ClaudeAgentOptions for one attempt; field values in the order's
@@ -254,7 +304,13 @@ class SdkWorker:
         )
 
     async def run(
-        self, order: WorkOrder, tier: Tier, cwd: Path, retry_feedback: str | None = None
+        self,
+        order: WorkOrder,
+        tier: Tier,
+        cwd: Path,
+        retry_feedback: str | None = None,
+        *,
+        progress: ProgressFn | None = None,
     ) -> WorkerResult:
         """Run one session and turn it into a WorkerResult; algorithm in the order's
         `decision: run algorithm` context item. Never raises for SDK or model failures
@@ -265,9 +321,22 @@ class SdkWorker:
         last_text = ""
         error: str | None = None
         session_init: dict[str, Any] | None = None
+        last_tool: str | None = None
+        last_report = 0.0
         try:
             async for message in self._query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                    if progress is not None:
+                        for b in message.content:
+                            if not isinstance(b, ToolUseBlock):
+                                continue
+                            now = time.monotonic()
+                            if b.name != last_tool or now - last_report >= self.progress_interval_s:
+                                last_tool, last_report = b.name, now
+                                try:
+                                    await progress(describe_tool(b.name, b.input, cwd))
+                                except Exception:  # a broken callback must not end the session
+                                    pass
                     text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
                     if text.strip():
                         last_text = text
@@ -366,7 +435,13 @@ class FakeWorker:
         return len(self._queues.get(order_id, []))
 
     async def run(
-        self, order: WorkOrder, tier: Tier, cwd: Path, retry_feedback: str | None = None
+        self,
+        order: WorkOrder,
+        tier: Tier,
+        cwd: Path,
+        retry_feedback: str | None = None,
+        *,
+        progress: ProgressFn | None = None,
     ) -> WorkerResult:
         """Append WorkerCall(order.id, tier, cwd, retry_feedback) to self.calls FIRST, then
         take the next step: pop the front of order.id's queue, or use `default` if the queue
@@ -376,6 +451,7 @@ class FakeWorker:
         - BaseException instance: raise it.
         - callable: call step(order, tier, cwd, retry_feedback); if the return value is
           awaitable, await it; return the WorkerResult.
+        `progress` is accepted and ignored.
         A `default` step is never consumed: it is reused for every call that needs it."""
         self.calls.append(WorkerCall(order.id, tier, cwd, retry_feedback))
         queue = self._queues.get(order.id)

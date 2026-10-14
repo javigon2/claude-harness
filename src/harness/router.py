@@ -97,8 +97,11 @@ class Router:
             await self._changed(state)
             await emit("attempt_started", {"attempt": n, "tier": tier})
 
+            async def report(p: dict, n: int = n, tier: Tier = tier) -> None:
+                await emit("worker_progress", {"attempt": n, "tier": tier, **p})
+
             try:
-                result = await self.worker.run(order, tier, cwd, feedback)
+                result = await self.worker.run(order, tier, cwd, feedback, progress=report)
             except Exception as err:
                 result = WorkerResult(status="error", error=f"{type(err).__name__}: {err}"[:2000])
             if result.session_init is not None:

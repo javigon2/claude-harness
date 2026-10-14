@@ -404,3 +404,24 @@ async def test_no_session_init_event_without_init(env: _Env):
     assert state.attempts == 2
     assert "escalated" in env.types()
     assert "session_init" not in env.types()
+
+
+async def test_worker_progress_event_between_started_and_finished(
+    env: _Env, tmp_path: Path
+) -> None:
+    class ReportingWorker:
+        async def run(self, order, tier, cwd, retry_feedback=None, *, progress=None):
+            await progress({"tool": "Edit", "detail": "a.py"})
+            (cwd / "done.txt").write_text("ok\n")
+            return fake_result("done")
+
+    state = await Router(ReportingWorker(), env.log, on_state=env.cb).route(
+        _order(), env.repo, TaskState(task_id="t1")
+    )
+    assert state.status == "done"
+    assert env.events("worker_progress") == [
+        {"attempt": 1, "tier": "haiku", "tool": "Edit", "detail": "a.py"}
+    ]
+    types = env.types()
+    assert types.index("attempt_started") < types.index("worker_progress")
+    assert types.index("worker_progress") < types.index("worker_finished")
