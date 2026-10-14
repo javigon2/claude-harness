@@ -53,6 +53,10 @@ yourself and record it as a `decision` item in the `context` of each order it af
      signatures or even the full file into its `context`), and the later order pastes
      the same text. Never let a later order depend on how a worker happened to write
      something.
+   - **Check literal code before pasting it.** Any code a worker must copy exactly
+     ("write exactly this") must already pass the order's linter and formatter. Write it
+     to a scratch copy and run the checker on it; a worker can't fix your typo without
+     breaking "write exactly this".
    - Make `steps` concrete: each names its file and says exactly what to add, including
      names, signatures, exact output strings, exit codes and error messages.
    - Use `out_of_scope` for the tempting extras: the neighbouring task, a refactor,

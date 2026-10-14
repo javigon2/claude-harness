@@ -1,0 +1,368 @@
+{
+  "stage": "Phase 1 foundation (T1.1-T1.4)",
+  "orders": [
+    {
+      "id": "scaffold",
+      "title": "Create the uv project, CLI stub and model config",
+      "goal": "The repo becomes an installable uv project: `uv run harness --help` lists the four commands, `uv run pytest` passes a smoke test, and ruff is configured. Model IDs live in one config module that later tasks import.",
+      "tier": "haiku",
+      "depends_on": [],
+      "files_owned": [
+        "pyproject.toml",
+        ".python-version",
+        ".gitignore",
+        "uv.lock",
+        "src/harness/__init__.py",
+        "src/harness/config.py",
+        "src/harness/cli.py",
+        "tests/test_smoke.py"
+      ],
+      "files_readonly": [],
+      "context": [
+        {
+          "label": "pyproject.toml (write exactly this)",
+          "content": "[project]\nname = \"harness\"\nversion = \"0.1.0\"\ndescription = \"Plan-and-execute harness for Claude agents\"\nrequires-python = \">=3.12\"\ndependencies = [\n    \"pydantic>=2\",\n    \"typer>=0.12\",\n]\n\n[project.scripts]\nharness = \"harness.cli:app\"\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"src/harness\"]\n\n[dependency-groups]\ndev = [\n    \"pytest>=8\",\n    \"pytest-asyncio>=0.23\",\n    \"ruff>=0.5\",\n]\n\n[tool.ruff]\nline-length = 100\ntarget-version = \"py312\"\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"B\", \"UP\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\nasyncio_mode = \"auto\"\n"
+        },
+        {
+          "label": ".python-version (write exactly this)",
+          "content": "3.12\n"
+        },
+        {
+          "label": ".gitignore (write exactly this)",
+          "content": ".venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.harness/\n"
+        },
+        {
+          "label": "src/harness/__init__.py (write exactly this)",
+          "content": "\"\"\"Agent harness.\"\"\"\n\n__version__ = \"0.1.0\"\n"
+        },
+        {
+          "label": "src/harness/config.py (write exactly this)",
+          "content": "\"\"\"Model IDs and the escalation ladder. The only place model IDs live.\"\"\"\n\nfrom typing import Literal\n\nTier = Literal[\"haiku\", \"sonnet\", \"opus\"]\n\nTIER_LADDER: tuple[Tier, ...] = (\"haiku\", \"sonnet\", \"opus\")\n\nMODEL_IDS: dict[Tier, str] = {\n    \"haiku\": \"claude-haiku-5-5\",\n    \"sonnet\": \"claude-sonnet-5-5\",\n    \"opus\": \"claude-opus-5-5\",\n}\n"
+        },
+        {
+          "label": "src/harness/cli.py (write exactly this)",
+          "content": "\"\"\"Command-line entry point: `harness <command>`.\"\"\"\n\nfrom pathlib import Path\n\nimport typer\n\napp = typer.Typer(help=\"Plan-and-execute harness for Claude agents.\", no_args_is_help=True)\n\n\ndef _not_implemented(name: str) -> None:\n    typer.echo(f\"harness {name}: not implemented yet\", err=True)\n    raise typer.Exit(code=1)\n\n\n@app.command()\ndef run(plan: Path) -> None:\n    \"\"\"Run a plan.\"\"\"\n    _not_implemented(\"run\")\n\n\n@app.command()\ndef status() -> None:\n    \"\"\"Show task states for the current run.\"\"\"\n    _not_implemented(\"status\")\n\n\n@app.command()\ndef report() -> None:\n    \"\"\"Show tokens and cost per task and per tier.\"\"\"\n    _not_implemented(\"report\")\n\n\n@app.command()\ndef validate(plan: Path) -> None:\n    \"\"\"Validate a plan file.\"\"\"\n    _not_implemented(\"validate\")\n"
+        },
+        {
+          "label": "tests/test_smoke.py (write exactly this)",
+          "content": "from typer.testing import CliRunner\n\nfrom harness.cli import app\nfrom harness.config import MODEL_IDS, TIER_LADDER\n\nrunner = CliRunner()\n\n\ndef test_help_lists_commands():\n    result = runner.invoke(app, [\"--help\"])\n    assert result.exit_code == 0\n    for name in (\"run\", \"status\", \"report\", \"validate\"):\n        assert name in result.output\n\n\ndef test_every_tier_has_a_model():\n    assert TIER_LADDER == (\"haiku\", \"sonnet\", \"opus\")\n    assert set(MODEL_IDS) == set(TIER_LADDER)\n"
+        },
+        {
+          "label": "decision",
+          "content": "The repo already contains PLAN.md, docs/ and .claude/; leave them alone. There is no Python code yet. uv downloads Python 3.12 itself if it is missing. `uv sync` installs the dev group (pytest, pytest-asyncio, ruff) by default and writes uv.lock, which is committed."
+        }
+      ],
+      "steps": [
+        "Create pyproject.toml, .python-version and .gitignore with the exact contents given in context.",
+        "Create src/harness/__init__.py, src/harness/config.py and src/harness/cli.py with the exact contents given in context.",
+        "Create tests/test_smoke.py with the exact contents given in context.",
+        "Run `uv sync` to create the virtualenv and uv.lock.",
+        "Run `uv run ruff format` on the files you changed, then run every acceptance command and fix any failure."
+      ],
+      "constraints": [
+        "File contents must match the context exactly; do not add commands, options or dependencies.",
+        "Do not create tests/__init__.py or a conftest.py."
+      ],
+      "acceptance": [
+        "uv sync",
+        "uv run harness --help",
+        "uv run pytest -q",
+        "uv run ruff check .",
+        "uv run ruff format --check ."
+      ],
+      "budget": {
+        "max_turns": 20,
+        "max_attempts": 3
+      },
+      "out_of_scope": [
+        "Implementing any command (they stay stubs; later orders fill them in).",
+        "Adding claude-agent-sdk (the worker task adds it later).",
+        "The `events` command (order `events`)."
+      ]
+    },
+    {
+      "id": "models",
+      "title": "Add pydantic models for orders, plans, task state and events",
+      "goal": "src/harness/models.py defines WorkOrder, Plan, TaskState, Usage and Event exactly as specified, so the plan loader, event log and runner share one set of types. Bad orders (missing or unknown fields, empty acceptance or files_owned, bad ids) are rejected at parse time.",
+      "tier": "haiku",
+      "depends_on": [
+        "scaffold"
+      ],
+      "files_owned": [
+        "src/harness/models.py",
+        "tests/test_models.py"
+      ],
+      "files_readonly": [
+        "src/harness/config.py",
+        "docs/work_order.md"
+      ],
+      "context": [
+        {
+          "label": "src/harness/models.py (write this; replace the `...` in _normalize_id as described in the steps)",
+          "content": "\"\"\"Pydantic models shared by the plan loader, runner and event log.\"\"\"\n\nfrom datetime import UTC, datetime\nfrom typing import Any, Literal\n\nfrom pydantic import BaseModel, ConfigDict, Field, field_validator\n\nfrom harness.config import Tier\n\nTaskStatus = Literal[\"pending\", \"running\", \"verifying\", \"done\", \"failed\", \"blocked\"]\n\n\nclass _Strict(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n\nclass ContextItem(_Strict):\n    label: str\n    content: str\n\n\nclass Budget(_Strict):\n    max_turns: int = Field(ge=1)\n    max_attempts: int = Field(ge=1)\n\n\nclass WorkOrder(_Strict):\n    id: str\n    title: str\n    goal: str\n    tier: Tier\n    depends_on: list[str]\n    files_owned: list[str] = Field(min_length=1)\n    files_readonly: list[str]\n    context: list[ContextItem]\n    steps: list[str]\n    constraints: list[str]\n    acceptance: list[str] = Field(min_length=1)\n    budget: Budget\n    out_of_scope: list[str]\n\n    @field_validator(\"id\")\n    @classmethod\n    def _normalize_id(cls, value: str) -> str:\n        ...\n\n\nclass Plan(_Strict):\n    stage: str\n    orders: list[WorkOrder]\n\n\nclass Usage(_Strict):\n    input_tokens: int = 0\n    output_tokens: int = 0\n    cache_read_tokens: int = 0\n    cache_creation_tokens: int = 0\n    cost_usd: float = 0.0\n\n\nclass TaskState(_Strict):\n    task_id: str\n    status: TaskStatus = \"pending\"\n    attempts: int = 0\n    tier_used: Tier | None = None\n    usage: Usage = Field(default_factory=Usage)\n\n\nclass Event(_Strict):\n    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))\n    run_id: str\n    task_id: str | None = None\n    type: str\n    payload: dict[str, Any] = Field(default_factory=dict)\n"
+        },
+        {
+          "label": "src/harness/config.py (whole file, already exists)",
+          "content": "\"\"\"Model IDs and the escalation ladder. The only place model IDs live.\"\"\"\n\nfrom typing import Literal\n\nTier = Literal[\"haiku\", \"sonnet\", \"opus\"]\n\nTIER_LADDER: tuple[Tier, ...] = (\"haiku\", \"sonnet\", \"opus\")\n\nMODEL_IDS: dict[Tier, str] = {\n    \"haiku\": \"claude-haiku-5-5\",\n    \"sonnet\": \"claude-sonnet-5-5\",\n    \"opus\": \"claude-opus-5-5\",\n}\n"
+        },
+        {
+          "label": "tests/test_smoke.py (test style to follow)",
+          "content": "from typer.testing import CliRunner\n\nfrom harness.cli import app\nfrom harness.config import MODEL_IDS, TIER_LADDER\n\nrunner = CliRunner()\n\n\ndef test_help_lists_commands():\n    result = runner.invoke(app, [\"--help\"])\n    assert result.exit_code == 0\n    for name in (\"run\", \"status\", \"report\", \"validate\"):\n        assert name in result.output\n\n\ndef test_every_tier_has_a_model():\n    assert TIER_LADDER == (\"haiku\", \"sonnet\", \"opus\")\n    assert set(MODEL_IDS) == set(TIER_LADDER)\n"
+        },
+        {
+          "label": "pyproject.toml [tool.ruff] and [tool.pytest.ini_options]",
+          "content": "[tool.ruff]\nline-length = 100\ntarget-version = \"py312\"\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"B\", \"UP\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\nasyncio_mode = \"auto\"\n"
+        },
+        {
+          "label": "decision",
+          "content": "All WorkOrder fields are required (no defaults); empty lists are written as []. extra=\"forbid\" so unknown fields are errors. An id is lowercased first, then must match ^[a-z0-9-]+$."
+        }
+      ],
+      "steps": [
+        "Create src/harness/models.py with the exact code in context.",
+        "Implement WorkOrder._normalize_id: lowercase the value; if it does not fully match ^[a-z0-9-]+$ raise ValueError(\"id must match [a-z0-9-]+\"); otherwise return the lowercased value. Import re at the top.",
+        "Create tests/test_models.py with a helper `_order(**overrides) -> dict` returning a valid order dict (id \"t1\", tier \"haiku\", files_owned [\"a.py\"], acceptance [\"true\"], budget {\"max_turns\": 5, \"max_attempts\": 2}, every list field present, context [{\"label\": \"l\", \"content\": \"c\"}]) updated with overrides.",
+        "In tests/test_models.py add tests: valid dict parses; missing `goal` raises pydantic.ValidationError; unknown field `priority` raises; id \"Cli-Done\" becomes \"cli-done\"; id \"cli done\" raises; acceptance [] raises; files_owned [] raises; budget max_turns 0 raises; context item with an extra key raises.",
+        "In tests/test_models.py add: Plan(stage=\"s\", orders=[...]) parses from a dict with two orders; TaskState(task_id=\"t1\") has status \"pending\", attempts 0, tier_used None and zero Usage; an Event(run_id=\"r1\", task_id=\"t1\", type=\"task_started\", payload={\"tier\": \"haiku\"}) equals Event.model_validate_json(event.model_dump_json()), and its ts is timezone-aware.",
+        "Run `uv run ruff format` on the files you changed, then run every acceptance command and fix any failure."
+      ],
+      "constraints": [
+        "No new dependencies; pyproject.toml already has everything needed.",
+        "Python 3.12 syntax (`X | None`, `list[str]`), type hints on every function.",
+        "Do not rename, add or remove fields or classes; other orders depend on these exact names."
+      ],
+      "acceptance": [
+        "uv run pytest tests/test_models.py -q",
+        "uv run pytest -q",
+        "uv run ruff check .",
+        "uv run ruff format --check ."
+      ],
+      "budget": {
+        "max_turns": 30,
+        "max_attempts": 3
+      },
+      "out_of_scope": [
+        "Loading plans from files, dependency checks, cycles, waves (order `plan-validate`).",
+        "Writing events to disk (order `events`)."
+      ]
+    },
+    {
+      "id": "worktree",
+      "title": "Add the git worktree manager",
+      "goal": "src/harness/worktree.py gives each task its own branch and worktree, merges finished work back by rebase + fast-forward, reports conflicts without losing the worktree, and cleans up a run. Only subprocess git is used.",
+      "tier": "sonnet",
+      "depends_on": [
+        "scaffold"
+      ],
+      "files_owned": [
+        "src/harness/worktree.py",
+        "tests/test_worktree.py"
+      ],
+      "files_readonly": [],
+      "context": [
+        {
+          "label": "src/harness/worktree.py interface (implement every `...` and docstring)",
+          "content": "\"\"\"Git worktrees for parallel tasks: create, commit, merge back, clean up.\"\"\"\n\nimport subprocess\nfrom pathlib import Path\nfrom typing import Literal\n\nMergeResult = Literal[\"merged\", \"conflict\"]\n\n\nclass WorktreeError(RuntimeError):\n    \"\"\"A git command failed in a way the caller must handle.\"\"\"\n\n\ndef _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]: ...\n\n\nclass WorktreeManager:\n    def __init__(self, repo: Path, run_id: str, integration_branch: str = \"main\") -> None: ...\n\n    def branch(self, task_id: str) -> str:\n        \"\"\"harness/<run_id>/<task_id>\"\"\"\n\n    def path(self, task_id: str) -> Path:\n        \"\"\"<repo>/.harness/worktrees/<task_id>\"\"\"\n\n    def create(self, task_id: str, base: str | None = None) -> Path:\n        \"\"\"git worktree add -b <branch> <path> <base or integration_branch>. Raise WorktreeError\n        (with git's stderr) if git fails, e.g. the branch or path already exists. Return the path.\"\"\"\n\n    def commit(self, task_id: str, message: str) -> bool:\n        \"\"\"git add -A, then commit in the worktree. Return False (and commit nothing) if there\n        are no staged changes (`git diff --cached --quiet` exits 0), True after committing.\"\"\"\n\n    def merge(self, task_id: str) -> MergeResult:\n        \"\"\"In the worktree: git rebase <integration_branch>. On failure: git rebase --abort and\n        return \"conflict\". Then in <repo>: git merge --ff-only <branch>; raise WorktreeError if\n        that fails. Return \"merged\".\"\"\"\n\n    def cleanup(self) -> None:\n        \"\"\"git worktree remove --force every worktree under <repo>/.harness/worktrees (from\n        `git worktree list --porcelain`), delete every branch under refs/heads/harness/<run_id>/\n        (git branch -D), then git worktree prune.\"\"\"\n"
+        },
+        {
+          "label": "decision",
+          "content": "- One WorktreeManager per run. Branch name: harness/<run_id>/<task_id>. Worktree path: <repo>/.harness/worktrees/<task_id>.\n- The main checkout at <repo> must have the integration branch checked out; merge() fast-forwards it there.\n- create() makes sure `.harness/` is listed in <git-common-dir>/info/exclude (append the line once if missing), so worktrees never show up as untracked files. Get the dir with `git rev-parse --git-common-dir` (relative to repo if not absolute).\n- merge() requires a clean worktree. If `git status --porcelain` in the worktree prints anything, raise WorktreeError(\"uncommitted changes in <task_id>\").\n- On rebase conflict: run `git rebase --abort` in the worktree, leave the worktree and branch in place, return \"conflict\".\n- Paths from git may be resolved through symlinks (macOS /var -> /private/var); compare paths with Path.resolve() on both sides.\n- Use subprocess.run([...], cwd=..., capture_output=True, text=True, check=False) through one helper; never shell=True; no GitPython or other library."
+        },
+        {
+          "label": "tests/test_worktree.py helper to use (copy exactly)",
+          "content": "def _repo(tmp_path: Path) -> Path:\n    repo = tmp_path / \"repo\"\n    repo.mkdir()\n    for args in (\n        [\"init\", \"-b\", \"main\"],\n        [\"config\", \"user.email\", \"test@example.com\"],\n        [\"config\", \"user.name\", \"Test\"],\n    ):\n        subprocess.run([\"git\", *args], cwd=repo, check=True, capture_output=True)\n    (repo / \"README.md\").write_text(\"line one\\n\")\n    subprocess.run([\"git\", \"add\", \"-A\"], cwd=repo, check=True, capture_output=True)\n    subprocess.run([\"git\", \"commit\", \"-m\", \"init\"], cwd=repo, check=True, capture_output=True)\n    return repo\n"
+        },
+        {
+          "label": "tests/test_smoke.py (test style to follow)",
+          "content": "from typer.testing import CliRunner\n\nfrom harness.cli import app\nfrom harness.config import MODEL_IDS, TIER_LADDER\n\nrunner = CliRunner()\n\n\ndef test_help_lists_commands():\n    result = runner.invoke(app, [\"--help\"])\n    assert result.exit_code == 0\n    for name in (\"run\", \"status\", \"report\", \"validate\"):\n        assert name in result.output\n\n\ndef test_every_tier_has_a_model():\n    assert TIER_LADDER == (\"haiku\", \"sonnet\", \"opus\")\n    assert set(MODEL_IDS) == set(TIER_LADDER)\n"
+        },
+        {
+          "label": "pyproject.toml [tool.ruff] and [tool.pytest.ini_options]",
+          "content": "[tool.ruff]\nline-length = 100\ntarget-version = \"py312\"\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"B\", \"UP\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\nasyncio_mode = \"auto\"\n"
+        },
+        {
+          "label": "environment",
+          "content": "git 2.55 on macOS. Tests use pytest's tmp_path; each test builds its own repo with _repo(tmp_path), so tests never touch the real project repo."
+        }
+      ],
+      "steps": [
+        "Create src/harness/worktree.py implementing the interface in context and following every decision.",
+        "Create tests/test_worktree.py with the _repo helper from context (imports: subprocess, pathlib.Path, pytest, and WorktreeManager/WorktreeError from harness.worktree).",
+        "Test create: returns <repo>/.harness/worktrees/t1, the dir exists, branch harness/r1/t1 exists, `git status --porcelain` in the repo prints nothing; calling create(\"t1\") again raises WorktreeError.",
+        "Test commit: after writing a file in the worktree commit() returns True; calling it again with no changes returns False.",
+        "Test merge: (a) one task adds a.txt, commit, merge -> \"merged\" and a.txt exists in the repo on main; (b) main advances with an unrelated commit after create, the task adds b.txt -> \"merged\" and both files are on main; (c) uncommitted change in the worktree -> WorktreeError.",
+        "Test conflict: tasks t1 and t2 both change README.md's line to different text; merge t1 -> \"merged\"; merge t2 -> \"conflict\"; t2's worktree dir still exists, no rebase is in progress there (`git status` output does not contain \"rebase\"), and README.md on main has t1's text.",
+        "Test cleanup: after creating two worktrees and merging one, cleanup() removes both dirs and both harness/r1/* branches, and `git worktree list` shows only the main checkout.",
+        "Run `uv run ruff format` on the files you changed, then run every acceptance command and fix any failure."
+      ],
+      "constraints": [
+        "No new dependencies; pyproject.toml already has everything needed.",
+        "Python 3.12 syntax (`X | None`, `list[str]`), type hints on every function.",
+        "Keep the exact names in the interface; the scheduler will call them.",
+        "Every git call goes through _git; check returncode yourself."
+      ],
+      "acceptance": [
+        "uv run pytest tests/test_worktree.py -q",
+        "uv run pytest -q",
+        "uv run ruff check .",
+        "uv run ruff format --check ."
+      ],
+      "budget": {
+        "max_turns": 40,
+        "max_attempts": 3
+      },
+      "out_of_scope": [
+        "Deciding when to create, merge or clean up (the scheduler does that later).",
+        "Async versions of these functions.",
+        "Handling a dirty main checkout beyond what git reports."
+      ]
+    },
+    {
+      "id": "plan-validate",
+      "title": "Load and validate plan files and compute waves",
+      "goal": "load_plan(path) turns plan.json into a Plan or raises PlanError with a clear message for duplicate ids, unknown dependencies, cycles, blank acceptance commands and two orders in the same wave owning the same file. compute_waves gives the parallel waves the scheduler will run.",
+      "tier": "sonnet",
+      "depends_on": [
+        "models"
+      ],
+      "files_owned": [
+        "src/harness/plan.py",
+        "tests/test_plan.py"
+      ],
+      "files_readonly": [
+        "src/harness/models.py"
+      ],
+      "context": [
+        {
+          "label": "src/harness/plan.py interface (implement every `...`)",
+          "content": "\"\"\"Load a plan file and check it: ids, dependencies, cycles, ownership, acceptance.\"\"\"\n\nimport json\nfrom pathlib import Path, PurePosixPath\n\nfrom pydantic import ValidationError\n\nfrom harness.models import Plan\n\n\nclass PlanError(ValueError):\n    \"\"\"The plan file is invalid. The message says why.\"\"\"\n\n\ndef load_plan(path: Path) -> Plan: ...\n\n\ndef validate_plan(plan: Plan) -> list[list[str]]: ...\n\n\ndef compute_waves(plan: Plan) -> list[list[str]]: ...\n"
+        },
+        {
+          "label": "decision: exact behaviour and error messages",
+          "content": "load_plan(path): read the file as UTF-8 JSON. json.JSONDecodeError -> PlanError(\"invalid JSON: <msg>\"). Plan.model_validate(data); ValidationError -> PlanError(f\"invalid plan: {err}\"). Then call validate_plan(plan) and return the plan. Re-raise with `from err`.\n\nvalidate_plan(plan) runs these checks in this order and raises PlanError at the first failure; on success it returns compute_waves(plan):\n1. duplicate ids      -> \"duplicate id: <id>\"\n2. unknown deps       -> \"unknown dependency: <order id> depends on <dep>\"\n3. blank acceptance   -> \"empty acceptance: <order id>\"   (any command that is empty after .strip())\n4. cycles             -> raised by compute_waves\n5. overlapping files_owned within one wave -> \"overlapping files_owned in wave <n>: <path> (<id a>, <id b>)\"; compare paths as str(PurePosixPath(p)) so \"./a.py\" == \"a.py\"; waves are numbered from 1.\n\ncompute_waves(plan): level-by-level topological sort. Wave 1 = orders with no depends_on; each next wave = orders whose deps are all in earlier waves. Ids sorted alphabetically within a wave. If orders remain but none can be placed -> PlanError(\"cycle: <remaining ids sorted, joined by ', '>\"). Assumes deps are known (validate_plan checks that first)."
+        },
+        {
+          "label": "src/harness/models.py (already exists; the `...` in _normalize_id is implemented: lowercases the id and checks ^[a-z0-9-]+$)",
+          "content": "\"\"\"Pydantic models shared by the plan loader, runner and event log.\"\"\"\n\nfrom datetime import UTC, datetime\nfrom typing import Any, Literal\n\nfrom pydantic import BaseModel, ConfigDict, Field, field_validator\n\nfrom harness.config import Tier\n\nTaskStatus = Literal[\"pending\", \"running\", \"verifying\", \"done\", \"failed\", \"blocked\"]\n\n\nclass _Strict(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n\nclass ContextItem(_Strict):\n    label: str\n    content: str\n\n\nclass Budget(_Strict):\n    max_turns: int = Field(ge=1)\n    max_attempts: int = Field(ge=1)\n\n\nclass WorkOrder(_Strict):\n    id: str\n    title: str\n    goal: str\n    tier: Tier\n    depends_on: list[str]\n    files_owned: list[str] = Field(min_length=1)\n    files_readonly: list[str]\n    context: list[ContextItem]\n    steps: list[str]\n    constraints: list[str]\n    acceptance: list[str] = Field(min_length=1)\n    budget: Budget\n    out_of_scope: list[str]\n\n    @field_validator(\"id\")\n    @classmethod\n    def _normalize_id(cls, value: str) -> str:\n        ...\n\n\nclass Plan(_Strict):\n    stage: str\n    orders: list[WorkOrder]\n\n\nclass Usage(_Strict):\n    input_tokens: int = 0\n    output_tokens: int = 0\n    cache_read_tokens: int = 0\n    cache_creation_tokens: int = 0\n    cost_usd: float = 0.0\n\n\nclass TaskState(_Strict):\n    task_id: str\n    status: TaskStatus = \"pending\"\n    attempts: int = 0\n    tier_used: Tier | None = None\n    usage: Usage = Field(default_factory=Usage)\n\n\nclass Event(_Strict):\n    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))\n    run_id: str\n    task_id: str | None = None\n    type: str\n    payload: dict[str, Any] = Field(default_factory=dict)\n"
+        },
+        {
+          "label": "tests/test_smoke.py (test style to follow)",
+          "content": "from typer.testing import CliRunner\n\nfrom harness.cli import app\nfrom harness.config import MODEL_IDS, TIER_LADDER\n\nrunner = CliRunner()\n\n\ndef test_help_lists_commands():\n    result = runner.invoke(app, [\"--help\"])\n    assert result.exit_code == 0\n    for name in (\"run\", \"status\", \"report\", \"validate\"):\n        assert name in result.output\n\n\ndef test_every_tier_has_a_model():\n    assert TIER_LADDER == (\"haiku\", \"sonnet\", \"opus\")\n    assert set(MODEL_IDS) == set(TIER_LADDER)\n"
+        },
+        {
+          "label": "pyproject.toml [tool.ruff] and [tool.pytest.ini_options]",
+          "content": "[tool.ruff]\nline-length = 100\ntarget-version = \"py312\"\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"B\", \"UP\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\nasyncio_mode = \"auto\"\n"
+        }
+      ],
+      "steps": [
+        "Create src/harness/plan.py implementing the interface and the rules in context.",
+        "Create tests/test_plan.py with a helper `_order(id: str, deps: list[str] | None = None, owned: list[str] | None = None) -> dict` returning a valid order dict (tier \"haiku\", owned default [f\"{id}.py\"], acceptance [\"true\"], budget {\"max_turns\": 5, \"max_attempts\": 2}, every list field present), and `_plan(*orders) -> Plan` building Plan(stage=\"s\", orders=[...]).",
+        "Test compute_waves: a diamond a; b,c depend on a; d on b and c -> [[\"a\"], [\"b\", \"c\"], [\"d\"]]; three independent orders -> one wave sorted by id.",
+        "Test validate_plan errors with pytest.raises(PlanError, match=...): duplicate id, unknown dependency, blank acceptance [\" \"], a 2-cycle and a 3-cycle (match \"cycle\"), and b,c in the same wave both owning \"x.py\" (one written as \"./x.py\").",
+        "Test that the same file owned by orders in different waves is allowed.",
+        "Test load_plan with tmp_path: a valid file returns a Plan; a file with invalid JSON raises PlanError match \"invalid JSON\"; a file missing `stage` raises PlanError match \"invalid plan\".",
+        "Run `uv run ruff format` on the files you changed, then run every acceptance command and fix any failure."
+      ],
+      "constraints": [
+        "No new dependencies; pyproject.toml already has everything needed.",
+        "Python 3.12 syntax (`X | None`, `list[str]`), type hints on every function.",
+        "Error messages must start exactly as given in the rules; the CLI will show them to users.",
+        "Do not modify src/harness/models.py."
+      ],
+      "acceptance": [
+        "uv run pytest tests/test_plan.py -q",
+        "uv run pytest -q",
+        "uv run ruff check .",
+        "uv run ruff format --check ."
+      ],
+      "budget": {
+        "max_turns": 30,
+        "max_attempts": 3
+      },
+      "out_of_scope": [
+        "Wiring `harness validate` in the CLI (a later CLI order).",
+        "Checking that files in files_owned exist."
+      ]
+    },
+    {
+      "id": "events",
+      "title": "Add the JSONL event log and `harness events`",
+      "goal": "Every state change can be recorded with EventLog.emit() as one JSON line in <run_dir>/events.jsonl, safely from many concurrent async tasks, and `harness events RUN_DIR [--follow]` prints the log. This is what the future UI reads.",
+      "tier": "haiku",
+      "depends_on": [
+        "models"
+      ],
+      "files_owned": [
+        "src/harness/events.py",
+        "tests/test_events.py",
+        "src/harness/cli.py"
+      ],
+      "files_readonly": [
+        "src/harness/models.py"
+      ],
+      "context": [
+        {
+          "label": "src/harness/events.py interface (implement every docstring)",
+          "content": "\"\"\"Append-only JSONL event log for a run: <run_dir>/events.jsonl.\"\"\"\n\nimport asyncio\nimport time\nfrom collections.abc import Iterator\nfrom pathlib import Path\nfrom typing import Any\n\nfrom harness.models import Event\n\nEVENTS_FILE = \"events.jsonl\"\n\n\nclass EventLog:\n    def __init__(self, run_dir: Path, run_id: str) -> None:\n        \"\"\"Create run_dir (parents too) if missing. self.path = run_dir / EVENTS_FILE.\n        self.run_id = run_id. One asyncio.Lock per instance.\"\"\"\n\n    async def emit(\n        self, type: str, task_id: str | None = None, payload: dict[str, Any] | None = None\n    ) -> Event:\n        \"\"\"Build Event(run_id, task_id, type, payload or {}). Under the lock, open self.path in\n        append mode (UTF-8), write event.model_dump_json() + \"\\n\" in one write() call, flush.\n        Return the event.\"\"\"\n\n\ndef read_events(path: Path) -> list[Event]:\n    \"\"\"Parse every non-blank line with Event.model_validate_json, in file order.\"\"\"\n\n\ndef follow(path: Path, poll_interval: float = 0.5) -> Iterator[str]:\n    \"\"\"Wait until path exists, yield every existing line (without the newline), then keep\n    yielding new complete lines as they are appended, sleeping poll_interval between polls.\n    Never returns. Skip blank lines.\"\"\"\n"
+        },
+        {
+          "label": "src/harness/models.py (already exists; Event is the class to use)",
+          "content": "\"\"\"Pydantic models shared by the plan loader, runner and event log.\"\"\"\n\nfrom datetime import UTC, datetime\nfrom typing import Any, Literal\n\nfrom pydantic import BaseModel, ConfigDict, Field, field_validator\n\nfrom harness.config import Tier\n\nTaskStatus = Literal[\"pending\", \"running\", \"verifying\", \"done\", \"failed\", \"blocked\"]\n\n\nclass _Strict(BaseModel):\n    model_config = ConfigDict(extra=\"forbid\")\n\n\nclass ContextItem(_Strict):\n    label: str\n    content: str\n\n\nclass Budget(_Strict):\n    max_turns: int = Field(ge=1)\n    max_attempts: int = Field(ge=1)\n\n\nclass WorkOrder(_Strict):\n    id: str\n    title: str\n    goal: str\n    tier: Tier\n    depends_on: list[str]\n    files_owned: list[str] = Field(min_length=1)\n    files_readonly: list[str]\n    context: list[ContextItem]\n    steps: list[str]\n    constraints: list[str]\n    acceptance: list[str] = Field(min_length=1)\n    budget: Budget\n    out_of_scope: list[str]\n\n    @field_validator(\"id\")\n    @classmethod\n    def _normalize_id(cls, value: str) -> str:\n        ...\n\n\nclass Plan(_Strict):\n    stage: str\n    orders: list[WorkOrder]\n\n\nclass Usage(_Strict):\n    input_tokens: int = 0\n    output_tokens: int = 0\n    cache_read_tokens: int = 0\n    cache_creation_tokens: int = 0\n    cost_usd: float = 0.0\n\n\nclass TaskState(_Strict):\n    task_id: str\n    status: TaskStatus = \"pending\"\n    attempts: int = 0\n    tier_used: Tier | None = None\n    usage: Usage = Field(default_factory=Usage)\n\n\nclass Event(_Strict):\n    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))\n    run_id: str\n    task_id: str | None = None\n    type: str\n    payload: dict[str, Any] = Field(default_factory=dict)\n"
+        },
+        {
+          "label": "src/harness/cli.py (whole file today)",
+          "content": "\"\"\"Command-line entry point: `harness <command>`.\"\"\"\n\nfrom pathlib import Path\n\nimport typer\n\napp = typer.Typer(help=\"Plan-and-execute harness for Claude agents.\", no_args_is_help=True)\n\n\ndef _not_implemented(name: str) -> None:\n    typer.echo(f\"harness {name}: not implemented yet\", err=True)\n    raise typer.Exit(code=1)\n\n\n@app.command()\ndef run(plan: Path) -> None:\n    \"\"\"Run a plan.\"\"\"\n    _not_implemented(\"run\")\n\n\n@app.command()\ndef status() -> None:\n    \"\"\"Show task states for the current run.\"\"\"\n    _not_implemented(\"status\")\n\n\n@app.command()\ndef report() -> None:\n    \"\"\"Show tokens and cost per task and per tier.\"\"\"\n    _not_implemented(\"report\")\n\n\n@app.command()\ndef validate(plan: Path) -> None:\n    \"\"\"Validate a plan file.\"\"\"\n    _not_implemented(\"validate\")\n"
+        },
+        {
+          "label": "imports to add at the top of src/harness/cli.py (keep ruff's import order)",
+          "content": "from typing import Annotated\n\nfrom harness.events import EVENTS_FILE\nfrom harness.events import follow as follow_lines\n"
+        },
+        {
+          "label": "command to append at the end of src/harness/cli.py (write exactly this)",
+          "content": "@app.command()\ndef events(\n    run_dir: Path,\n    follow: Annotated[bool, typer.Option(\"--follow\", \"-f\", help=\"Keep printing.\")] = False,\n) -> None:\n    \"\"\"Print a run's event log (RUN_DIR/events.jsonl).\"\"\"\n    path = run_dir / EVENTS_FILE\n    if follow:\n        for line in follow_lines(path):\n            typer.echo(line)\n        return\n    if not path.exists():\n        typer.echo(f\"No event log at {path}\", err=True)\n        raise typer.Exit(code=1)\n    for line in path.read_text(encoding=\"utf-8\").splitlines():\n        if line.strip():\n            typer.echo(line)\n"
+        },
+        {
+          "label": "tests/test_smoke.py (test style to follow, including CliRunner)",
+          "content": "from typer.testing import CliRunner\n\nfrom harness.cli import app\nfrom harness.config import MODEL_IDS, TIER_LADDER\n\nrunner = CliRunner()\n\n\ndef test_help_lists_commands():\n    result = runner.invoke(app, [\"--help\"])\n    assert result.exit_code == 0\n    for name in (\"run\", \"status\", \"report\", \"validate\"):\n        assert name in result.output\n\n\ndef test_every_tier_has_a_model():\n    assert TIER_LADDER == (\"haiku\", \"sonnet\", \"opus\")\n    assert set(MODEL_IDS) == set(TIER_LADDER)\n"
+        },
+        {
+          "label": "pyproject.toml [tool.ruff] and [tool.pytest.ini_options] (asyncio_mode = auto: plain `async def test_...` functions run without decorators)",
+          "content": "[tool.ruff]\nline-length = 100\ntarget-version = \"py312\"\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"B\", \"UP\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\nasyncio_mode = \"auto\"\n"
+        },
+        {
+          "label": "decision",
+          "content": "One EventLog per run is shared by all tasks, so the per-instance asyncio.Lock is enough to keep lines whole. Plain blocking file writes inside emit() are fine for the MVP."
+        }
+      ],
+      "steps": [
+        "Create src/harness/events.py implementing the interface in context.",
+        "Edit src/harness/cli.py: add the imports and append the `events` command exactly as given in context.",
+        "Create tests/test_events.py. Test: EventLog(tmp_path / \"run\" / \"r1\", \"r1\") creates the directory; one emit() then read_events() returns a list equal to [the returned event]; three emits come back in order.",
+        "Test concurrency: 20 coroutines each emitting 50 events (await asyncio.gather) -> the file has exactly 1000 lines, every line parses with json.loads, and read_events returns 1000 events.",
+        "Test the CLI with CliRunner: after two emits, `events <run_dir>` exits 0 and prints exactly two lines, each the raw JSON line from the file; `events <empty dir>` exits 1 and \"No event log at\" is in result.output.",
+        "Run `uv run ruff format` on the files you changed, then run every acceptance command and fix any failure."
+      ],
+      "constraints": [
+        "No new dependencies; pyproject.toml already has everything needed.",
+        "Python 3.12 syntax (`X | None`, `list[str]`), type hints on every function.",
+        "Do not change the other CLI commands.",
+        "Do not modify src/harness/models.py."
+      ],
+      "acceptance": [
+        "uv run pytest tests/test_events.py -q",
+        "uv run pytest -q",
+        "uv run ruff check .",
+        "uv run ruff format --check ."
+      ],
+      "budget": {
+        "max_turns": 30,
+        "max_attempts": 3
+      },
+      "out_of_scope": [
+        "Tests for --follow / follow() (it never returns; checked by hand in the dry run).",
+        "Log rotation, file locking across processes, async file I/O.",
+        "Emitting events from anywhere else (the scheduler does that later)."
+      ]
+    }
+  ]
+}

@@ -71,6 +71,13 @@ This phase checks whether the work-order format is good enough before anything i
 - **Do:** Plan a real small stage and run its orders by hand through the subagents. Record each point where a worker had to explore, asked a question, or failed acceptance. Update the schema and the skill to fix those.
 - **Done when:** at least 4 of 5 orders pass on the first attempt.
 
+### T0.5 Project planner skill
+- **Tier:** Opus
+- **Depends:** T0.2
+- **Files:** `.claude/skills/plan-project/SKILL.md`
+- **Do:** The skill takes a project description from the user and turns it into a high-level implementation plan split into stages, in the style of this file. Opus first asks the user the open questions that change what gets built, then writes `PROJECT_PLAN.md` with the goal, the stages in order, and what each stage delivers. It waits for the user's approval before anything else happens. Each stage must be small and concrete enough for `plan-stage` to turn into work orders.
+- **Done when:** given a short project description, the skill asks only questions that matter, produces a plan a person can approve in a few minutes, and `plan-stage` can turn its first stage into work orders without asking anything more.
+
 ## Phase 1: Runner MVP (~3–4 days)
 
 ### T1.1 Scaffold
@@ -148,11 +155,18 @@ This phase checks whether the work-order format is good enough before anything i
   - `report`: tokens and cost per task and per tier, attempts, and how often escalation happened
 - **Done when:** all commands work against a `FakeWorker` run (add a `--fake` flag).
 
-### T1.10 End-to-end run
+### T1.10 Plan command
+- **Tier:** Sonnet
+- **Depends:** T1.9, T0.5
+- **Files:** `src/harness/planner.py`, `src/harness/cli.py`, `tests/test_planner.py`
+- **Do:** Add `harness plan "<description>"`. It calls Opus with the `plan-project` skill, in an interactive session where Opus's questions appear in the terminal and the user answers them. Once the user approves `PROJECT_PLAN.md`, it calls Opus with `plan-stage` on the first stage. The result is a `plan.json` that `harness validate` accepts and `harness run` can execute. Check how the Agent SDK loads project skills against the current SDK docs.
+- **Done when:** one `harness plan` command on a short description ends with a valid `plan.json`, and a `FakeWorker`-style fake planner covers the flow in tests.
+
+### T1.11 End-to-end run
 - **Tier:** Sonnet, plus the user
-- **Depends:** T1.9, T0.2
+- **Depends:** T1.10, T0.2
 - **Files:** `examples/toy_repo/`, `examples/toy_plan.json`, `docs/RESULTS.md`
-- **Do:** Build a small toy project, such as a CLI todo app with tests. Use the planner skill to make a 5-task plan, run it for real, and record the cost, failures, and what went wrong in the work orders.
+- **Do:** Build a small toy project, such as a CLI todo app with tests. Use `harness plan` to make a 5-task plan from a short description, run it for real, and record the cost, failures, and what went wrong in the work orders.
 - **Done when:** all tasks merge, or the blocked ones have clear notes, and the report prints. **This is the MVP.**
 
 ## After the MVP (not planned in detail)
