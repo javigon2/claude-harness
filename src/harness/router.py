@@ -1,6 +1,7 @@
 """Router: run one order through worker attempts and verification, escalating up the tiers."""
 
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from harness.config import TIER_LADDER, Tier
@@ -55,15 +56,18 @@ class Router:
         review_tier: Tier = "sonnet",
         timeout_s: float = DEFAULT_TIMEOUT_S,
         on_state: StateCallback | None = None,
+        should_stop: Callable[[], str | None] | None = None,
     ) -> None:
         """Store every argument on self under the same name (self.worker, self.events,
-        self.reviewer, self.review_tier, self.timeout_s, self.on_state)."""
+        self.reviewer, self.review_tier, self.timeout_s, self.on_state, self.should_stop).
+        `should_stop` is asked before every attempt; a returned reason pauses the task."""
         self.worker = worker
         self.events = events
         self.reviewer = reviewer
         self.review_tier = review_tier
         self.timeout_s = timeout_s
         self.on_state = on_state
+        self.should_stop = should_stop
 
     async def _changed(self, state: TaskState) -> None:
         """await self.on_state(state) if on_state is set; otherwise do nothing."""
@@ -86,8 +90,30 @@ class Router:
         prev_tier: Tier | None = None
         n = 0
         tier: Tier = order.tier
+
+        async def pause(reason: str, resets_at: int | None) -> TaskState:
+            """The task stops here, the attempt `n` does not count, and the run can resume."""
+            state.attempts = n - 1
+            state.status = "paused"
+            state.error = reason
+            await self._changed(state)
+            await emit(
+                "task_paused",
+                {"attempt": n, "tier": tier, "reason": reason, "resets_at": resets_at},
+            )
+            return state
+
+        def rate_limit_reason(resets_at: int | None) -> str:
+            if resets_at is None:
+                return "rate limited; resets at unknown"
+            return f"rate limited; resets at {datetime.fromtimestamp(resets_at, UTC).isoformat()}"
+
         for n in range(1, order.budget.max_attempts + 1):
             tier = tier_for_attempt(order.tier, n)
+            if self.should_stop is not None:
+                reason = self.should_stop()
+                if reason:
+                    return await pause(reason, None)
             if prev_tier is not None and tier != prev_tier:
                 await emit("escalated", {"attempt": n, "from_tier": prev_tier, "to_tier": tier})
 
@@ -104,6 +130,11 @@ class Router:
                 result = await self.worker.run(order, tier, cwd, feedback, progress=report)
             except Exception as err:
                 result = WorkerResult(status="error", error=f"{type(err).__name__}: {err}"[:2000])
+            if result.rate_limited:
+                state.usage = state.usage.plus(result.usage)
+                return await pause(
+                    rate_limit_reason(result.rate_limit_resets_at), result.rate_limit_resets_at
+                )
             if result.session_init is not None:
                 await emit(
                     "session_init",
@@ -139,6 +170,12 @@ class Router:
                 review_tier=self.review_tier,
             )
             review_usage = vr.review.usage if vr.review is not None else Usage()
+            if vr.review is not None and vr.review.rate_limited:
+                state.usage = state.usage.plus(review_usage)
+                return await pause(
+                    rate_limit_reason(vr.review.rate_limit_resets_at),
+                    vr.review.rate_limit_resets_at,
+                )
             fb = format_feedback(vr)
             if vr.review is not None and vr.review.session_init is not None:
                 await emit(

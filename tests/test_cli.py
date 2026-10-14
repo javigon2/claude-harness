@@ -5,6 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from harness.cli import app
+from harness.worker import FakeWorker, WorkerResult
 
 runner = CliRunner()
 
@@ -168,3 +169,19 @@ def test_run_id_already_exists(tmp_path: Path) -> None:
     second = runner.invoke(app, args)
     assert second.exit_code == 1
     assert "already exists" in second.output
+
+
+def test_run_rate_limited_exits_3_with_resume_hint(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    plan = _good_plan(tmp_path)
+    limited = WorkerResult(
+        status="error", error="rate limited", rate_limited=True, rate_limit_resets_at=1760000000
+    )
+    monkeypatch.setattr("harness.cli._make_worker", lambda fake: FakeWorker(default=limited))
+    result = runner.invoke(app, ["run", str(plan), "--fake", "--repo", str(repo), "--run-id", "r1"])
+    assert result.exit_code == 3, result.output
+    assert "1 paused" in result.output
+    assert (
+        "Run stopped: rate limited; resets at 2025-10-09T08:53:20+00:00. Resume with: "
+        f"harness run {plan} --repo {repo.resolve()} --resume\n"
+    ) in result.output

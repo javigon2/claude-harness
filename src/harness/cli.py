@@ -133,6 +133,13 @@ def run(
         _fail(str(err))
     typer.echo("")
     typer.echo(report_text(state))
+    paused = next((t for t in state.tasks.values() if t.status == "paused"), None)
+    if paused is not None:
+        hint = f"harness run {plan} --repo {repo_path} --resume"
+        if review:
+            hint += " --review"
+        typer.echo(f"Run stopped: {paused.error}. Resume with: {hint}")
+        raise typer.Exit(code=3)
     if any(t.status != "done" for t in state.tasks.values()):
         raise typer.Exit(code=1)
 

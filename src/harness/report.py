@@ -130,7 +130,8 @@ def report_text(state: RunState) -> str:
     done = sum(1 for ts in tasks if ts.status == "done")
     failed = sum(1 for ts in tasks if ts.status == "failed")
     blocked = sum(1 for ts in tasks if ts.status == "blocked")
-    other = n - done - failed - blocked
+    paused = sum(1 for ts in tasks if ts.status == "paused")
+    other = n - done - failed - blocked - paused
     attempts = sum(ts.attempts for ts in tasks)
     total = sum(ts.usage.cost_usd for ts in tasks)
     ids = escalated_tasks(state)
@@ -138,13 +139,14 @@ def report_text(state: RunState) -> str:
     if ids:
         escalation += f" ({', '.join(ids)})"
     sections.append(
-        f"Totals: {n} tasks: {done} done, {failed} failed, {blocked} blocked, {other} not run; "
+        f"Totals: {n} tasks: {done} done, {failed} failed, {blocked} blocked, "
+        f"{paused} paused, {other} not run; "
         f"{attempts} attempts; cost {money(total)}" + "\n" + escalation
     )
 
     attention = []
     for tid, ts in state.tasks.items():
-        if ts.status not in ("failed", "blocked"):
+        if ts.status not in ("failed", "blocked", "paused"):
             continue
         if ts.error:
             reason = ts.error

@@ -68,6 +68,7 @@ class Scheduler:
         self.events = EventLog(self.run_dir, run_id)
         self.worktrees = WorktreeManager(self.repo, run_id, integration_branch)
         self.state: RunState | None = None
+        self._stop_reason: str | None = None
 
     async def _emit(self, type_: str, payload: dict, task_id: str | None = None) -> None:
         await self.events.emit(type_, task_id=task_id, payload=payload)
@@ -173,6 +174,9 @@ class Scheduler:
                 "wave_finished",
                 {"wave": i, "statuses": {tid: state.tasks[tid].status for tid in wave}},
             )
+            if self._stop_reason is not None:
+                await self._emit("run_stopping", {"reason": self._stop_reason})
+                break
 
         state.finished = True
         await self._save()
@@ -183,6 +187,8 @@ class Scheduler:
                 "done": statuses.count("done"),
                 "failed": statuses.count("failed"),
                 "blocked": statuses.count("blocked"),
+                "paused": statuses.count("paused"),
+                "stopped_reason": self._stop_reason,
                 "cost_usd": sum(t.usage.cost_usd for t in state.tasks.values()),
             },
         )
@@ -199,6 +205,8 @@ class Scheduler:
         `decision: task algorithm` context item. Never raises except CancelledError."""
         assert self.state is not None
         async with sem:
+            if self._stop_reason is not None:
+                return
             ts = self.state.tasks[order.id]
             branch = self.worktrees.branch(order.id)
 
@@ -233,8 +241,11 @@ class Scheduler:
                 review_tier=self.review_tier,
                 timeout_s=self.timeout_s,
                 on_state=self._save,
+                should_stop=lambda: self._stop_reason,
             )
             await router.route(order, path, ts, base=base)
+            if ts.status == "paused" and self._stop_reason is None:
+                self._stop_reason = ts.error
             if ts.status != "done":
                 return
 

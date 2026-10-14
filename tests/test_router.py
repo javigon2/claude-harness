@@ -425,3 +425,84 @@ async def test_worker_progress_event_between_started_and_finished(
     types = env.types()
     assert types.index("attempt_started") < types.index("worker_progress")
     assert types.index("worker_progress") < types.index("worker_finished")
+
+
+# --- rate limit and stop ----------------------------------------------------------------
+
+
+def _limited(resets_at: int | None = 1760000000) -> WorkerResult:
+    return WorkerResult(
+        status="error",
+        error="rate limited",
+        rate_limited=True,
+        rate_limit_resets_at=resets_at,
+        usage=Usage(cost_usd=0.25),
+    )
+
+
+async def test_worker_rate_limit_pauses_without_attempt(env: _Env) -> None:
+    worker = FakeWorker(script={"t1": [_limited()]}, default=_writes())
+    state = await env.router(worker).route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "paused"
+    assert state.attempts == 0
+    assert state.history == []
+    assert state.usage.cost_usd == 0.25
+    assert state.error == "rate limited; resets at 2025-10-09T08:53:20+00:00"
+    assert len(worker.calls) == 1
+    types = env.types()
+    assert "escalated" not in types and "verify_started" not in types
+    assert env.events("task_paused") == [
+        {
+            "attempt": 1,
+            "tier": "haiku",
+            "reason": state.error,
+            "resets_at": 1760000000,
+        }
+    ]
+
+
+async def test_worker_rate_limit_without_reset_time(env: _Env) -> None:
+    worker = FakeWorker(script={"t1": [_limited(None)]})
+    state = await env.router(worker).route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.error == "rate limited; resets at unknown"
+    assert env.events("task_paused")[0]["resets_at"] is None
+
+
+async def test_worker_rate_limit_on_second_attempt_keeps_first(env: _Env) -> None:
+    worker = FakeWorker(script={"t1": [fake_result("failed"), _limited()]})
+    state = await env.router(worker).route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "paused"
+    assert state.attempts == 1
+    assert len(state.history) == 1
+    assert env.events("task_paused")[0]["attempt"] == 2
+    assert env.events("task_paused")[0]["tier"] == "sonnet"
+
+
+async def test_reviewer_rate_limit_pauses(env: _Env) -> None:
+    limited = fake_review("error", cost_usd=0.1).model_copy(
+        update={"rate_limited": True, "rate_limit_resets_at": 1760000000}
+    )
+    worker = FakeWorker(default=_writes(cost_usd=0.5))
+    router = env.router(worker, reviewer=FakeReviewer(default=limited))
+    state = await router.route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "paused"
+    assert state.attempts == 0
+    assert state.history == []
+    assert state.usage.cost_usd == pytest.approx(0.6)
+    assert len(env.events("task_paused")) == 1
+    assert "task_failed" not in env.types() and "escalated" not in env.types()
+
+
+async def test_should_stop_pauses_before_second_attempt(env: _Env) -> None:
+    worker = FakeWorker(default=fake_result("failed"))
+    stops = iter([None, "stop now"])
+    router = env.router(worker, should_stop=lambda: next(stops))
+    state = await router.route(_order(), env.repo, TaskState(task_id="t1"))
+    assert state.status == "paused"
+    assert state.attempts == 1
+    assert state.error == "stop now"
+    assert len(worker.calls) == 1
+    assert env.events("task_paused") == [
+        {"attempt": 2, "tier": "sonnet", "reason": "stop now", "resets_at": None}
+    ]
+    assert env.types().count("attempt_started") == 1

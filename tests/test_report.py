@@ -205,7 +205,8 @@ def test_report_text_three_task_run():
         "sonnet  1         0        200    40      10          5            $0.0400\n"
         "opus    1         0        1000   200     0           0            $0.5000\n"
         "\n"
-        "Totals: 3 tasks: 2 done, 0 failed, 1 blocked, 0 not run; 4 attempts; cost $0.5600\n"
+        "Totals: 3 tasks: 2 done, 0 failed, 1 blocked, 0 paused, 0 not run; "
+        "4 attempts; cost $0.5600\n"
         "Escalated: 1 of 3 tasks (b)\n"
         "\n"
         "Needs attention\n"
@@ -225,7 +226,8 @@ def test_report_text_nothing_ran():
     assert "Per tier\n(no attempts)" in out
     assert "Needs attention" not in out
     assert out.endswith(
-        "Totals: 2 tasks: 0 done, 0 failed, 0 blocked, 2 not run; 0 attempts; cost $0.0000\n"
+        "Totals: 2 tasks: 0 done, 0 failed, 0 blocked, 0 paused, 2 not run; "
+        "0 attempts; cost $0.0000\n"
         "Escalated: 0 of 2 tasks"
     )
 
@@ -247,3 +249,18 @@ def test_report_text_failed_task_shows_error():
         "Needs attention\n- f (failed): acceptance failed: exit 1\n- n (blocked): -"
     )
     assert "1 failed, 1 blocked" in out
+
+
+def test_report_text_paused_task():
+    paused = TaskState(
+        task_id="p",
+        status="paused",
+        error="rate limited; resets at 2025-10-09T08:53:20+00:00",
+    )
+    pending = TaskState(task_id="q")
+    state = RunState(run_id="r4", plan_path="p", stage="S4", tasks={"p": paused, "q": pending})
+    out = report_text(state)
+    assert "0 blocked, 1 paused, 1 not run;" in out
+    assert out.endswith(
+        "Needs attention\n- p (paused): rate limited; resets at 2025-10-09T08:53:20+00:00"
+    )

@@ -269,3 +269,43 @@ async def test_no_change_task_done(tmp_path: Path) -> None:
 def test_max_parallel_zero(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Scheduler(_dag(), tmp_path, "r", FakeWorker(), max_parallel=0)
+
+
+async def test_rate_limit_stops_later_waves_and_resume_finishes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+
+    def limited(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
+        return WorkerResult(
+            status="error",
+            error="rate limited",
+            rate_limited=True,
+            rate_limit_resets_at=1760000000,
+        )
+
+    worker = FakeWorker(script={"c": [limited]}, default=_write)
+    sched = Scheduler(_dag(), repo, "r1", worker, max_parallel=1)
+    state = await sched.run()
+
+    st = state.tasks
+    assert [st[t].status for t in "ab"] == ["done", "done"]
+    assert st["c"].status == "paused"
+    assert st["c"].attempts == 0
+    assert [st[t].status for t in "def"] == ["pending"] * 3
+    assert sorted(c.order_id for c in worker.calls) == ["a", "b", "c"]
+    events = list(read_events(sched.run_dir / "events.jsonl"))
+    types = [e.type for e in events]
+    assert types.count("run_stopping") == 1
+    assert types.index("run_stopping") > types.index("wave_finished")
+    assert "wave_started" in types and types.count("wave_started") == 1
+    finished = events[-1]
+    assert finished.type == "run_finished"
+    assert finished.payload["paused"] == 1
+    assert finished.payload["stopped_reason"] == st["c"].error
+    assert sched.worktrees.path("c").exists()
+
+    worker2 = FakeWorker(default=_write)
+    second = Scheduler(_dag(), repo, "r1", worker2, max_parallel=1)
+    state2 = await second.run(resume=True)
+    assert all(t.status == "done" for t in state2.tasks.values())
+    assert sorted(c.order_id for c in worker2.calls) == ["c", "d", "e", "f"]
+    assert state2.tasks["c"].attempts == 1
