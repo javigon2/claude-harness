@@ -1,0 +1,333 @@
+"""Planner behind `harness plan`: one interactive Opus session that runs the plan-project
+skill until the user approves PROJECT_PLAN.md, then plan-stage on stage 1 until it writes a
+plan.json that load_plan accepts."""
+
+import asyncio
+import hashlib
+import re
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+    TextBlock,
+)
+from pydantic import BaseModel, ConfigDict, Field
+
+from harness.config import MODEL_IDS
+from harness.models import Usage
+from harness.plan import PlanError, load_plan
+from harness.worker import WORKER_ENV, usage_from_result
+
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+
+PLANNER_SKILLS: tuple[str, ...] = ("plan-project", "plan-stage")
+
+PLANNER_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
+
+PLANNER_MAX_TURNS = 80
+
+PROJECT_PLAN_FILE = "PROJECT_PLAN.md"
+
+STAGE_PLAN_DIR = Path("plans") / "stage-1"
+
+MAX_ROUNDS = 20
+
+MAX_FIX_ROUNDS = 2
+
+APPROVED_RE = re.compile(r"^Status: approved \d{4}-\d{2}-\d{2}$", re.MULTILINE)
+
+PLANNER_APPEND = (
+    "You are running headless inside `harness plan`. The user reads your replies as plain "
+    "terminal text and answers by typing; ask questions and request approval in your reply "
+    "text, then end your turn."
+)
+
+PROJECT_PROMPT = (
+    "Use the plan-project skill to plan this project. Target repo: {repo}\n\n"
+    "Project description:\n\n{description}"
+)
+
+STAGE_PROMPT = (
+    "{project_plan} is approved. Now use the plan-stage skill on stage 1 of {project_plan}. "
+    "Write plan.json and plan.md to {stage_dir}/ (exactly this directory). Run the skill's "
+    "validation snippet before you finish."
+)
+
+FIX_PROMPT = (
+    "`harness validate` rejected {plan_path}: {error}\n\n"
+    "Fix the plan and write it again to the same path."
+)
+
+
+class PlannerError(RuntimeError):
+    """The planner stopped without a valid plan. The message says why."""
+
+
+class PlannerTurn(BaseModel):
+    """One planner reply. `usage` is the session's running total so far (the SDK reports
+    cumulative usage on every turn of a ClaudeSDKClient session), not this turn alone."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = ""
+    usage: Usage = Field(default_factory=Usage)
+    error: str | None = None
+
+
+class PlanResult(BaseModel):
+    """What run_planner produced."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_plan: Path
+    plan_path: Path
+    usage: Usage = Field(default_factory=Usage)
+    rounds: int = 0
+
+
+@runtime_checkable
+class PlannerSession(Protocol):
+    async def send(self, text: str) -> PlannerTurn:
+        """Send one user message and return the planner's reply once its turn ends.
+        Failures come back as PlannerTurn.error, never as an exception (cancellation still
+        propagates)."""
+        ...
+
+    async def close(self) -> None:
+        """End the session. Safe to call more than once, and before any send()."""
+        ...
+
+
+Ask = Callable[[str], str | None]
+Say = Callable[[str], None]
+
+
+def check_skills(root: Path = HARNESS_ROOT) -> None:
+    """Raise PlannerError(f"planner skills not found under {root / '.claude' / 'skills'}")
+    unless <root>/.claude/skills/<name>/SKILL.md exists for every name in PLANNER_SKILLS."""
+    skills_dir = Path(root) / ".claude" / "skills"
+    for name in PLANNER_SKILLS:
+        if not (skills_dir / name / "SKILL.md").is_file():
+            raise PlannerError(f"planner skills not found under {root / '.claude' / 'skills'}")
+
+
+def is_approved(text: str) -> bool:
+    """True if `text` has a line that is exactly `Status: approved YYYY-MM-DD`."""
+    return APPROVED_RE.search(text) is not None
+
+
+def _fingerprint(path: Path) -> str | None:
+    """sha256 hex digest of the file's bytes, or None if it does not exist."""
+    try:
+        data = Path(path).read_bytes()
+    except FileNotFoundError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+class SdkPlannerSession:
+    """A PlannerSession on one ClaudeSDKClient, connected on the first send()."""
+
+    def __init__(
+        self,
+        repo: Path,
+        client_factory: Callable[[ClaudeAgentOptions], Any] | None = None,
+        harness_root: Path = HARNESS_ROOT,
+    ) -> None:
+        """self.repo = Path(repo).resolve(); self.harness_root = Path(harness_root).resolve();
+        self._factory = client_factory or ClaudeSDKClient (called as
+        factory(options=<ClaudeAgentOptions>)); self._client = None; self._usage = Usage()
+        (the running total from the latest ResultMessage)."""
+        self.repo = Path(repo).resolve()
+        self.harness_root = Path(harness_root).resolve()
+        self._factory = client_factory or ClaudeSDKClient
+        self._client: Any = None
+        self._usage = Usage()
+
+    def options(self) -> ClaudeAgentOptions:
+        """The exact options; values in the `decision: planner SDK options` context item."""
+        return ClaudeAgentOptions(
+            model=MODEL_IDS["opus"],
+            system_prompt={"type": "preset", "preset": "claude_code", "append": PLANNER_APPEND},
+            tools=[*PLANNER_TOOLS, "Skill"],
+            allowed_tools=list(PLANNER_TOOLS),
+            skills=list(PLANNER_SKILLS),
+            setting_sources=["project"],
+            add_dirs=[str(self.harness_root)],
+            permission_mode="acceptEdits",
+            cwd=str(self.repo),
+            max_turns=PLANNER_MAX_TURNS,
+            strict_mcp_config=True,
+            env=dict(WORKER_ENV),
+        )
+
+    async def send(self, text: str) -> PlannerTurn:
+        """Algorithm in the `decision: planner session` context item."""
+        if self._client is None:
+            client = self._factory(options=self.options())
+            try:
+                await client.connect()
+            except Exception as err:
+                return PlannerTurn(
+                    usage=self._usage,
+                    error=f"connect failed: {type(err).__name__}: {err}"[:2000],
+                )
+            self._client = client
+
+        result_msg: ResultMessage | None = None
+        last_text = ""
+        error: str | None = None
+        try:
+            await self._client.query(text)
+            async for message in self._client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    if message.parent_tool_use_id is None:
+                        joined = "".join(
+                            b.text for b in message.content if isinstance(b, TextBlock)
+                        )
+                        if joined.strip():
+                            last_text = joined
+                elif isinstance(message, ResultMessage):
+                    result_msg = message
+        except Exception as err:
+            error = f"{type(err).__name__}: {err}"[:2000]
+
+        if (
+            result_msg is not None
+            and isinstance(result_msg.result, str)
+            and result_msg.result.strip()
+        ):
+            reply = result_msg.result
+        else:
+            reply = last_text
+
+        if result_msg is not None:
+            self._usage = usage_from_result(result_msg)
+
+        if error is None:
+            if result_msg is None:
+                error = "turn ended without a result message"
+            elif result_msg.is_error:
+                error = f"result {result_msg.subtype}"
+                errors = getattr(result_msg, "errors", None)
+                if isinstance(errors, list) and errors:
+                    error += ": " + "; ".join(str(e) for e in errors)
+
+        return PlannerTurn(text=reply, usage=self._usage, error=error)
+
+    async def close(self) -> None:
+        """If connected: await self._client.disconnect() (Exception ignored), then
+        self._client = None."""
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+
+
+class FakePlannerSession:
+    """A scripted PlannerSession for tests. Each send() takes the next step: a PlannerTurn
+    (returned as a deep copy) or a callable (text) -> PlannerTurn, which may write files
+    to simulate the planner's edits."""
+
+    def __init__(self, steps: Sequence[PlannerTurn | Callable[[str], PlannerTurn]]) -> None:
+        """Copy steps into a list. self.sent: list[str] = []; self.closed = False."""
+        self._steps: list[PlannerTurn | Callable[[str], PlannerTurn]] = list(steps)
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send(self, text: str) -> PlannerTurn:
+        """Append text to self.sent FIRST, then pop and apply the front step. With no step
+        left, raise RuntimeError("no scripted planner turn left")."""
+        self.sent.append(text)
+        if not self._steps:
+            raise RuntimeError("no scripted planner turn left")
+        step = self._steps.pop(0)
+        if isinstance(step, PlannerTurn):
+            return step.model_copy(deep=True)
+        return step(text)
+
+    async def close(self) -> None:
+        """self.closed = True."""
+        self.closed = True
+
+
+async def run_planner(
+    description: str,
+    repo: Path,
+    session: PlannerSession,
+    ask: Ask,
+    say: Say,
+    *,
+    max_rounds: int = MAX_ROUNDS,
+) -> PlanResult:
+    """Drive both phases; algorithm in the `decision: planner flow` context item. Always
+    closes the session (finally). Raises PlannerError when it stops without a valid plan."""
+    repo = Path(repo).resolve()
+    project_plan = repo / PROJECT_PLAN_FILE
+    stage_dir = repo / STAGE_PLAN_DIR
+    plan_path = stage_dir / "plan.json"
+    rounds = 0
+    usage = Usage()
+
+    async def turn(msg: str) -> None:
+        nonlocal rounds, usage
+        rounds += 1
+        if rounds > max_rounds:
+            raise PlannerError(f"no valid plan after {max_rounds} rounds")
+        t = await session.send(msg)
+        usage = t.usage
+        if t.text.strip():
+            say(t.text)
+        if t.error:
+            raise PlannerError(f"planner session failed: {t.error}")
+
+    async def answer() -> str:
+        a = await asyncio.to_thread(ask, "> ")
+        if a is None:
+            raise PlannerError("aborted: no answer (end of input)")
+        if a.strip().lower() in ("quit", "exit"):
+            raise PlannerError("aborted by the user")
+        return a
+
+    try:
+        start_fp = _fingerprint(project_plan)
+        msg = PROJECT_PROMPT.format(repo=repo, description=description.strip())
+        while True:
+            await turn(msg)
+            if _fingerprint(project_plan) not in (None, start_fp) and is_approved(
+                project_plan.read_text(encoding="utf-8")
+            ):
+                break
+            msg = await answer()
+
+        plan_fp = _fingerprint(plan_path)
+        fixes = 0
+        msg = STAGE_PROMPT.format(project_plan=project_plan, stage_dir=stage_dir)
+        while True:
+            await turn(msg)
+            fp = _fingerprint(plan_path)
+            if fp is not None and fp != plan_fp:
+                plan_fp = fp
+                try:
+                    load_plan(plan_path)
+                except (PlanError, ValueError, OSError) as err:
+                    fixes += 1
+                    if fixes > MAX_FIX_ROUNDS:
+                        raise PlannerError(
+                            f"{plan_path} is still invalid after {MAX_FIX_ROUNDS} fixes: {err}"
+                        ) from err
+                    msg = FIX_PROMPT.format(plan_path=plan_path, error=err)
+                    continue
+                return PlanResult(
+                    project_plan=project_plan, plan_path=plan_path, usage=usage, rounds=rounds
+                )
+            msg = await answer()
+    finally:
+        await session.close()
