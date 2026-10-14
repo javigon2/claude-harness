@@ -110,3 +110,22 @@ def test_script_parses(tmp_path):
     js.write_text(m.group(1), encoding="utf-8")
     proc = subprocess.run([node, "--check", str(js)], capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_feed_does_not_repeat_task_id(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    m = re.search(r"function needsTid\(.*?\n  \}", _text(), re.S)
+    assert m
+    js = tmp_path / "tid.js"
+    js.write_text(
+        m.group(0)
+        + "\nconsole.log(JSON.stringify([needsTid('a', 'a started on haiku'),"
+        + " needsTid('a', 'worker_progress'), needsTid('ab', 'a started'),"
+        + " needsTid(null, 'run started: 2 orders in 2 waves')]));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([node, str(js)], capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.decode().strip() == "[false,true,true,false]"
