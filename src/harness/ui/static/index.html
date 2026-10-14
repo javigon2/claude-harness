@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness run viewer</title>
+<style>
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; color: #222; background: #fafafa; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; background: #fff; border-bottom: 1px solid #ddd; }
+main { padding: 12px 16px; }
+.chip { border: 1px solid #ccc; border-radius: 10px; padding: 1px 8px; font-size: 13px; background: #f4f4f4; }
+.phase { font-weight: 600; padding: 1px 8px; border-radius: 4px; }
+.phase-running { background: #dbeafe; color: #1e40af; }
+.phase-stopped { background: #fde68a; color: #78350f; }
+.phase-finished { background: #d1fae5; color: #065f46; }
+#banner { padding: 8px 16px; background: #fff3cd; border-bottom: 1px solid #e0c36a; }
+#banner:empty { display: none; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; font-size: 14px; }
+th { background: #f0f0f0; }
+.status { font-weight: 600; padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+.status-pending { background: #e5e7eb; color: #4b5563; }
+.status-running { background: #dbeafe; color: #1d4ed8; }
+.status-verifying { background: #ede9fe; color: #6d28d9; }
+.status-done { background: #d1fae5; color: #047857; }
+.status-failed { background: #fee2e2; color: #b91c1c; }
+.status-blocked { background: #f5c6c6; color: #7f1d1d; }
+.status-paused { background: #fef3c7; color: #92400e; }
+.activity, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.activity { color: #6b7280; font-size: 13px; }
+pre { white-space: pre-wrap; margin: 4px 0 0; }
+#feed { list-style: none; padding: 0; margin: 12px 0 0; font-size: 13px; }
+#feed li { padding: 2px 0; border-bottom: 1px solid #eee; }
+#feed .time { color: #6b7280; margin-right: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+#feed .tid { margin-right: 6px; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <select id="run-picker" aria-label="Run"></select>
+  <span id="stage"></span>
+  <span id="phase" class="phase"></span>
+  <span id="wave"></span>
+  <span id="cost"></span>
+  <span id="tiers"></span>
+</header>
+<div id="banner"></div>
+<main>
+  <p id="empty" class="hidden">No runs yet</p>
+  <div id="content">
+    <table id="tasks">
+      <thead><tr><th>Task</th><th>Status</th><th>Tier</th><th>Attempt</th><th>Tokens</th><th>Cost</th><th>Note</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <ol id="feed"></ol>
+  </div>
+</main>
+<script>
+(function () {
+  var picker = document.getElementById('run-picker');
+  var runs = [], latest = null, current = null, source = null;
+  var conn = false, problem = null, stopped = null;
+
+  function el(tag, className, text) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+  function num(x) { return (x === null || x === undefined || isNaN(Number(x))) ? '?' : String(x); }
+  function money(x) { return (x === null || x === undefined || isNaN(Number(x))) ? '$?' : '$' + Number(x).toFixed(4); }
+  function str(x) { return (x === null || x === undefined) ? '?' : String(x); }
+
+  function hashId() {
+    var h = location.hash.replace(/^#/, '');
+    if (!h) return '';
+    try { return decodeURIComponent(h); } catch (e) { return h; }
+  }
+
+  function renderBanner() {
+    var b = document.getElementById('banner');
+    var msg = '';
+    if (conn) msg = 'Connection lost, retrying...';
+    else if (problem !== null) msg = 'Problem reading the run: ' + problem;
+    else if (stopped) msg = 'Stopped early: ' + stopped + '. Resume from the terminal with `harness run <plan> --repo <repo> --resume`.';
+    b.textContent = msg;
+  }
+
+  function noteCell(t) {
+    var td = el('td');
+    var d = t.detail;
+    if (t.status === 'running' && t.activity) {
+      td.appendChild(el('span', 'activity', t.activity));
+    } else if (t.status === 'paused' && d !== null && d !== undefined) {
+      td.appendChild(document.createTextNode(String(d)));
+    } else if (t.status !== 'running' && t.status !== 'paused' && d !== null && d !== undefined) {
+      var det = el('details');
+      det.appendChild(el('summary', null, 'details'));
+      det.appendChild(el('pre', null, String(d)));
+      td.appendChild(det);
+    }
+    return td;
+  }
+
+  function render(v) {
+    stopped = v.stopped_reason || null;
+    document.getElementById('stage').textContent = str(v.stage);
+    var ph = document.getElementById('phase');
+    ph.className = 'phase phase-' + str(v.phase);
+    ph.textContent = str(v.phase);
+    document.getElementById('wave').textContent = 'wave ' + num(v.wave) + '/' + num(v.waves_total);
+    document.getElementById('cost').textContent = money(v.cost_usd);
+    var tiers = document.getElementById('tiers');
+    var chips = [];
+    (v.tiers || []).forEach(function (t) {
+      var n = t.attempts;
+      chips.push(el('span', 'chip', str(t.tier) + ' ' + num(n) + (n === 1 ? ' attempt ' : ' attempts ') + money(t.cost_usd)));
+    });
+    tiers.replaceChildren.apply(tiers, chips);
+
+    var rows = [];
+    (v.tasks || []).forEach(function (t) {
+      var tr = el('tr');
+      var c = el('td');
+      c.appendChild(el('strong', null, str(t.task_id)));
+      c.appendChild(document.createTextNode(' ' + (t.title === null || t.title === undefined ? '' : t.title)));
+      tr.appendChild(c);
+      var s = el('td');
+      s.appendChild(el('span', 'status status-' + str(t.status), str(t.status)));
+      tr.appendChild(s);
+      tr.appendChild(el('td', null, (t.tier ? t.tier : '-') + (t.escalated ? ' (escalated)' : '')));
+      var max = (t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
+      tr.appendChild(el('td', null, num(t.attempt) + '/' + max));
+      tr.appendChild(el('td', null, num(t.input_tokens) + ' in / ' + num(t.output_tokens) + ' out'));
+      tr.appendChild(el('td', null, money(t.cost_usd)));
+      tr.appendChild(noteCell(t));
+      rows.push(tr);
+    });
+    var body = document.querySelector('#tasks tbody');
+    body.replaceChildren.apply(body, rows);
+
+    var items = [];
+    (v.events || []).slice().reverse().forEach(function (e) {
+      var li = el('li', 'ev type-' + str(e.type));
+      li.appendChild(el('span', 'time', typeof e.ts === 'string' ? e.ts.slice(11, 19) : '?'));
+      if (e.task_id !== null && e.task_id !== undefined) li.appendChild(el('span', 'tid mono', String(e.task_id)));
+      li.appendChild(document.createTextNode(e.text === null || e.text === undefined ? '' : String(e.text)));
+      items.push(li);
+    });
+    var feed = document.getElementById('feed');
+    feed.replaceChildren.apply(feed, items);
+    renderBanner();
+  }
+
+  function closeSource() {
+    if (source) { source.close(); source = null; }
+  }
+
+  function open(id) {
+    closeSource();
+    current = id;
+    conn = false; problem = null; stopped = null;
+    renderBanner();
+    if (!id) return;
+    source = new EventSource('/api/stream/' + encodeURIComponent(id));
+    source.onopen = function () { conn = false; renderBanner(); };
+    source.onmessage = function (ev) {
+      var v;
+      try { v = JSON.parse(ev.data); } catch (e) { return; }
+      conn = false; problem = null;
+      try { render(v); } catch (e) { /* keep the previous view */ }
+    };
+    source.addEventListener('problem', function (ev) {
+      var msg = '?';
+      try { msg = String(JSON.parse(ev.data).error); } catch (e) { /* keep ? */ }
+      problem = msg;
+      renderBanner();
+    });
+    source.onerror = function () { conn = true; renderBanner(); };
+  }
+
+  function choose() {
+    var h = hashId();
+    var id = (h && runs.indexOf(h) >= 0) ? h : latest;
+    if (!id) id = null;
+    if (id !== current) open(id);
+    picker.value = id || '';
+  }
+
+  function renderRuns() {
+    var empty = runs.length === 0;
+    document.getElementById('empty').className = empty ? '' : 'hidden';
+    document.getElementById('content').className = empty ? 'hidden' : '';
+    document.querySelector('header').className = empty ? 'hidden' : '';
+    var opts = runs.map(function (r) { return el('option', null, r); });
+    picker.replaceChildren.apply(picker, opts);
+    opts.forEach(function (o) { o.value = o.textContent; });
+  }
+
+  function poll() {
+    fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
+      runs = Array.isArray(d.runs) ? d.runs : [];
+      latest = d.latest || null;
+      renderRuns();
+      choose();
+    }).catch(function () { /* next poll retries */ });
+  }
+
+  picker.addEventListener('change', function () { location.hash = '#' + encodeURIComponent(picker.value); });
+  window.addEventListener('hashchange', choose);
+  renderRuns();
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>
