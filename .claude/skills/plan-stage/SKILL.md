@@ -94,6 +94,8 @@ yourself and record it as a `decision` item in the `context` of each order it af
    - Where an order pins both an algorithm and a test of it, or says "never raises" and
      lists the exceptions to catch, did I run that algorithm against that test in a
      scratch file first?
+   - Does all pinned text (code, docstrings, examples) obey the order's own
+     `constraints`, e.g. "model ids only in config.py"? Grep it for what they forbid.
 
    Fix any order that fails a check, then run the check again.
 

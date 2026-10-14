@@ -1,7 +1,8 @@
 # T1.11: end-to-end run (MVP)
 
-Status: **not run yet.** The run calls real models (paid), so it waits for the user. This
-file holds the setup, the exact commands, the cost estimate and empty tables to fill in.
+Status: **done 2026-10-14. The MVP done-when is met:** both orders merged on the first try
+and the report printed. Run id `t111` in `/tmp/toy_repo`; the plan is copied to
+`examples/toy_plan.json`. Planning cost $1.06 and the run $0.08, $1.14 in all.
 
 ## Setup
 
@@ -31,7 +32,7 @@ uv run harness validate /tmp/toy_repo/plans/stage-1/plan.json
 cp /tmp/toy_repo/plans/stage-1/plan.json examples/toy_plan.json
 
 # 4. Run it (in a second terminal: uv run harness events /tmp/toy_repo/.harness/runs/<run_id> -f)
-uv run harness run /tmp/toy_repo/plans/stage-1/plan.json --repo /tmp/toy_repo --max-parallel 3 --review
+uv run harness run /tmp/toy_repo/plans/stage-1/plan.json --repo /tmp/toy_repo --max-parallel 2 --review --run-id t111
 
 # 5. Afterwards (also useful after a Ctrl-C)
 uv run harness status --repo /tmp/toy_repo
@@ -61,21 +62,57 @@ worker token counts (15–47k tokens per order):
 MVP), so watch `harness events -f` or `harness status` and stop with Ctrl-C if the running
 cost in the report passes the cap; `--resume` continues later.
 
-## Results (fill in)
+## Results
 
-| Order | Tier planned | Attempts | Tiers used | Final | Merged | Tokens in/out | Cost |
-|---|---|---|---|---|---|---|---|
-| | | | | | | | |
+| Order | Tier planned | Attempts | Tiers used | Final | Merged | Worker in/out | Review in/out | Worker cost | Review cost | Total |
+|---|---|---|---|---|---|---|---|---|---|---|
+| store-done-remove | haiku | 1 | haiku (+ sonnet review) | done | yes, `2c6dbc4` | 3,855 / 3,408 | 5,543 / 491 | $0.0058 | $0.0422 | $0.0480 |
+| cli-done-remove | haiku | 1 | haiku (+ sonnet review) | done | yes, `42c7edb` | 4,118 / 3,653 | 5,984 / 362 | $0.0048 | $0.0278 | $0.0326 |
 
-- Planner: rounds __, questions asked __, cost $__
-- Run: wall time __, total cost $__, escalations __ of __ tasks
-- Done-when: all tasks merged, or blocked ones have clear notes, and the report prints
+Token counts exclude cached input. Totals per task, cache included: 9,398 / 3,899
+in/out, 64,024 cache read, 24,524 cache write (store-done-remove); 10,102 / 4,015,
+63,799, 15,695 (cli-done-remove). Worker numbers come from the `worker_finished`
+events; review = state total minus worker.
 
-## What went wrong in the work orders (fill in)
+| Tier | Attempts | Cost |
+|---|---|---|
+| haiku (workers) | 2 | $0.0106 |
+| sonnet (reviews) | 2 | $0.0700 |
 
-| # | Problem | Order | Kind (order gap / worker / harness) |
+`harness report` prints a single "haiku 2 attempts $0.0806" row instead, because review
+usage is added to the attempt's tier (finding H1).
+
+- Planner: 3 rounds, 0 questions asked (the description was specific enough), cost
+  $1.0620. 2 stages in PROJECT_PLAN.md (5 tasks); stage 1 became 2 orders in 2 waves.
+- Run: wall time 57 s (21:56:53 to 21:57:50 UTC), total cost $0.0806, escalations 0 of
+  2 tasks, failures 0. Each worker took 11 turns in about 20 s.
+- After the run, toy main has 15 tests passing and `ruff check` clean. `ruff format
+  --check .` fails only on the planner's untracked PROJECT_PLAN.md (H3).
+- Isolation and login: every session's `session_init` event (2 workers on
+  claude-haiku-5-5, 2 reviews on claude-sonnet-5-5) and the planner's show
+  `apiKeySource: none`, which means the subscription login and no API key. The
+  planner's skills include plan-project and plan-stage, `mcp_servers` is empty, and
+  `~/dev/work-log/log.md` was unchanged after planning and after the run (same md5).
+- Done-when: met.
+
+Compared with the estimate ($2–8), the real cost was $1.14: almost all of it was
+planning on Opus, and the haiku workers cost about a cent each.
+
+## What went wrong in the work orders
+
+Nothing: both orders passed on the first try, and both reviews passed. Order 1 gave
+behaviour and signatures only; order 2 pasted the `done` command and asked for
+`remove` in the same shape. So this run exercised neither escalation nor `blocked`,
+which only the `--fake` rehearsal and the tests cover (`docs/DRY_RUN.md`).
+
+## Harness findings from the run
+
+| # | Finding | Kind | Blocks done-when? |
 |---|---|---|---|
-| | | | |
+| H1 | Review usage is booked under the worker's tier. `report` shows haiku $0.0806, but $0.0700 of it was the sonnet reviewer, so per-tier cost is wrong whenever `--review` is on. | harness bug (report/router) | no |
+| H2 | `harness plan` only plans stage 1 (hard-coded `plans/stage-1/`), so this project's 5 tasks became a 2-order run. Stage 2 (priority, `list --pending`, `search`) has no command. | harness gap | no |
+| H3 | The planner leaves `PROJECT_PLAN.md` and `plans/` untracked in the target repo's root. `ruff format --check .` checks the code blocks in PROJECT_PLAN.md and fails, so committing them would break every later order whose acceptance runs it. | harness / planner gap | no |
+| H4 | The planner made scratch dirs `/tmp/plancheck` and `/tmp/stage1check` and could not delete them (rm was denied). | planner hygiene | no |
 
 ## Things to check during the run
 

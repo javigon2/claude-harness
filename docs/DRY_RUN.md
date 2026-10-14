@@ -352,3 +352,85 @@ skeleton with F401 ignored, check that every import is used by the pinned decisi
   token counts as reported by the Agent tool).
 - Not exercised for real (paid, needs the user): `SdkReviewer`, `SdkPlannerSession`, and
   `harness run` with SdkWorker. T1.11 is their first real use; see `docs/RESULTS.md`.
+
+# T1.11 fixes: open issues before the MVP run
+
+Date: 2026-10-14. Plan: `plans/t1.11-fixes/plan.json` (6 orders, 2 waves, all opus; run id
+`t111f`). Same setup as T1.6–T1.10: one worktree per order via `WorktreeManager`, the
+`implementer` subagent (opus) given the order as a JSON file path, the orchestrator's own
+acceptance run and scope check against `git merge-base HEAD main`, then the `reviewer`
+subagent (opus). The three wave-1 orders ran in parallel. `worktree-per-run` was added
+after the other five merged, when the post-merge rehearsal found O3.
+
+## Result
+
+**5 of 6 orders passed on the first attempt**; `planner-session-init` needed one retry,
+caused by the order (G16), not the worker. Every orchestrator acceptance run passed and
+every review passed; all diffs stayed inside `files_owned`. Merged on main as `448a67c`
+(cli-noreturn), `dc49e3b` (worktree-cleanup), `5bac693` (sdk-session-init), `671bbba`
+(router-session-init), `1f2e431` (planner-session-init) and `9fee63a`
+(worktree-per-run). Main: **304 tests**, ruff clean; `harness validate` accepts every
+plan in `plans/`.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | worktree-cleanup | opus | pass | pass | 7 | 18.3k | 119 s |
+| 1 | sdk-session-init | opus | pass | pass | 5 | 34.7k | 124 s |
+| 1 | cli-noreturn | opus | pass | pass | 4 | 14.9k | 94 s |
+| 2 | router-session-init | opus | pass | pass | 5 | 19.3k | 107 s |
+| 2 | planner-session-init | opus | pass (constraint broken, G16) | pass after retry | 6 + 2 | 26.6k + 1.5k | 122 + 59 s |
+| 2 | worktree-per-run | opus | pass | pass | 4 | 14.9k | 92 s |
+
+Reviewer calls: 15.0k, 32.8k, 14.2k, 17.5k, 25.8k and 14.3k tokens.
+
+## Issues fixed
+
+| # | Issue | Fix |
+|---|---|---|
+| O1 | `cleanup()` removed every run's worktrees | only worktrees whose branch is under `refs/heads/harness/<run_id>/` (r1 vs r10 and detached worktrees tested) |
+| O3 | a new run's task failed with 0 attempts ("already exists") when an earlier run had kept a worktree with the same task id (found by the rehearsal below) | worktrees live in `.harness/worktrees/<run_id>/<task_id>` |
+| G8 | built-in skills/agents listed in worker and reviewer sessions | `skills=[]` + `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1` + `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` (see below: it cost 0 tokens) |
+| G13 | `_fail -> None` forced dead raises | `-> NoReturn`, 6 raises removed |
+| — | no way to check model, tools, login and isolation of a real session | `session_init` events (role worker/reviewer) in `events.jsonl`; `harness plan` prints the planner's init and writes `<repo>/.harness/planner/session_init.json` |
+
+## G8 check (no model call)
+
+A `ClaudeSDKClient` that connects but never sends a prompt makes no model call, yet
+`get_server_info()` and `get_context_usage()` answer. With worker options:
+
+| Variant | commands | agents | context (excl. buffer) |
+|---|---|---|---|
+| as before | 54 | 5 | system prompt 10 + tools 4,333 |
+| `skills=[]` | 54 | 5 | same |
+| + the two env vars | 38 | 0 | same |
+
+- The worker and reviewer context **never held a skill or agent listing**, because they
+  have no Skill or Agent tool. G8 cost 0 tokens; the fix tidies the init listing and
+  guards against a future tool-list change.
+- `agents={}` is a no-op in SDK 0.2.167 (`if self._agents:` never sends an empty dict).
+  The init `skills` array is not evidence of what the model sees (docs, and the table).
+- Planner options, same probe: skills in context = exactly `plan-project` (114 tokens) and
+  `plan-stage` (79); `memoryFiles: []`, so `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` does not
+  drop project skills (the open question from T1.10). The harness's three project agents
+  are counted in context (268 tokens) although the planner has no Agent tool. The account
+  shows `subscriptionType: Claude Enterprise`, `apiProvider: firstParty`.
+
+## Free rehearsal (`harness run --fake`)
+
+A copy of `examples/toy_repo` (git init, one commit on main) and a hand-written 4-order
+plan: a passing `uv run pytest -q` order, an independent one, one whose acceptance can't
+pass (max_attempts 3) and its dependent. Run 1: waves in order, escalation
+haiku → sonnet → opus, `blocked` with a replan note, the dependent `blocked`, exit 1,
+`status`/`report`/`state.json` consistent, `--resume` re-ran only the unfinished task, the
+blocked task's worktree kept for inspection. Run 2 (new run id, same repo) exposed O3;
+after the fix, two runs on one repo each keep their own `needs-file` worktree.
+
+## Order gaps
+
+| # | Gap | Order | Kind |
+|---|---|---|---|
+| G16 | The pinned `format_session_init` docstring held a literal model id, against the order's own "model ids only in config.py" constraint. The worker copied it and flagged the conflict; fixed on retry. | planner-session-init | order gap (planner) |
+| G17 | The order said 7 dead raises; there were 6. | cli-noreturn | order gap (minor) |
+
+G16 is a hole in the self-check, so `plan-stage` got one more question: does all pinned
+text obey the order's own constraints (grep it for what they forbid)?
