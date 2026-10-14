@@ -1,9 +1,15 @@
 """The run viewer's view model: what the page shows, built from a run's files. Read-only."""
 
+from pathlib import Path
+
 from pydantic import BaseModel, ConfigDict
 
 from harness.config import Tier
-from harness.models import TaskStatus
+from harness.events import EVENTS_FILE
+from harness.models import Event, TaskStatus
+from harness.plan import load_plan
+from harness.report import tier_totals
+from harness.state import STATE_FILE, load_state, run_dir, runs_root
 
 
 class TaskView(BaseModel):
@@ -129,3 +135,116 @@ def describe_event(type_: str, task_id: str | None, payload: dict) -> str:
         return _describe(type_, task_id, payload if isinstance(payload, dict) else {})
     except Exception:
         return type_
+
+
+def list_runs(repo: Path) -> list[str]:
+    """Names of the directories under runs_root(repo) that contain a state.json file,
+    newest first (reverse plain string order). [] if runs_root(repo) is not a directory."""
+    root = runs_root(repo)
+    if not root.is_dir():
+        return []
+    names = [p.name for p in root.iterdir() if p.is_dir() and (p / STATE_FILE).is_file()]
+    return sorted(names, reverse=True)
+
+
+def _read_events(path: Path) -> list[Event]:
+    """Every readable event in the events.jsonl at `path`, in file order. [] if the file
+    does not exist (FileNotFoundError); any other OSError propagates. The file is read as
+    UTF-8 with errors="replace"; blank lines are skipped, and so is every line that
+    Event.model_validate_json rejects (catch ValueError, which covers pydantic's
+    ValidationError), e.g. a partial last line."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    events: list[Event] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(Event.model_validate_json(line))
+        except ValueError:
+            continue
+    return events
+
+
+def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
+    """The RunView of run `run_id` in `repo`. Exact rules in the `decision: build_view
+    rules` context item. Raises FileNotFoundError(f"No run state at {path}") (path = the
+    state.json path, as a str) when it is not a file; StateError from load_state
+    propagates. Never writes to disk."""
+    directory = run_dir(repo, run_id)
+    path = directory / STATE_FILE
+    if not path.is_file():
+        raise FileNotFoundError(f"No run state at {path}")
+    state = load_state(directory)
+
+    plan_file = Path(state.plan_path)
+    if not plan_file.is_absolute():
+        plan_file = repo / plan_file
+    try:
+        orders = {o.id: o for o in load_plan(plan_file).orders}
+    except (OSError, ValueError):
+        orders = {}
+
+    tasks: list[TaskView] = []
+    for task_id, ts in state.tasks.items():
+        order = orders.get(task_id)
+        detail: str | None = None
+        if ts.replan_note:
+            detail = ts.replan_note
+        elif ts.error:
+            detail = ts.error
+        elif ts.status == "failed" and ts.history and ts.history[-1].feedback:
+            detail = ts.history[-1].feedback
+        tasks.append(
+            TaskView(
+                task_id=task_id,
+                title=order.title if order else task_id,
+                status=ts.status,
+                tier=ts.tier_used if ts.tier_used is not None else (order.tier if order else None),
+                attempt=ts.attempts,
+                max_attempts=order.budget.max_attempts if order else None,
+                escalated=len({r.tier for r in ts.history}) > 1,
+                cost_usd=ts.usage.cost_usd,
+                input_tokens=ts.usage.input_tokens,
+                output_tokens=ts.usage.output_tokens,
+                detail=detail,
+            )
+        )
+
+    events = _read_events(directory / EVENTS_FILE)
+    k = None
+    for i, e in enumerate(events):
+        if e.type == "run_started":
+            k = i
+    wave = sum(1 for e in events[k or 0 :] if e.type == "wave_started")
+    waves_total = 0
+    if k is not None:
+        waves = events[k].payload.get("waves")
+        if isinstance(waves, list):
+            waves_total = len(waves)
+
+    tail = events[-max_events:] if max_events > 0 else []
+    return RunView(
+        run_id=state.run_id,
+        stage=state.stage,
+        finished=state.finished,
+        wave=wave,
+        waves_total=waves_total,
+        cost_usd=sum(ts.usage.cost_usd for ts in state.tasks.values()),
+        tiers=[
+            TierView(tier=t, attempts=attempts, cost_usd=usage.cost_usd)
+            for t, (attempts, _reviews, usage) in tier_totals(state).items()
+        ],
+        tasks=tasks,
+        events=[
+            EventView(
+                ts=e.ts.isoformat(),
+                task_id=e.task_id,
+                type=e.type,
+                text=describe_event(e.type, e.task_id, e.payload),
+            )
+            for e in tail
+        ],
+    )
