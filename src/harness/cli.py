@@ -35,6 +35,16 @@ RepoOpt = Annotated[Path, typer.Option("--repo", help="Target git repo (default:
 RunIdOpt = Annotated[str | None, typer.Option("--run-id", help="Run id (default: the latest run).")]
 
 
+def _stored_plan_path(plan: Path, repo: Path) -> str:
+    """The plan path `harness ui` can always resolve: relative to `repo` (posix) when the plan
+    is inside it, else absolute."""
+    resolved = plan.resolve()
+    try:
+        return resolved.relative_to(repo).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
 def _fail(message: str) -> NoReturn:
     """typer.echo(message, err=True), then raise typer.Exit(code=1)."""
     typer.echo(message, err=True)
@@ -131,7 +141,7 @@ def run(
         repo_path,
         rid,
         _make_worker(fake),
-        plan_path=str(plan),
+        plan_path=_stored_plan_path(plan, repo_path),
         max_parallel=max_parallel,
         reviewer=_make_reviewer(review, fake),
         review_tier=cast(Tier, review_tier),

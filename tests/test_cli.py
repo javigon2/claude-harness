@@ -2,9 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from harness.cli import app
+from harness.ui.view import build_view
 from harness.worker import FakeWorker, WorkerResult, fake_result
 
 runner = CliRunner()
@@ -225,3 +227,44 @@ def test_run_max_cost_stops_with_exit_3(tmp_path: Path, monkeypatch) -> None:
         "Run stopped: estimated cost $1.00 passed the $0.70 cap. Resume with: "
         f"harness run {plan} --repo {repo.resolve()} --resume\n"
     ) in result.output
+
+
+def _stored_plan_path(repo: Path, rid: str) -> str:
+    return json.loads((repo / ".harness" / "runs" / rid / "state.json").read_text())["plan_path"]
+
+
+def test_run_stores_plan_path_relative_when_inside_repo(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    plan = _write_plan(repo, "plan.json", [_order("a", [], ["true"])])
+    result = runner.invoke(app, ["run", str(plan), "--fake", "--repo", str(repo), "--run-id", "r1"])
+    assert result.exit_code == 0, result.output
+    assert _stored_plan_path(repo, "r1") == "plan.json"
+
+
+def test_run_stores_plan_path_absolute_when_outside_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    _good_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["run", "plan.json", "--fake", "--repo", str(repo), "--run-id", "r1"]
+    )
+    assert result.exit_code == 0, result.output
+    stored = _stored_plan_path(repo, "r1")
+    assert stored == str((tmp_path / "plan.json").resolve())
+    view = build_view(repo, "r1")
+    assert [t.max_attempts for t in view.tasks] == [3, 3]
+
+
+def test_resume_keeps_viewer_resolvable_plan_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    _good_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    args = ["run", "plan.json", "--fake", "--repo", str(repo)]
+    assert runner.invoke(app, [*args, "--run-id", "r1"]).exit_code == 0
+    result = runner.invoke(app, [*args, "--resume"])
+    assert result.exit_code == 0, result.output
+    assert _stored_plan_path(repo, "r1") == str((tmp_path / "plan.json").resolve())
