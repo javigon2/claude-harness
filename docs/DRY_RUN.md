@@ -434,3 +434,44 @@ after the fix, two runs on one repo each keep their own `needs-file` worktree.
 
 G16 is a hole in the self-check, so `plan-stage` got one more question: does all pinned
 text obey the order's own constraints (grep it for what they forbid)?
+
+# T1.11 findings: H1-H3
+
+Date: 2026-10-14. Plan: `plans/t1.11-findings/plan.json` (4 orders, 2 waves, all opus;
+run id `t111h`). Same process as above. Worktrees now use the per-run layout
+(`.harness/worktrees/t111h/<task>`) from O3.
+
+## Result
+
+**4 of 4 orders passed on the first attempt**, in the orchestrator's own acceptance run and
+in review; all diffs stayed inside `files_owned`; no model id outside `config.py`. Merged as
+`6ec49a7` (attempt-review-usage), `9406e89` (worktree-ensure-excluded), `a037837`
+(report-review-tier) and `cb4ba98` (plan-stage-n). Main: **319 tests**, ruff clean.
+
+| Wave | Order | Tier | 1st attempt | Reviewer | Tool calls | Worker tokens | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | attempt-review-usage | opus | pass | pass | 4 | 19.8k | 113 s |
+| 1 | worktree-ensure-excluded | opus | pass | pass | 4 | 15.5k | 120 s |
+| 2 | report-review-tier | opus | pass | pass | 5 | 20.2k | 93 s |
+| 2 | plan-stage-n | opus | pass | pass | 10 | 39.8k | 140 s |
+
+Reviewer calls: 18.3k, 14.5k, 19.1k and 36.9k tokens.
+
+## What changed
+
+- **H1:** `AttemptRecord.usage` is the worker session only; the review is in
+  `review_usage` on `review_tier`. `tier_totals` returns (attempts, reviews, usage) and
+  the per-tier table has a `reviews` column, so a haiku run with sonnet reviews shows a
+  sonnet row. State files written before the fix (e.g. T1.11's `t111`) still show the old
+  single row: no migration.
+- **H2:** `harness plan --stage N` plans stage N of an approved PROJECT_PLAN.md (no
+  description; it refuses if the plan is missing or not approved).
+- **H3:** all planner output lives in `<repo>/.harness/plans/` (`PROJECT_PLAN.md`,
+  `stage-<n>/plan.json`, `plan.md`), and `harness plan` first calls the new
+  `harness.worktree.ensure_excluded(repo)`, so it is never committed or linted.
+
+## Order gaps
+
+None. The pinned table text was produced by running the algorithm in a scratch file first,
+and the pinned snippets were linted and grepped for model ids (the G16 check) before
+handing off.

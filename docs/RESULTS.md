@@ -17,7 +17,9 @@ and the report printed. Run id `t111` in `/tmp/toy_repo`; the plan is copied to
 
 ## Commands
 
-Run from the harness repo root (`~/dev/projects/agent-harness`):
+Run from the harness repo root (`~/dev/projects/agent-harness`). The T1.11 run used
+`plans/stage-1/` at the toy root; since H2/H3 were fixed the planner writes to
+`.harness/plans/` and any stage can be planned with `--stage N`:
 
 ```bash
 # 1. Fresh copy of the toy repo with one commit on main
@@ -28,17 +30,20 @@ cd /tmp/toy_repo && git init -b main && git add -A && git commit -m "toy repo" &
 uv run harness plan "$(cat examples/toy_description.md)" --repo /tmp/toy_repo
 
 # 3. Check the plan, then copy it here for the record
-uv run harness validate /tmp/toy_repo/plans/stage-1/plan.json
-cp /tmp/toy_repo/plans/stage-1/plan.json examples/toy_plan.json
+uv run harness validate /tmp/toy_repo/.harness/plans/stage-1/plan.json
+cp /tmp/toy_repo/.harness/plans/stage-1/plan.json examples/toy_plan.json
 
 # 4. Run it (in a second terminal: uv run harness events /tmp/toy_repo/.harness/runs/<run_id> -f)
-uv run harness run /tmp/toy_repo/plans/stage-1/plan.json --repo /tmp/toy_repo --max-parallel 2 --review --run-id t111
+uv run harness run /tmp/toy_repo/.harness/plans/stage-1/plan.json --repo /tmp/toy_repo --max-parallel 2 --review
 
 # 5. Afterwards (also useful after a Ctrl-C)
 uv run harness status --repo /tmp/toy_repo
 uv run harness report --repo /tmp/toy_repo
 # resume an interrupted run:
-uv run harness run /tmp/toy_repo/plans/stage-1/plan.json --repo /tmp/toy_repo --resume --review
+uv run harness run /tmp/toy_repo/.harness/plans/stage-1/plan.json --repo /tmp/toy_repo --resume --review
+
+# 6. Next stage of the approved project plan (no description)
+uv run harness plan --stage 2 --repo /tmp/toy_repo
 ```
 
 Optional dry rehearsal first (no model, free): step 4 with `--fake` shows the waves, the
