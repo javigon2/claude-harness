@@ -11,7 +11,14 @@ from harness.events import EVENTS_FILE
 from harness.events import follow as follow_lines
 from harness.models import Plan
 from harness.plan import PlanError, load_plan, validate_plan
-from harness.report import report_text, status_text
+from harness.planner import (
+    PlannerError,
+    PlannerSession,
+    SdkPlannerSession,
+    check_skills,
+    run_planner,
+)
+from harness.report import money, report_text, status_text
 from harness.review import FakeReviewer, Reviewer, SdkReviewer, fake_review
 from harness.scheduler import Scheduler, SchedulerError
 from harness.state import RunState, StateError, latest_run, load_state, new_run_id
@@ -154,6 +161,44 @@ def validate(plan: Path) -> None:
     typer.echo(f"OK: {len(p.orders)} orders in {len(waves)} waves")
     for i, wave in enumerate(waves, start=1):
         typer.echo(f"wave {i}: {', '.join(wave)}")
+
+
+def _make_planner_session(repo: Path) -> PlannerSession:
+    """SdkPlannerSession(repo). Tests monkeypatch harness.cli._make_planner_session."""
+    return SdkPlannerSession(repo)
+
+
+def _ask(prompt: str) -> str | None:
+    """input(prompt), or None on EOFError."""
+    try:
+        return input(prompt)
+    except EOFError:
+        return None
+
+
+@app.command("plan")
+def plan_cmd(
+    description: Annotated[str, typer.Argument(help="Short project description.")],
+    repo: RepoOpt = Path("."),
+) -> None:
+    """Plan a project interactively: PROJECT_PLAN.md, then plans/stage-1/plan.json."""
+    repo_path = repo.resolve()
+    if not repo_path.is_dir():
+        _fail(f"Not a directory: {repo_path}")
+    try:
+        check_skills()
+    except PlannerError as err:
+        _fail(str(err))
+    session = _make_planner_session(repo_path)
+    try:
+        result = asyncio.run(run_planner(description, repo_path, session, _ask, typer.echo))
+    except PlannerError as err:
+        _fail(str(err))
+        raise AssertionError("unreachable") from err
+    typer.echo("")
+    typer.echo(f"Plan written to {result.plan_path}")
+    typer.echo(f"Planner cost: {money(result.usage.cost_usd)} ({result.rounds} rounds)")
+    typer.echo(f"Next: harness run {result.plan_path} --repo {repo_path}")
 
 
 @app.command()
