@@ -12,6 +12,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     query,
 )
@@ -29,11 +30,34 @@ WORKER_TOOLS: tuple[str, ...] = ("Read", "Edit", "Write", "Glob", "Grep", "Bash"
 WORKER_ENV: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": "1",
+    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS": "1",
 }
 
 QueryFn = Callable[..., AsyncIterator[Any]]
 
 _JSON_BLOCK = re.compile(r"^```json[ \t]*\n(.*?)\n```[ \t]*$", re.DOTALL | re.MULTILINE)
+
+SESSION_INIT_KEYS: tuple[str, ...] = (
+    "model",
+    "tools",
+    "skills",
+    "mcp_servers",
+    "permissionMode",
+    "apiKeySource",
+)
+
+
+def session_init_facts(message: Any) -> dict[str, Any] | None:
+    """The SESSION_INIT_KEYS facts of an SDK init message: {key: message.data.get(key)} for
+    every key, in SESSION_INIT_KEYS order (a missing key maps to None). None unless
+    `message` is a SystemMessage whose subtype is "init" and whose data is a dict. Never
+    raises."""
+    if not isinstance(message, SystemMessage) or message.subtype != "init":
+        return None
+    if not isinstance(message.data, dict):
+        return None
+    return {key: message.data.get(key) for key in SESSION_INIT_KEYS}
 
 
 class SelfReportedCommand(BaseModel):
@@ -75,6 +99,7 @@ class WorkerResult(BaseModel):
     session_id: str | None = None
     final_text: str = ""
     error: str | None = None
+    session_init: dict[str, Any] | None = None
 
     @property
     def cost_usd(self) -> float:
@@ -218,6 +243,7 @@ class SdkWorker:
             system_prompt=self.system_prompt,
             tools=list(WORKER_TOOLS),
             allowed_tools=list(WORKER_TOOLS),
+            skills=[],
             permission_mode="acceptEdits",
             cwd=str(Path(cwd).resolve()),
             max_turns=order.budget.max_turns,
@@ -238,6 +264,7 @@ class SdkWorker:
         result_msg: ResultMessage | None = None
         last_text = ""
         error: str | None = None
+        session_init: dict[str, Any] | None = None
         try:
             async for message in self._query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
@@ -246,6 +273,9 @@ class SdkWorker:
                         last_text = text
                 elif isinstance(message, ResultMessage):
                     result_msg = message
+                elif isinstance(message, SystemMessage):
+                    if session_init is None:
+                        session_init = session_init_facts(message)
         except Exception as err:  # not BaseException: cancellation must propagate
             error = f"{type(err).__name__}: {err}"[:2000]
 
@@ -283,6 +313,7 @@ class SdkWorker:
             session_id=result_msg.session_id if result_msg else None,
             final_text=final_text,
             error=error,
+            session_init=session_init,
         )
         return apply_report(result, report)
 

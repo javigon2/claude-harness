@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 
 from harness.config import MODEL_IDS, Tier
 from harness.models import Budget, ContextItem, Usage, WorkOrder
@@ -22,7 +22,7 @@ from harness.review import (
     load_reviewer_prompt,
     parse_verdict,
 )
-from harness.worker import WORKER_ENV
+from harness.worker import SESSION_INIT_KEYS, WORKER_ENV
 
 DIFF = "diff --git a/x b/x\n+1\n"
 
@@ -195,6 +195,7 @@ def test_options(tier: Tier, tmp_path: Path) -> None:
     assert opts.strict_mcp_config is True
     assert opts.verbatim_prompts is True
     assert opts.env == WORKER_ENV
+    assert opts.skills == []
 
 
 async def test_query_receives_prompt_and_options(tmp_path: Path) -> None:
@@ -346,3 +347,41 @@ def test_fake_review_fields() -> None:
     assert res.usage == Usage(cost_usd=0.5)
     assert res.final_text == ""
     assert res.error is None
+
+
+# session init facts
+
+INIT_DATA: dict[str, Any] = {
+    "model": "m-init",
+    "tools": ["Read", "Glob", "Grep"],
+    "skills": [],
+    "mcp_servers": [],
+    "permissionMode": "dontAsk",
+    "apiKeySource": "none",
+    "cwd": "/somewhere",
+}
+
+INIT_FACTS: dict[str, Any] = {k: INIT_DATA[k] for k in SESSION_INIT_KEYS}
+
+
+async def test_review_keeps_first_init_facts(tmp_path: Path) -> None:
+    fake, _ = scripted(
+        SystemMessage(subtype="status", data={"model": "other"}),
+        SystemMessage(subtype="init", data=dict(INIT_DATA)),
+        SystemMessage(subtype="init", data=dict(INIT_DATA, model="m-second")),
+        text_msg("looking"),
+        result_msg(),
+    )
+    result = await SdkReviewer(query_fn=fake).review(make_order(), DIFF, "sonnet", tmp_path)
+    assert result.verdict == "pass"
+    assert result.session_init == INIT_FACTS
+
+
+async def test_review_without_init_is_none(tmp_path: Path) -> None:
+    fake, _ = scripted(result_msg())
+    result = await SdkReviewer(query_fn=fake).review(make_order(), DIFF, "sonnet", tmp_path)
+    assert result.session_init is None
+
+
+def test_fake_review_session_init_none() -> None:
+    assert fake_review().session_init is None

@@ -5,12 +5,13 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     query,
 )
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from harness.config import MODEL_IDS, Tier
 from harness.models import Usage, WorkOrder
-from harness.worker import WORKER_ENV, QueryFn, usage_from_result
+from harness.worker import WORKER_ENV, QueryFn, session_init_facts, usage_from_result
 
 ReviewVerdict = Literal["pass", "fail", "unknown", "error"]
 
@@ -51,6 +52,7 @@ class ReviewResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     final_text: str = ""
     error: str | None = None
+    session_init: dict[str, Any] | None = None
 
 
 @runtime_checkable
@@ -123,6 +125,7 @@ class SdkReviewer:
             system_prompt=self.system_prompt,
             tools=list(REVIEWER_TOOLS),
             allowed_tools=list(REVIEWER_TOOLS),
+            skills=[],
             permission_mode="dontAsk",
             cwd=str(Path(cwd).resolve()),
             max_turns=REVIEW_MAX_TURNS,
@@ -140,6 +143,7 @@ class SdkReviewer:
         result_msg: ResultMessage | None = None
         last_text = ""
         error: str | None = None
+        session_init: dict[str, Any] | None = None
         try:
             async for message in self._query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
@@ -148,6 +152,9 @@ class SdkReviewer:
                         last_text = text
                 elif isinstance(message, ResultMessage):
                     result_msg = message
+                elif isinstance(message, SystemMessage):
+                    if session_init is None:
+                        session_init = session_init_facts(message)
         except Exception as err:  # not BaseException: cancellation must propagate
             error = f"{type(err).__name__}: {err}"[:2000]
 
@@ -186,6 +193,7 @@ class SdkReviewer:
             usage=usage_from_result(result_msg),
             final_text=final_text,
             error=error,
+            session_init=session_init,
         )
 
 
