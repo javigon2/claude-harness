@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, NoReturn, cast
 
 import typer
 
@@ -33,7 +33,7 @@ RepoOpt = Annotated[Path, typer.Option("--repo", help="Target git repo (default:
 RunIdOpt = Annotated[str | None, typer.Option("--run-id", help="Run id (default: the latest run).")]
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     """typer.echo(message, err=True), then raise typer.Exit(code=1)."""
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
@@ -48,7 +48,6 @@ def _load_plan_or_exit(plan: Path) -> Plan:
         _fail(f"Invalid plan: {err}")
     except OSError as err:
         _fail(f"Cannot read plan: {err}")
-    raise AssertionError("unreachable")
 
 
 def _make_worker(fake: bool) -> Worker:
@@ -79,12 +78,10 @@ def _load_run_or_exit(repo: Path, run_id: str | None) -> RunState:
     rid = run_id or latest_run(repo)
     if rid is None:
         _fail(f"No runs in {runs_root_of(repo)}")
-        raise AssertionError("unreachable")
     try:
         return load_state(run_dir_of(repo, rid))
     except StateError as err:
         _fail(str(err))
-        raise AssertionError("unreachable") from err
 
 
 @app.command()
@@ -115,7 +112,6 @@ def run(
         rid = run_id or latest_run(repo_path)
         if rid is None:
             _fail(f"No run to resume in {runs_root_of(repo_path)}")
-            raise AssertionError("unreachable")
     else:
         rid = run_id or new_run_id()
     typer.echo(f"Run {rid}: {len(p.orders)} orders, state in {run_dir_of(repo_path, rid)}")
@@ -134,7 +130,6 @@ def run(
         state = asyncio.run(scheduler.run(resume=resume))
     except (SchedulerError, StateError) as err:
         _fail(str(err))
-        raise AssertionError("unreachable") from err
     typer.echo("")
     typer.echo(report_text(state))
     if any(t.status != "done" for t in state.tasks.values()):
@@ -194,7 +189,6 @@ def plan_cmd(
         result = asyncio.run(run_planner(description, repo_path, session, _ask, typer.echo))
     except PlannerError as err:
         _fail(str(err))
-        raise AssertionError("unreachable") from err
     typer.echo("")
     typer.echo(f"Plan written to {result.plan_path}")
     typer.echo(f"Planner cost: {money(result.usage.cost_usd)} ({result.rounds} rounds)")
