@@ -47,13 +47,17 @@ class Scheduler:
         review_tier: Tier = "sonnet",
         timeout_s: float = DEFAULT_TIMEOUT_S,
         integration_branch: str = "main",
+        max_cost_usd: float | None = None,
     ) -> None:
         """Store the arguments on self under the same names (repo as Path(repo).resolve()).
         Also: self.run_dir = run_dir(self.repo, run_id); self.events = EventLog(self.run_dir,
         run_id); self.worktrees = WorktreeManager(self.repo, run_id, integration_branch);
-        self.state: RunState | None = None. Raises ValueError if max_parallel < 1."""
+        self.state: RunState | None = None. Raises ValueError if max_parallel < 1 or if
+        max_cost_usd is not None and <= 0."""
         if max_parallel < 1:
             raise ValueError("max_parallel must be at least 1")
+        if max_cost_usd is not None and max_cost_usd <= 0:
+            raise ValueError("max_cost_usd must be greater than 0")
         self.plan = plan
         self.repo = Path(repo).resolve()
         self.run_id = run_id
@@ -64,14 +68,45 @@ class Scheduler:
         self.review_tier = review_tier
         self.timeout_s = timeout_s
         self.integration_branch = integration_branch
+        self.max_cost_usd = max_cost_usd
         self.run_dir = run_dir(self.repo, run_id)
         self.events = EventLog(self.run_dir, run_id)
         self.worktrees = WorktreeManager(self.repo, run_id, integration_branch)
         self.state: RunState | None = None
         self._stop_reason: str | None = None
+        self._budget_event: dict | None = None
 
     async def _emit(self, type_: str, payload: dict, task_id: str | None = None) -> None:
         await self.events.emit(type_, task_id=task_id, payload=payload)
+
+    @property
+    def stop_reason(self) -> str | None:
+        """Why the run stopped starting work (a rate limit, a cost cap), or None."""
+        return self._stop_reason
+
+    def _should_stop(self) -> str | None:
+        """Why no new attempt or task may start, or None. The first time the summed cost of
+        all tasks (done tasks of an earlier run included) is above max_cost_usd it sets
+        self._stop_reason and queues the `budget_exceeded` event for _flush_budget_event.
+        Attempts already running finish, so the final cost can pass the cap by what was in
+        flight."""
+        if self._stop_reason is not None:
+            return self._stop_reason
+        if self.max_cost_usd is None or self.state is None:
+            return None
+        total = sum(t.usage.cost_usd for t in self.state.tasks.values())
+        if total > self.max_cost_usd:
+            self._stop_reason = (
+                f"estimated cost ${total:.2f} passed the ${self.max_cost_usd:.2f} cap"
+            )
+            self._budget_event = {"cost_usd": total, "max_cost_usd": self.max_cost_usd}
+        return self._stop_reason
+
+    async def _flush_budget_event(self) -> None:
+        """Emit the queued `budget_exceeded` event, once."""
+        if self._budget_event is not None:
+            payload, self._budget_event = self._budget_event, None
+            await self._emit("budget_exceeded", payload)
 
     async def run(self, resume: bool = False) -> RunState:
         """Run the whole plan and return the final RunState (also saved to state.json).
@@ -205,7 +240,8 @@ class Scheduler:
         `decision: task algorithm` context item. Never raises except CancelledError."""
         assert self.state is not None
         async with sem:
-            if self._stop_reason is not None:
+            if self._should_stop() is not None:
+                await self._flush_budget_event()
                 return
             ts = self.state.tasks[order.id]
             branch = self.worktrees.branch(order.id)
@@ -241,9 +277,10 @@ class Scheduler:
                 review_tier=self.review_tier,
                 timeout_s=self.timeout_s,
                 on_state=self._save,
-                should_stop=lambda: self._stop_reason,
+                should_stop=self._should_stop,
             )
             await router.route(order, path, ts, base=base)
+            await self._flush_budget_event()
             if ts.status == "paused" and self._stop_reason is None:
                 self._stop_reason = ts.error
             if ts.status != "done":

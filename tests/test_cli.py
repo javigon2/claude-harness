@@ -5,7 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from harness.cli import app
-from harness.worker import FakeWorker, WorkerResult
+from harness.worker import FakeWorker, WorkerResult, fake_result
 
 runner = CliRunner()
 
@@ -183,5 +183,45 @@ def test_run_rate_limited_exits_3_with_resume_hint(tmp_path: Path, monkeypatch) 
     assert "1 paused" in result.output
     assert (
         "Run stopped: rate limited; resets at 2025-10-09T08:53:20+00:00. Resume with: "
+        f"harness run {plan} --repo {repo.resolve()} --resume\n"
+    ) in result.output
+
+
+def test_run_max_cost_must_be_positive(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    result = runner.invoke(
+        app, ["run", str(_good_plan(tmp_path)), "--fake", "--repo", str(repo), "--max-cost", "0"]
+    )
+    assert result.exit_code == 1
+    assert "--max-cost must be greater than 0" in result.output
+
+
+def test_run_max_cost_with_fake_that_costs_nothing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    result = runner.invoke(
+        app, ["run", str(_good_plan(tmp_path)), "--fake", "--repo", str(repo), "--max-cost", "1"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_run_max_cost_stops_with_exit_3(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    plan = _write_plan(
+        tmp_path,
+        "cost.json",
+        [_order("a", [], ["true"]), _order("b", ["a"], ["true"]), _order("c", ["b"], ["true"])],
+    )
+    worker = FakeWorker(default=fake_result("done", cost_usd=0.5))
+    monkeypatch.setattr("harness.cli._make_worker", lambda fake: worker)
+    result = runner.invoke(
+        app,
+        ["run", str(plan), "--fake", "--repo", str(repo), "--run-id", "r1", "--max-cost", "0.7"],
+    )
+    # a and b run (0.5, then 1.0 > 0.7 after b); c stays pending, but the run was stopped.
+    assert [c.order_id for c in worker.calls] == ["a", "b"]
+    assert "budget_exceeded" in {e["type"] for e in _events(repo, "r1")}
+    assert result.exit_code == 3, result.output
+    assert (
+        "Run stopped: estimated cost $1.00 passed the $0.70 cap. Resume with: "
         f"harness run {plan} --repo {repo.resolve()} --resume\n"
     ) in result.output

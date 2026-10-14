@@ -102,9 +102,18 @@ def run(
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds per command.")] = (
         DEFAULT_TIMEOUT_S
     ),
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            help="Stop starting new attempts once the estimated cost passes this many USD.",
+        ),
+    ] = None,
     repo: RepoOpt = Path("."),
 ) -> None:
     """Run a plan."""
+    if max_cost is not None and max_cost <= 0:
+        _fail("--max-cost must be greater than 0")
     if review_tier not in TIER_LADDER:
         _fail(f"Unknown tier: {review_tier}")
     p = _load_plan_or_exit(plan)
@@ -126,6 +135,7 @@ def run(
         reviewer=_make_reviewer(review, fake),
         review_tier=cast(Tier, review_tier),
         timeout_s=timeout,
+        max_cost_usd=max_cost,
     )
     try:
         state = asyncio.run(scheduler.run(resume=resume))
@@ -134,11 +144,12 @@ def run(
     typer.echo("")
     typer.echo(report_text(state))
     paused = next((t for t in state.tasks.values() if t.status == "paused"), None)
-    if paused is not None:
+    stopped = paused.error if paused is not None else scheduler.stop_reason
+    if paused is not None or stopped is not None:
         hint = f"harness run {plan} --repo {repo_path} --resume"
         if review:
             hint += " --review"
-        typer.echo(f"Run stopped: {paused.error}. Resume with: {hint}")
+        typer.echo(f"Run stopped: {stopped}. Resume with: {hint}")
         raise typer.Exit(code=3)
     if any(t.status != "done" for t in state.tasks.values()):
         raise typer.Exit(code=1)

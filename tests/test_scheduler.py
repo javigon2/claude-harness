@@ -309,3 +309,77 @@ async def test_rate_limit_stops_later_waves_and_resume_finishes(tmp_path: Path) 
     assert all(t.status == "done" for t in state2.tasks.values())
     assert sorted(c.order_id for c in worker2.calls) == ["c", "d", "e", "f"]
     assert state2.tasks["c"].attempts == 1
+
+
+def _flat(*oids: str, attempts: int = 1) -> Plan:
+    return Plan(stage="test", orders=[_order(o, attempts=attempts) for o in oids])
+
+
+def _costly(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
+    (cwd / f"{order.id}.txt").write_text(f"{order.id}\n")
+    return fake_result(cost_usd=0.4)
+
+
+def test_max_cost_must_be_positive(tmp_path: Path) -> None:
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError):
+            Scheduler(_flat("a"), tmp_path, "r", FakeWorker(), max_cost_usd=bad)
+
+
+async def test_cost_cap_stops_before_fourth_task(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    worker = FakeWorker(default=_costly)
+    sched = Scheduler(
+        _flat("a", "b", "c", "d", "e"), repo, "r1", worker, max_parallel=1, max_cost_usd=1.0
+    )
+    state = await sched.run()
+
+    assert [c.order_id for c in worker.calls] == ["a", "b", "c"]
+    assert [state.tasks[t].status for t in "abc"] == ["done"] * 3
+    assert [state.tasks[t].status for t in "de"] == ["pending"] * 2
+    events = list(read_events(sched.run_dir / "events.jsonl"))
+    types = [e.type for e in events]
+    assert types.count("budget_exceeded") == 1
+    budget = next(e for e in events if e.type == "budget_exceeded")
+    assert budget.payload["max_cost_usd"] == 1.0
+    assert budget.payload["cost_usd"] == pytest.approx(1.2)
+    assert types.count("run_stopping") == 1
+    reason = "estimated cost $1.20 passed the $1.00 cap"
+    assert events[-1].payload["stopped_reason"] == reason
+    assert events[-1].payload["paused"] == 0
+
+
+async def test_cost_cap_pauses_task_between_attempts(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+
+    def failing(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
+        return fake_result(status="failed", cost_usd=0.4)
+
+    worker = FakeWorker(default=failing)
+    sched = Scheduler(_flat("a", "b", attempts=5), repo, "r1", worker, max_parallel=1)
+    sched.max_cost_usd = 1.0
+    state = await sched.run()
+
+    assert len(worker.calls) == 3
+    assert state.tasks["a"].status == "paused"
+    assert state.tasks["a"].attempts == 3
+    assert state.tasks["a"].error == "estimated cost $1.20 passed the $1.00 cap"
+    assert state.tasks["b"].status == "pending"
+    types = [e.type for e in read_events(sched.run_dir / "events.jsonl")]
+    assert types.count("budget_exceeded") == 1
+    assert types.count("task_paused") == 1
+
+    worker2 = FakeWorker(default=_write)
+    second = Scheduler(_flat("a", "b", attempts=5), repo, "r1", worker2, max_parallel=1)
+    state2 = await second.run(resume=True)
+    assert all(t.status == "done" for t in state2.tasks.values())
+
+
+async def test_no_cost_cap_never_stops(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    worker = FakeWorker(default=_costly)
+    sched = Scheduler(_flat("a", "b", "c", "d", "e"), repo, "r1", worker, max_parallel=1)
+    state = await sched.run()
+    assert all(t.status == "done" for t in state.tasks.values())
+    types = [e.type for e in read_events(sched.run_dir / "events.jsonl")]
+    assert "budget_exceeded" not in types and "run_stopping" not in types
