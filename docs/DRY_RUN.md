@@ -544,3 +544,70 @@ nothing): a and b merged, c stayed `pending`, exit 3, the resume hint printed, e
 `harness report` showed "2 done, 0 paused, 1 not run". `--resume` without the cap ran c and
 finished 3/3 done. The rate-limit pause path is covered by the tests only (no way to trigger a
 real one for free).
+
+# UI stage 2 (server, page, `harness ui`)
+
+Date: 2026-10-14. Plan: `plans/ui-stage2/plan.json` (5 orders, 3 waves). Orchestrator:
+Sonnet 5.5 in Claude Code; workers: `implementer` subagent at the order's tier; review:
+`reviewer` subagent on Opus. Stage 1 (view model) is in the work log, not here.
+
+## Result
+
+**5 of 5 orders passed on the first attempt** (my own acceptance run in the worktree, scope
+check against `files_owned`, then review). No retry, so escalation was not exercised. Main:
+465 tests, `ruff check` and `ruff format --check src tests` clean. Nothing pushed.
+
+| Wave | Order | Tier | Merged | Tests on main |
+|---|---|---|---|---|
+| - | plan commit | - | `924512f` | 403 |
+| 1 | ui-fixtures-paused | sonnet | `d85cbce` | 406 |
+| 1 | ui-server | sonnet | `256caad` | 420 |
+| 2 | ui-view-backend | sonnet | `cb7f180` | 441 |
+| 2 | ui-cli | haiku | `32f93be` | 448 |
+| 3 | ui-page | sonnet | `5ac6d61` | 465 |
+
+## Order gaps
+
+- ui-view-backend replaced one existing describe test row (`worker_progress` used to fall
+  through to its bare type name); the order's new wording makes that row false. Reviewer agreed.
+- ui-cli (haiku) ran `ruff format` on its own test file after a format failure; in scope.
+- ui-page: the worker never ran the page in a browser, and said so. Review was by reading
+  only. The page ran for the first time in the manual check below.
+- Reviewers got the order and diff as file paths (they have Read, no shell) instead of
+  pasted into the prompt, because the orders carry ~20 KB of context each.
+- ui-view-backend's worker did not re-run the full suite after its last lint fix; my own
+  run did (427 passed).
+- Reviewer nits, not fixed: unused `sig` parameter in `server.py` `_snapshot`; `import json`
+  inside a test in `test_ui_page.py`; HEAD gets a body with its 405; a running task with a
+  detail but no activity shows an empty Note cell.
+
+## Manual check (scratch copy of `examples/toy_repo`, git-inited)
+
+`harness ui --repo <copy> --port 8791`, then `harness run examples/toy_plan.json --repo
+<copy> --fake --run-id fake1` (blocked path: 3 attempts, escalation, dependent blocked),
+then `write_paused_run`, `write_capped_run`, `write_running_run` and `append_event` for
+`worker_progress` (Edit, then Bash) on the running one. Headless Chrome screenshots, in
+`/private/tmp/claude-501/-Users-javi-gonzalezpaterna-dev-projects-agent-harness/a7ae8205-357c-4856-9d27-6a8042518373/scratchpad/shots/`:
+`blocked.png`, `paused.png`, `capped.png`, `running-before.png`, `running-edit.png`,
+`running-bash.png`.
+
+Worked: status badges, `stopped` phase plus banner with the reason (rate limit and cost
+cap), paused reason inline in Note, running row's Note shows `Bash: uv run pytest -q`
+after the append, feed newest first, no `worker_progress` in the feed.
+
+Found:
+- `--fake` run shows `3/?` attempts and the id as title: `plan_path` is stored as given
+  (`examples/toy_plan.json`, relative to the cwd of `harness run`) and the view resolves it
+  against the repo, so the plan is not found. Plans inside the repo are fine.
+- Feed lines repeat the task id (row prefix plus the stage-1 describe text), e.g. `a  a started on haiku`.
+- Not demonstrated: one page updating live across appends. Each screenshot was a fresh load
+  (SSE delivery itself is covered by `tests/test_ui_server.py`).
+- Headless Chrome hangs with `--virtual-time-budget` while an SSE stream is open; use
+  `--timeout=4000` instead.
+- Known limit: a crashed run keeps showing `running`.
+
+## Decisions
+
+Plan decisions stand as in `plans/ui-stage2/plan.md` (Host check kept, 7 statuses, `phase`
+and `stopped_reason`, progress as `activity` not in the feed). Docs commit left to the user:
+this section is uncommitted on main.

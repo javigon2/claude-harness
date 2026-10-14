@@ -163,4 +163,4 @@ You are working in `~/dev/projects/agent-harness/`. It is a plan-and-execute run
 5. **Report back:**
    - what merged (shas), the test count, and the decisions you had to take
    - the exact new event payloads, which I'll pass to the UI chat
-   - anything you couldn't finish
+   - anything you couldn't finishCre
