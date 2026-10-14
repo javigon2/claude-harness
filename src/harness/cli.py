@@ -26,6 +26,7 @@ from harness.state import run_dir as run_dir_of
 from harness.state import runs_root as runs_root_of
 from harness.verify import DEFAULT_TIMEOUT_S
 from harness.worker import FakeWorker, SdkWorker, Worker, fake_result
+from harness.worktree import WorktreeError, ensure_excluded
 
 app = typer.Typer(help="Plan-and-execute harness for Claude agents.", no_args_is_help=True)
 
@@ -173,20 +174,41 @@ def _ask(prompt: str) -> str | None:
 
 @app.command("plan")
 def plan_cmd(
-    description: Annotated[str, typer.Argument(help="Short project description.")],
+    description: Annotated[
+        str | None, typer.Argument(help="Short project description (stage 1 only).")
+    ] = None,
+    stage: Annotated[
+        int,
+        typer.Option(
+            "--stage",
+            min=1,
+            help="Stage of the approved project plan to turn into work orders.",
+        ),
+    ] = 1,
     repo: RepoOpt = Path("."),
 ) -> None:
-    """Plan a project interactively: PROJECT_PLAN.md, then plans/stage-1/plan.json."""
+    """Plan a project interactively under .harness/plans/: PROJECT_PLAN.md (stage 1), then
+    stage-N/plan.json."""
     repo_path = repo.resolve()
     if not repo_path.is_dir():
         _fail(f"Not a directory: {repo_path}")
+    if stage == 1 and (description is None or not description.strip()):
+        _fail("A project description is required for stage 1.")
+    if stage > 1 and description is not None:
+        _fail("Pass no description with --stage above 1: the approved project plan is the input.")
     try:
         check_skills()
     except PlannerError as err:
         _fail(str(err))
+    try:
+        ensure_excluded(repo_path)
+    except (WorktreeError, OSError):
+        pass
     session = _make_planner_session(repo_path)
     try:
-        result = asyncio.run(run_planner(description, repo_path, session, _ask, typer.echo))
+        result = asyncio.run(
+            run_planner(description or "", repo_path, session, _ask, typer.echo, stage=stage)
+        )
     except PlannerError as err:
         _fail(str(err))
     typer.echo("")

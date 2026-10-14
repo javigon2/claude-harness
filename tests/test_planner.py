@@ -15,6 +15,8 @@ from harness.planner import (
     PLANNER_MAX_TURNS,
     PLANNER_SKILLS,
     PLANNER_TOOLS,
+    PLANS_DIR,
+    PROJECT_PLAN_FILE,
     PROJECT_PROMPT,
     STAGE_PLAN_DIR,
     STAGE_PROMPT,
@@ -27,6 +29,7 @@ from harness.planner import (
     format_session_init,
     is_approved,
     run_planner,
+    stage_plan_dir,
 )
 from harness.worker import WORKER_ENV
 
@@ -132,7 +135,9 @@ INVALID_PLAN = {"stage": "s", "orders": [{**VALID_PLAN["orders"][0], "depends_on
 
 
 def write_project(repo: Path, status: str, body: str = "plan body") -> None:
-    (repo / "PROJECT_PLAN.md").write_text(f"# Plan\n\nStatus: {status}\n\n{body}\n")
+    path = repo / PROJECT_PLAN_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# Plan\n\nStatus: {status}\n\n{body}\n")
 
 
 def write_stage(repo: Path, data: Any) -> None:
@@ -358,13 +363,15 @@ async def test_run_planner_happy_path(tmp_path: Path) -> None:
     result = await run_planner("  build a thing  ", tmp_path, session, ask, said.append)
     repo = tmp_path.resolve()
     assert result.plan_path == repo / STAGE_PLAN_DIR / "plan.json"
-    assert result.project_plan == repo / "PROJECT_PLAN.md"
+    assert result.project_plan == repo / PROJECT_PLAN_FILE
     assert result.rounds == 4
     assert result.usage.cost_usd == pytest.approx(0.4)
-    assert session.sent[0] == PROJECT_PROMPT.format(repo=repo, description="build a thing")
+    assert session.sent[0] == PROJECT_PROMPT.format(
+        repo=repo, project_plan=repo / PROJECT_PLAN_FILE, description="build a thing"
+    )
     assert session.sent[1:3] == ["defaults", "approve"]
     assert session.sent[3] == STAGE_PROMPT.format(
-        project_plan=repo / "PROJECT_PLAN.md", stage_dir=repo / STAGE_PLAN_DIR
+        project_plan=repo / PROJECT_PLAN_FILE, stage=1, stage_dir=repo / STAGE_PLAN_DIR
     )
     assert said == [
         "Some questions?",
@@ -460,7 +467,7 @@ async def test_run_planner_preexisting_approved_plan_needs_rewrite(tmp_path: Pat
     result = await run_planner("d", tmp_path, session, ask, lambda _t: None)
     assert result.rounds == 3
     assert session.sent[1] == "revise"
-    assert session.sent[2].startswith(str(tmp_path.resolve() / "PROJECT_PLAN.md"))
+    assert session.sent[2].startswith(str(tmp_path.resolve() / PROJECT_PLAN_FILE))
 
 
 async def test_run_planner_ignores_stale_plan_json(tmp_path: Path) -> None:
@@ -479,6 +486,70 @@ async def test_run_planner_ignores_stale_plan_json(tmp_path: Path) -> None:
     assert result.rounds == 5
     assert session.sent[4] == "sonnet"
     assert result.usage.cost_usd == pytest.approx(0.5)
+
+
+def test_stage_plan_dir() -> None:
+    assert stage_plan_dir(1) == STAGE_PLAN_DIR
+    assert stage_plan_dir(2) == PLANS_DIR / "stage-2"
+    assert PLANS_DIR == Path(".harness") / "plans"
+    with pytest.raises(ValueError):
+        stage_plan_dir(0)
+
+
+def write_stage_n(repo: Path, stage: int, data: Any) -> None:
+    d = repo / stage_plan_dir(stage)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "plan.json").write_text(json.dumps(data))
+
+
+async def test_run_planner_stage_2(tmp_path: Path) -> None:
+    write_project(tmp_path, "approved 2026-10-14")
+    session = FakePlannerSession(
+        [step("Stage 2 written.", 0.4, lambda: write_stage_n(tmp_path, 2, VALID_PLAN))]
+    )
+    ask, asked = asker([])
+    said: list[str] = []
+    result = await run_planner("", tmp_path, session, ask, said.append, stage=2)
+    repo = tmp_path.resolve()
+    assert session.sent == [
+        STAGE_PROMPT.format(
+            project_plan=repo / PROJECT_PLAN_FILE, stage=2, stage_dir=repo / PLANS_DIR / "stage-2"
+        )
+    ]
+    assert "stage 2 of" in session.sent[0]
+    assert asked == []
+    assert result.plan_path == repo / ".harness" / "plans" / "stage-2" / "plan.json"
+    assert result.project_plan == repo / PROJECT_PLAN_FILE
+    assert result.rounds == 1
+    assert said == ["Stage 2 written."]
+    assert session.closed
+
+
+@pytest.mark.parametrize("status", [None, "draft"])
+async def test_run_planner_stage_2_needs_approved_plan(tmp_path: Path, status: str | None) -> None:
+    if status is not None:
+        write_project(tmp_path, status)
+    session = FakePlannerSession([step("x", 0.1)])
+    ask, asked = asker([])
+    with pytest.raises(PlannerError, match="harness plan") as exc:
+        await run_planner("", tmp_path, session, ask, lambda _t: None, stage=2)
+    assert str(exc.value) == (
+        f"{tmp_path.resolve() / PROJECT_PLAN_FILE} is missing or not approved; "
+        "run `harness plan` for stage 1 first"
+    )
+    assert session.sent == []
+    assert asked == []
+    assert session.closed
+
+
+async def test_run_planner_stage_0(tmp_path: Path) -> None:
+    session = FakePlannerSession([step("x", 0.1)])
+    ask, _ = asker([])
+    with pytest.raises(PlannerError) as exc:
+        await run_planner("d", tmp_path, session, ask, lambda _t: None, stage=0)
+    assert str(exc.value) == "stage must be at least 1"
+    assert session.sent == []
+    assert session.closed
 
 
 async def test_run_planner_closes_on_session_exception(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """Planner behind `harness plan`: one interactive Opus session that runs the plan-project
-skill until the user approves PROJECT_PLAN.md, then plan-stage on stage 1 until it writes a
-plan.json that load_plan accepts."""
+skill until the user approves PROJECT_PLAN.md, then plan-stage on stage N until it writes a
+plan.json that load_plan accepts. Every file goes under <repo>/.harness/plans/."""
 
 import asyncio
 import hashlib
@@ -33,9 +33,11 @@ PLANNER_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash
 
 PLANNER_MAX_TURNS = 80
 
-PROJECT_PLAN_FILE = "PROJECT_PLAN.md"
+PLANS_DIR = Path(".harness") / "plans"
 
-STAGE_PLAN_DIR = Path("plans") / "stage-1"
+PROJECT_PLAN_FILE = PLANS_DIR / "PROJECT_PLAN.md"
+
+STAGE_PLAN_DIR = PLANS_DIR / "stage-1"
 
 MAX_ROUNDS = 20
 
@@ -50,14 +52,15 @@ PLANNER_APPEND = (
 )
 
 PROJECT_PROMPT = (
-    "Use the plan-project skill to plan this project. Target repo: {repo}\n\n"
+    "Use the plan-project skill to plan this project. Target repo: {repo}\n"
+    "Write the plan to {project_plan} (exactly this path, not the repo root).\n\n"
     "Project description:\n\n{description}"
 )
 
 STAGE_PROMPT = (
-    "{project_plan} is approved. Now use the plan-stage skill on stage 1 of {project_plan}. "
-    "Write plan.json and plan.md to {stage_dir}/ (exactly this directory). Run the skill's "
-    "validation snippet before you finish."
+    "{project_plan} is approved. Now use the plan-stage skill on stage {stage} of "
+    "{project_plan}. Write plan.json and plan.md to {stage_dir}/ (exactly this "
+    "directory). Run the skill's validation snippet before you finish."
 )
 
 FIX_PROMPT = (
@@ -66,6 +69,14 @@ FIX_PROMPT = (
 )
 
 PLANNER_INIT_FILE = Path(".harness") / "planner" / "session_init.json"
+
+
+def stage_plan_dir(stage: int) -> Path:
+    """PLANS_DIR / f"stage-{stage}", relative to the target repo. Raises ValueError if
+    stage < 1."""
+    if stage < 1:
+        raise ValueError(f"stage must be at least 1, got {stage}")
+    return PLANS_DIR / f"stage-{stage}"
 
 
 def _names(value: Any) -> str:
@@ -304,14 +315,13 @@ async def run_planner(
     ask: Ask,
     say: Say,
     *,
+    stage: int = 1,
     max_rounds: int = MAX_ROUNDS,
 ) -> PlanResult:
     """Drive both phases; algorithm in the `decision: planner flow` context item. Always
     closes the session (finally). Raises PlannerError when it stops without a valid plan."""
     repo = Path(repo).resolve()
     project_plan = repo / PROJECT_PLAN_FILE
-    stage_dir = repo / STAGE_PLAN_DIR
-    plan_path = stage_dir / "plan.json"
     rounds = 0
     usage = Usage()
     session_init: dict[str, Any] | None = None
@@ -346,19 +356,33 @@ async def run_planner(
         return a
 
     try:
-        start_fp = _fingerprint(project_plan)
-        msg = PROJECT_PROMPT.format(repo=repo, description=description.strip())
-        while True:
-            await turn(msg)
-            if _fingerprint(project_plan) not in (None, start_fp) and is_approved(
-                project_plan.read_text(encoding="utf-8")
-            ):
-                break
-            msg = await answer()
+        if stage < 1:
+            raise PlannerError("stage must be at least 1")
+        stage_dir = repo / stage_plan_dir(stage)
+        plan_path = stage_dir / "plan.json"
+
+        if stage == 1:
+            start_fp = _fingerprint(project_plan)
+            msg = PROJECT_PROMPT.format(
+                repo=repo, project_plan=project_plan, description=description.strip()
+            )
+            while True:
+                await turn(msg)
+                if _fingerprint(project_plan) not in (None, start_fp) and is_approved(
+                    project_plan.read_text(encoding="utf-8")
+                ):
+                    break
+                msg = await answer()
+        elif not project_plan.is_file() or not is_approved(
+            project_plan.read_text(encoding="utf-8")
+        ):
+            raise PlannerError(
+                f"{project_plan} is missing or not approved; run `harness plan` for stage 1 first"
+            )
 
         plan_fp = _fingerprint(plan_path)
         fixes = 0
-        msg = STAGE_PROMPT.format(project_plan=project_plan, stage_dir=stage_dir)
+        msg = STAGE_PROMPT.format(project_plan=project_plan, stage=stage, stage_dir=stage_dir)
         while True:
             await turn(msg)
             fp = _fingerprint(plan_path)
