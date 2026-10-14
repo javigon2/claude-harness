@@ -1,6 +1,6 @@
 # Run viewer UI: implementation plan
 
-Status: draft
+Status: approved 2026-10-14
 Repo: /Users/javi.gonzalezpaterna/dev/projects/agent-harness
 
 ## Goal
