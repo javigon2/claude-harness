@@ -1,6 +1,7 @@
 """The run viewer's view model: what the page shows, built from a run's files. Read-only."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -8,7 +9,7 @@ from harness.config import Tier
 from harness.events import EVENTS_FILE
 from harness.models import Event, TaskStatus
 from harness.plan import load_plan
-from harness.report import tier_totals
+from harness.report import money, tier_totals
 from harness.state import STATE_FILE, load_state, run_dir, runs_root
 
 
@@ -28,6 +29,7 @@ class TaskView(BaseModel):
     input_tokens: int
     output_tokens: int
     detail: str | None
+    activity: str | None
 
 
 class TierView(BaseModel):
@@ -59,6 +61,8 @@ class RunView(BaseModel):
     run_id: str
     stage: str
     finished: bool
+    phase: Literal["running", "stopped", "finished"]
+    stopped_reason: str | None
     wave: int
     waves_total: int
     cost_usd: float
@@ -77,6 +81,21 @@ def _listed(payload: dict, key: str) -> str:
     if isinstance(value, list):
         return ", ".join(str(x) for x in value)
     return "?"
+
+
+def _progress(payload: dict) -> str:
+    tool = _val(payload, "tool")
+    detail = payload.get("detail")
+    if isinstance(detail, str) and detail:
+        return f"{tool}: {detail}"
+    return tool
+
+
+def _money(payload: dict, key: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return "?"
+    return money(value)
 
 
 def _describe(type_: str, task_id: str | None, payload: dict) -> str:
@@ -120,11 +139,25 @@ def _describe(type_: str, task_id: str | None, payload: dict) -> str:
         return f"{t} merge conflict"
     if type_ == "merged":
         return f"{t} merged into main"
-    if type_ == "run_finished":
+    if type_ == "worker_progress":
+        return f"{t} {_progress(payload)}"
+    if type_ == "task_paused":
+        return f"{t} paused: {_val(payload, 'reason')}"
+    if type_ == "run_stopping":
+        return f"run stopping: {_val(payload, 'reason')}"
+    if type_ == "budget_exceeded":
         return (
+            f"cost cap reached: {_money(payload, 'cost_usd')} of {_money(payload, 'max_cost_usd')}"
+        )
+    if type_ == "run_finished":
+        text = (
             f"run finished: {_val(payload, 'done')} done, "
             f"{_val(payload, 'failed')} failed, {_val(payload, 'blocked')} blocked"
         )
+        paused = payload.get("paused")
+        if isinstance(paused, int) and not isinstance(paused, bool) and paused > 0:
+            text += f", {paused} paused"
+        return text
     return type_
 
 
@@ -187,6 +220,16 @@ def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
     except (OSError, ValueError):
         orders = {}
 
+    events = _read_events(directory / EVENTS_FILE)
+    activity: dict[str, str] = {}
+    for e in events:
+        if e.task_id is None:
+            continue
+        if e.type == "attempt_started":
+            activity.pop(e.task_id, None)
+        elif e.type == "worker_progress":
+            activity[e.task_id] = _progress(e.payload)
+
     tasks: list[TaskView] = []
     for task_id, ts in state.tasks.items():
         order = orders.get(task_id)
@@ -210,10 +253,10 @@ def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
                 input_tokens=ts.usage.input_tokens,
                 output_tokens=ts.usage.output_tokens,
                 detail=detail,
+                activity=activity.get(task_id) if ts.status == "running" else None,
             )
         )
 
-    events = _read_events(directory / EVENTS_FILE)
     k = None
     for i, e in enumerate(events):
         if e.type == "run_started":
@@ -225,11 +268,29 @@ def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
         if isinstance(waves, list):
             waves_total = len(waves)
 
-    tail = events[-max_events:] if max_events > 0 else []
+    stopped_reason: str | None = None
+    for e in events[k or 0 :]:
+        key = {"run_stopping": "reason", "run_finished": "stopped_reason"}.get(e.type)
+        if key is None:
+            continue
+        value = e.payload.get(key)
+        if isinstance(value, str) and value:
+            stopped_reason = value
+    if not state.finished:
+        phase: Literal["running", "stopped", "finished"] = "running"
+    elif stopped_reason is not None or any(t.status == "paused" for t in tasks):
+        phase = "stopped"
+    else:
+        phase = "finished"
+
+    feed = [e for e in events if e.type != "worker_progress"]
+    tail = feed[-max_events:] if max_events > 0 else []
     return RunView(
         run_id=state.run_id,
         stage=state.stage,
         finished=state.finished,
+        phase=phase,
+        stopped_reason=stopped_reason,
         wave=wave,
         waves_total=waves_total,
         cost_usd=sum(ts.usage.cost_usd for ts in state.tasks.values()),

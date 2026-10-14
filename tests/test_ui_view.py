@@ -2,10 +2,14 @@ from pathlib import Path
 
 import pytest
 from ui_fixtures import (
+    CAP_REASON,
     PLAN_PATH,
+    RATE_LIMIT_REASON,
     append_event,
     write_blocked_run,
+    write_capped_run,
     write_happy_run,
+    write_paused_run,
     write_running_run,
 )
 
@@ -193,3 +197,91 @@ def test_read_only_and_round_trip(tmp_path: Path) -> None:
     assert _snapshot(tmp_path) == before
     view = build_view(tmp_path, "happy1")
     assert RunView.model_validate_json(view.model_dump_json()) == view
+
+
+def test_paused_view(tmp_path: Path) -> None:
+    write_paused_run(tmp_path)
+    view = build_view(tmp_path, "paused1")
+    assert view.phase == "stopped"
+    assert view.stopped_reason == RATE_LIMIT_REASON
+    b = view.tasks[1]
+    assert (b.task_id, b.status, b.attempt) == ("b", "paused", 0)
+    assert b.detail == RATE_LIMIT_REASON
+    assert b.activity is None
+    assert (view.wave, view.waves_total) == (2, 3)
+    assert len(view.events) == 18
+    assert all(e.type != "worker_progress" for e in view.events)
+    assert view.events[-1].text == "run finished: 1 done, 0 failed, 0 blocked, 1 paused"
+    texts = [e.text for e in view.events]
+    assert f"run stopping: {RATE_LIMIT_REASON}" in texts
+    assert f"b paused: {RATE_LIMIT_REASON}" in texts
+
+
+def test_capped_view(tmp_path: Path) -> None:
+    write_capped_run(tmp_path)
+    view = build_view(tmp_path, "capped1")
+    assert view.phase == "stopped"
+    assert view.stopped_reason == CAP_REASON
+    assert [t.status for t in view.tasks] == ["done", "pending", "pending"]
+    assert view.cost_usd == pytest.approx(1.2)
+    assert "cost cap reached: $1.2000 of $1.0000" in [e.text for e in view.events]
+
+
+def test_finished_views_have_no_stop_or_activity(tmp_path: Path) -> None:
+    write_happy_run(tmp_path)
+    write_blocked_run(tmp_path)
+    for run_id in ("happy1", "blocked1"):
+        view = build_view(tmp_path, run_id)
+        assert view.phase == "finished"
+        assert view.stopped_reason is None
+        assert all(t.activity is None for t in view.tasks)
+
+
+def test_running_activity(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    view = build_view(tmp_path, "running1")
+    assert view.phase == "running"
+    assert view.stopped_reason is None
+    prog = {"attempt": 1, "tier": "haiku", "tool": "Read", "detail": "src/b.py"}
+    append_event(tmp_path, "running1", "worker_progress", "b", prog)
+    append_event(
+        tmp_path, "running1", "worker_progress", "b", {**prog, "tool": "Bash", "detail": ""}
+    )
+    view = build_view(tmp_path, "running1")
+    assert view.tasks[1].activity == "Bash"
+    assert len(view.events) == 14
+    assert all(e.type != "worker_progress" for e in view.events)
+    append_event(tmp_path, "running1", "worker_progress", "a", prog)
+    assert build_view(tmp_path, "running1").tasks[0].activity is None
+    append_event(tmp_path, "running1", "attempt_started", "b", {"attempt": 2, "tier": "haiku"})
+    assert build_view(tmp_path, "running1").tasks[1].activity is None
+
+
+def test_feed_not_crowded_by_progress(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    prog = {"attempt": 1, "tier": "haiku", "tool": "Read", "detail": "x"}
+    for _ in range(120):
+        append_event(tmp_path, "running1", "worker_progress", "b", prog)
+    full = build_view(tmp_path, "running1", max_events=50)
+    assert len(full.events) == 14
+    assert all(e.type != "worker_progress" for e in full.events)
+    assert build_view(tmp_path, "running1", max_events=5).events == full.events[-5:]
+
+
+def test_resumed_run_clears_stopped_reason(tmp_path: Path) -> None:
+    write_paused_run(tmp_path)
+    append_event(
+        tmp_path, "paused1", "run_started", None, {"orders": 3, "waves": [["a"], ["b"], ["c"]]}
+    )
+    view = build_view(tmp_path, "paused1")
+    assert view.stopped_reason is None
+    assert view.phase == "stopped"
+
+
+def test_new_views_are_read_only(tmp_path: Path) -> None:
+    write_paused_run(tmp_path)
+    write_capped_run(tmp_path)
+    before = _snapshot(tmp_path / ".harness")
+    build_view(tmp_path, "paused1")
+    build_view(tmp_path, "capped1")
+    assert _snapshot(tmp_path / ".harness") == before
