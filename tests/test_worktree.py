@@ -113,6 +113,44 @@ def test_cleanup(tmp_path: Path):
     assert listing.count("worktree ") == 1
 
 
+def test_cleanup_keeps_other_runs(tmp_path: Path):
+    repo = _repo(tmp_path)
+    m1 = WorktreeManager(repo, "r1")
+    m2 = WorktreeManager(repo, "r2")
+    m10 = WorktreeManager(repo, "r10")
+    wa = m1.create("a")
+    wb = m2.create("b")
+    wc = m10.create("c")
+    m1.cleanup()
+    assert not wa.exists()
+    assert wb.exists()
+    assert wc.exists()
+    assert _out(repo, "branch", "--list", "harness/r1/*") == ""
+    assert "harness/r2/b" in _out(repo, "branch", "--list", "harness/r2/*")
+    assert "harness/r10/c" in _out(repo, "branch", "--list", "harness/r10/*")
+    listing = _out(repo, "worktree", "list", "--porcelain")
+    assert listing.count("worktree ") == 3
+    m2.cleanup()
+    assert not wb.exists()
+    assert wc.exists()
+
+
+def test_cleanup_keeps_detached_worktree(tmp_path: Path):
+    repo = _repo(tmp_path)
+    det = repo / ".harness" / "worktrees" / "det"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(det), "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    mgr = WorktreeManager(repo, "r1")
+    wa = mgr.create("a")
+    mgr.cleanup()
+    assert det.exists()
+    assert not wa.exists()
+
+
 def test_discard_after_create(tmp_path: Path):
     repo = _repo(tmp_path)
     mgr = WorktreeManager(repo, "r1")

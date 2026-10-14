@@ -107,16 +107,25 @@ class WorktreeManager:
             shutil.rmtree(path)
 
     def cleanup(self) -> None:
-        """git worktree remove --force every worktree under <repo>/.harness/worktrees (from
-        `git worktree list --porcelain`), delete every branch under refs/heads/harness/<run_id>/
-        (git branch -D), then git worktree prune."""
+        """Remove this run's worktrees and branches and nothing of other runs: git worktree
+        remove --force every worktree under <repo>/.harness/worktrees whose branch (from
+        `git worktree list --porcelain`) is under refs/heads/harness/<run_id>/, delete every
+        branch under refs/heads/harness/<run_id>/ (git branch -D), then git worktree prune."""
         root = (self.repo / ".harness" / "worktrees").resolve()
+        prefix = f"refs/heads/harness/{self.run_id}/"
         listing = _check(_git("worktree", "list", "--porcelain", cwd=self.repo))
-        for line in listing.splitlines():
-            if not line.startswith("worktree "):
+        for record in listing.split("\n\n"):
+            path: str | None = None
+            branch: str | None = None
+            for line in record.splitlines():
+                if line.startswith("worktree "):
+                    path = line[len("worktree ") :]
+                elif line.startswith("branch "):
+                    branch = line[len("branch ") :]
+            if path is None or branch is None or not branch.startswith(prefix):
                 continue
-            wt = Path(line[len("worktree ") :]).resolve()
-            if wt.parent == root or root in wt.parents:
+            wt = Path(path).resolve()
+            if root in wt.parents:
                 _check(_git("worktree", "remove", "--force", str(wt), cwd=self.repo))
         refs = _check(
             _git(
