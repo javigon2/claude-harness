@@ -56,14 +56,26 @@ yourself and record it as a `decision` item in the `context` of each order it af
    - **Check literal code before pasting it.** Any code a worker must copy exactly
      ("write exactly this") must already pass the order's linter and formatter. Write it
      to a scratch copy and run the checker on it; a worker can't fix your typo without
-     breaking "write exactly this".
+     breaking "write exactly this". Check interface skeletons the same way, including
+     their docstrings ("implement every `...`"): write the skeleton to a scratch file,
+     run `python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" <file>`, then
+     the linter. Watch escapes inside docstrings: write `"\\n"` when you mean the
+     two characters, not a newline.
+   - **Placeholders and failures.** For every exact message, say what fills each
+     `<placeholder>`. For every external command the code runs, including cleanup and
+     abort commands, say whether its failure is ignored, raised or reported.
+   - **Mark whole files.** When you paste a whole file, label it "(whole file, current)",
+     so the worker knows it doesn't need to open the file.
    - Make `steps` concrete: each names its file and says exactly what to add, including
      names, signatures, exact output strings, exit codes and error messages.
    - Use `out_of_scope` for the tempting extras: the neighbouring task, a refactor,
      an extra flag. Name the order that owns them when there is one.
    - `tier`: `haiku` when the order is fully specified and mechanical; `sonnet` when it
      needs judgement (algorithms, tricky tests, subprocess or concurrency); `opus` only
-     when the design can't be pinned down in the order.
+     when the design can't be pinned down in the order. An order made mostly of
+     pasted code only tests copying. When the plan is also meant to test the workers
+     (a dry run), keep at least one order per tier that is specified by behaviour and
+     interface rather than by code.
    - `budget`: start with `max_turns` 30 and `max_attempts` 3; raise turns for orders
      that run slow commands repeatedly.
 
@@ -74,6 +86,8 @@ yourself and record it as a `decision` item in the `context` of each order it af
      still succeed?
    - Do the acceptance commands fail today and pass only when the goal is met?
    - Is every new test file in `files_owned`?
+   - Does every exact message say what fills each placeholder?
+   - Does every external command say what happens when it fails?
 
    Fix any order that fails a check, then run the check again.
 

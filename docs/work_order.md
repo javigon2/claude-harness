@@ -17,7 +17,7 @@ reads one.
 | `tier` | `"haiku"` \| `"sonnet"` \| `"opus"` | yes | The tier the first attempt runs on. Failures escalate upward from here. |
 | `depends_on` | list of ids | yes (may be `[]`) | Orders that must be merged before this one starts. The runner computes waves from this. |
 | `files_owned` | list of paths | yes, non-empty | The only files this task may create, edit or delete. Exact repo-relative paths, no globs. A file that doesn't exist yet is allowed and means "create it". No two orders in the same wave may share a path. |
-| `files_readonly` | list of paths | yes (may be `[]`) | Files the worker may read but not change. Listing them tells the worker where the relevant code is; their relevant parts should still be pasted into `context`. |
+| `files_readonly` | list of paths | yes (may be `[]`) | Files the worker may read but not change. Listing them tells the worker where the relevant code is; their relevant parts should still be pasted into `context`. A file pasted in `context` with a label saying "whole file" is current, and the worker doesn't need to open it. |
 | `context` | list of `{label, content}` | yes | Pasted excerpts, interfaces, decisions and conventions the worker needs. `label` says where it came from (`src/todo/store.py, lines 1-40` or `decision`). `content` is the literal text. Paste it; never write "see X". |
 | `steps` | list of strings | yes | Ordered, concrete actions. Each step names the file it touches. |
 | `constraints` | list of strings | yes (may be `[]`) | Rules the result must follow that the acceptance commands may not catch: style, no new dependencies, error messages, compatibility. |
@@ -40,6 +40,12 @@ default. Lists that genuinely have nothing in them are written as `[]`.
   paste its config section into `context`, so the worker knows which rules apply.
 - **Exact behaviour, not intent.** Give the exact output strings, exit codes and error
   cases. "Handle errors gracefully" is not a step.
+- **Name what fills each placeholder.** In an exact message such as
+  `"overlapping files_owned in wave <n>: <path>"`, say which value goes in each
+  placeholder: for example, the path as the user wrote it, or after normalising.
+- **Say what happens when a command fails.** For every external command the code runs,
+  including cleanup and abort commands (`git rebase --abort`, `rm`), say whether a
+  failure is ignored, raised, or reported.
 - **Small.** About 30 minutes of work or less. If the steps list goes past ~8 items or
   `files_owned` past ~4 files, split the order.
 - **Self-check before handing off:** could a fresh Sonnet session do this without asking
