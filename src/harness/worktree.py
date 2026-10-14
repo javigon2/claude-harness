@@ -22,6 +22,26 @@ def _check(proc: subprocess.CompletedProcess[str]) -> str:
     return proc.stdout
 
 
+def ensure_excluded(repo: Path) -> None:
+    """Add a `.harness/` line to the repo's git info/exclude file (in the common git dir, so
+    every worktree shares it) unless that exact line is already there, so nothing under
+    <repo>/.harness is ever shown by `git status`, added by `git add -A` or linted by tools
+    that honour git ignores. Raises WorktreeError (git's stderr) if `repo` is not inside a
+    git repository; OSError from writing the file propagates."""
+    repo = Path(repo)
+    out = _check(_git("rev-parse", "--git-common-dir", cwd=repo)).strip()
+    common = Path(out)
+    if not common.is_absolute():
+        common = repo / common
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text() if exclude.exists() else ""
+    if ".harness/" in existing.splitlines():
+        return
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    exclude.write_text(existing + prefix + ".harness/\n")
+
+
 class WorktreeManager:
     def __init__(self, repo: Path, run_id: str, integration_branch: str = "main") -> None:
         self.repo = Path(repo)
@@ -37,17 +57,7 @@ class WorktreeManager:
         return self.repo / ".harness" / "worktrees" / self.run_id / task_id
 
     def _ensure_excluded(self) -> None:
-        out = _check(_git("rev-parse", "--git-common-dir", cwd=self.repo)).strip()
-        common = Path(out)
-        if not common.is_absolute():
-            common = self.repo / common
-        exclude = common / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        existing = exclude.read_text() if exclude.exists() else ""
-        if ".harness/" in existing.splitlines():
-            return
-        prefix = "" if not existing or existing.endswith("\n") else "\n"
-        exclude.write_text(existing + prefix + ".harness/\n")
+        ensure_excluded(self.repo)
 
     def create(self, task_id: str, base: str | None = None) -> Path:
         """git worktree add -b <branch> <path> <base or integration_branch>. Raise WorktreeError

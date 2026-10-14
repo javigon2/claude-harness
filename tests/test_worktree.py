@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.worktree import WorktreeError, WorktreeManager
+from harness.worktree import WorktreeError, WorktreeManager, ensure_excluded
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -216,3 +216,28 @@ def test_same_task_id_in_two_runs(tmp_path: Path):
     r2.discard("t")
     assert not p2.exists()
     assert _out(repo, "branch", "--list", "harness/r2/t") == ""
+
+
+def test_ensure_excluded_adds_line_once(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    ensure_excluded(repo)
+    ensure_excluded(repo)
+    lines = (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert lines.count(".harness/") == 1
+    (repo / ".harness").mkdir()
+    (repo / ".harness" / "x.txt").write_text("x\n")
+    assert _out(repo, "status", "--porcelain") == ""
+
+
+def test_ensure_excluded_keeps_existing_text(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("*.log")
+    ensure_excluded(repo)
+    assert exclude.read_text() == "*.log\n.harness/\n"
+
+
+def test_ensure_excluded_not_a_repo(tmp_path: Path) -> None:
+    with pytest.raises(WorktreeError):
+        ensure_excluded(tmp_path)
