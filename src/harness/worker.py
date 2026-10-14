@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    RateLimitEvent,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -97,6 +98,34 @@ def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[s
         return {"tool": str(name), "detail": ""}
 
 
+class RateLimitWatch:
+    """Watches the messages of one SDK session for a rate limit: a RateLimitEvent whose
+    status is "rejected" (its resets_at is kept, the last one wins), an AssistantMessage
+    with error "rate_limit", or an error ResultMessage with api_error_status 429."""
+
+    def __init__(self) -> None:
+        self.limited = False
+        self.resets_at: int | None = None
+
+    def observe(self, message: Any) -> None:
+        if isinstance(message, RateLimitEvent):
+            if message.rate_limit_info.status == "rejected":
+                self.limited = True
+                self.resets_at = message.rate_limit_info.resets_at
+        elif isinstance(message, AssistantMessage):
+            if message.error == "rate_limit":
+                self.limited = True
+        elif isinstance(message, ResultMessage):
+            if message.is_error and message.api_error_status == 429:
+                self.limited = True
+
+    def error(self, error: str | None) -> str | None:
+        """`error` prefixed with "rate limited" when limited, otherwise unchanged."""
+        if not self.limited:
+            return error
+        return "rate limited" if error is None else f"rate limited: {error}"[:2000]
+
+
 class SelfReportedCommand(BaseModel):
     """One entry of the worker's self-reported `acceptance` list. Not trusted."""
 
@@ -137,6 +166,8 @@ class WorkerResult(BaseModel):
     final_text: str = ""
     error: str | None = None
     session_init: dict[str, Any] | None = None
+    rate_limited: bool = False
+    rate_limit_resets_at: int | None = None
 
     @property
     def cost_usd(self) -> float:
@@ -323,8 +354,10 @@ class SdkWorker:
         session_init: dict[str, Any] | None = None
         last_tool: str | None = None
         last_report = 0.0
+        watch = RateLimitWatch()
         try:
             async for message in self._query(prompt=prompt, options=options):
+                watch.observe(message)
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
                     if progress is not None:
                         for b in message.content:
@@ -359,7 +392,12 @@ class SdkWorker:
         report = parse_report(final_text)
 
         status: WorkerStatus
-        if error is not None:
+        if watch.limited:
+            status = "error"
+            if error is None and result_msg is not None and result_msg.is_error:
+                error = f"result {result_msg.subtype}"
+            error = watch.error(error)
+        elif error is not None:
             status = "error"
         elif result_msg is None:
             status = "error"
@@ -383,6 +421,8 @@ class SdkWorker:
             final_text=final_text,
             error=error,
             session_init=session_init,
+            rate_limited=watch.limited,
+            rate_limit_resets_at=watch.resets_at if watch.limited else None,
         )
         return apply_report(result, report)
 

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from harness.config import Tier
 
-TaskStatus = Literal["pending", "running", "verifying", "done", "failed", "blocked"]
+TaskStatus = Literal["pending", "running", "verifying", "done", "failed", "blocked", "paused"]
 
 _ID_PATTERN = re.compile(r"[a-z0-9-]+")
 

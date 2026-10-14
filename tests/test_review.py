@@ -4,7 +4,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+)
 
 from harness.config import MODEL_IDS, Tier
 from harness.models import Budget, ContextItem, Usage, WorkOrder
@@ -385,3 +392,47 @@ async def test_review_without_init_is_none(tmp_path: Path) -> None:
 
 def test_fake_review_session_init_none() -> None:
     assert fake_review().session_init is None
+
+
+# --- rate limit detection ---------------------------------------------------------------
+
+
+def _rl_event(status: str = "rejected", resets_at: int | None = 1760000000) -> RateLimitEvent:
+    return RateLimitEvent(
+        rate_limit_info=RateLimitInfo(status=status, resets_at=resets_at),
+        uuid="u",
+        session_id="s",
+    )
+
+
+def _rl_signals() -> list[tuple[list[Any], int | None]]:
+    return [
+        ([_rl_event(), result_msg(is_error=True, subtype="error_during_execution")], 1760000000),
+        (
+            [
+                AssistantMessage(content=[], model="m", error="rate_limit"),
+                result_msg(is_error=True, subtype="error_during_execution"),
+            ],
+            None,
+        ),
+        ([result_msg(is_error=True, subtype="error_during_execution", api_error_status=429)], None),
+    ]
+
+
+@pytest.mark.parametrize(("messages", "resets_at"), _rl_signals())
+async def test_review_rate_limit_signals(
+    tmp_path: Path, messages: list[Any], resets_at: int | None
+) -> None:
+    fake, _ = scripted(*messages)
+    res = await SdkReviewer(query_fn=fake).review(make_order(), DIFF, "sonnet", tmp_path)
+    assert res.verdict == "error"
+    assert res.rate_limited is True
+    assert res.rate_limit_resets_at == resets_at
+    assert res.error is not None and res.error.startswith("rate limited")
+
+
+async def test_review_non_rejected_event_ignored(tmp_path: Path) -> None:
+    fake, _ = scripted(_rl_event("allowed_warning"), result_msg())
+    res = await SdkReviewer(query_fn=fake).review(make_order(), DIFF, "sonnet", tmp_path)
+    assert res.rate_limited is False
+    assert res.verdict != "error"

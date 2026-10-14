@@ -6,6 +6,8 @@ from typing import Any
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -426,3 +428,56 @@ async def test_progress_exception_is_ignored(tmp_path: Path) -> None:
     )
     assert result.status == "done"
     assert len(rec.calls) == 1
+
+
+# --- rate limit detection ---------------------------------------------------------------
+
+
+def _rl_event(status: str = "rejected", resets_at: int | None = 1760000000) -> RateLimitEvent:
+    return RateLimitEvent(
+        rate_limit_info=RateLimitInfo(status=status, resets_at=resets_at),
+        uuid="u",
+        session_id="s",
+    )
+
+
+def _rl_signals() -> list[tuple[list[Any], int | None]]:
+    return [
+        ([_rl_event(), result_msg(is_error=True, subtype="error_during_execution")], 1760000000),
+        (
+            [
+                AssistantMessage(content=[], model="m", error="rate_limit"),
+                result_msg(is_error=True, subtype="error_during_execution"),
+            ],
+            None,
+        ),
+        ([result_msg(is_error=True, subtype="error_during_execution", api_error_status=429)], None),
+    ]
+
+
+@pytest.mark.parametrize(("messages", "resets_at"), _rl_signals())
+async def test_worker_rate_limit_signals(
+    tmp_path: Path, messages: list[Any], resets_at: int | None
+) -> None:
+    fake, _ = scripted(*messages)
+    res = await SdkWorker(query_fn=fake).run(make_order(), "haiku", tmp_path)
+    assert res.status == "error"
+    assert res.rate_limited is True
+    assert res.rate_limit_resets_at == resets_at
+    assert res.error is not None and res.error.startswith("rate limited")
+
+
+async def test_worker_rate_limit_last_reset_wins(tmp_path: Path) -> None:
+    fake, _ = scripted(_rl_event(resets_at=100), _rl_event(resets_at=200), result_msg())
+    res = await SdkWorker(query_fn=fake).run(make_order(), "haiku", tmp_path)
+    assert res.rate_limited is True
+    assert res.rate_limit_resets_at == 200
+
+
+@pytest.mark.parametrize("status", ["allowed", "allowed_warning"])
+async def test_worker_non_rejected_event_ignored(tmp_path: Path, status: str) -> None:
+    fake, _ = scripted(_rl_event(status), result_msg())
+    res = await SdkWorker(query_fn=fake).run(make_order(), "haiku", tmp_path)
+    assert res.status == "done"
+    assert res.rate_limited is False
+    assert res.rate_limit_resets_at is None

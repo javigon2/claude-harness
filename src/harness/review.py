@@ -19,7 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from harness.config import MODEL_IDS, Tier
 from harness.models import Usage, WorkOrder
-from harness.worker import WORKER_ENV, QueryFn, session_init_facts, usage_from_result
+from harness.worker import (
+    WORKER_ENV,
+    QueryFn,
+    RateLimitWatch,
+    session_init_facts,
+    usage_from_result,
+)
 
 ReviewVerdict = Literal["pass", "fail", "unknown", "error"]
 
@@ -53,6 +59,8 @@ class ReviewResult(BaseModel):
     final_text: str = ""
     error: str | None = None
     session_init: dict[str, Any] | None = None
+    rate_limited: bool = False
+    rate_limit_resets_at: int | None = None
 
 
 @runtime_checkable
@@ -144,8 +152,10 @@ class SdkReviewer:
         last_text = ""
         error: str | None = None
         session_init: dict[str, Any] | None = None
+        watch = RateLimitWatch()
         try:
             async for message in self._query(prompt=prompt, options=options):
+                watch.observe(message)
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
                     text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
                     if text.strip():
@@ -169,7 +179,12 @@ class SdkReviewer:
 
         verdict: ReviewVerdict
         reasons: list[str] = []
-        if error is not None:
+        if watch.limited:
+            verdict = "error"
+            if error is None and result_msg is not None and result_msg.is_error:
+                error = f"result {result_msg.subtype}"
+            error = watch.error(error)
+        elif error is not None:
             verdict = "error"
         elif result_msg is None:
             verdict = "error"
@@ -194,6 +209,8 @@ class SdkReviewer:
             final_text=final_text,
             error=error,
             session_init=session_init,
+            rate_limited=watch.limited,
+            rate_limit_resets_at=watch.resets_at if watch.limited else None,
         )
 
 
