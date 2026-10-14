@@ -85,16 +85,17 @@ def test_money():
 def test_tier_totals_ladder_order_and_skips_unused():
     totals = tier_totals(_three_task_run())
     assert list(totals) == ["haiku", "sonnet", "opus"]
-    count, usage = totals["haiku"]
+    count, reviews, usage = totals["haiku"]
     assert count == 2
+    assert reviews == 0
     assert usage.input_tokens == 200
     assert usage.output_tokens == 30
     assert abs(usage.cost_usd - 0.02) < 1e-9
     assert totals["sonnet"][0] == 1
-    assert totals["sonnet"][1].cache_read_tokens == 10
-    assert totals["sonnet"][1].cache_creation_tokens == 5
+    assert totals["sonnet"][2].cache_read_tokens == 10
+    assert totals["sonnet"][2].cache_creation_tokens == 5
     assert totals["opus"][0] == 1
-    assert totals["opus"][1].input_tokens == 1000
+    assert totals["opus"][2].input_tokens == 1000
 
 
 def test_tier_totals_skips_unused_tier_and_orders_by_ladder():
@@ -110,6 +111,58 @@ def test_tier_totals_skips_unused_tier_and_orders_by_ladder():
     totals = tier_totals(state)
     assert list(totals) == ["haiku", "opus"]
     assert "sonnet" not in totals
+    assert totals["haiku"][:2] == (1, 0)
+    assert totals["opus"][:2] == (1, 0)
+
+
+def _reviewed_run() -> RunState:
+    reviewed = AttemptRecord(
+        attempt=1,
+        tier="haiku",
+        worker_status="done",
+        passed=False,
+        usage=Usage(input_tokens=10, output_tokens=2, cost_usd=0.005),
+        review_tier="sonnet",
+        review_usage=Usage(input_tokens=50, output_tokens=5, cost_usd=0.04),
+    )
+    t = TaskState(
+        task_id="x",
+        status="done",
+        attempts=2,
+        tier_used="haiku",
+        history=[
+            reviewed,
+            _attempt(2, "haiku", True, input_tokens=10, output_tokens=2, cost_usd=0.005),
+        ],
+    )
+    return RunState(run_id="r5", plan_path="p", stage="S5", tasks={"x": t})
+
+
+def test_tier_totals_books_review_on_review_tier():
+    totals = tier_totals(_reviewed_run())
+    assert list(totals) == ["haiku", "sonnet"]
+    attempts, reviews, usage = totals["haiku"]
+    assert (attempts, reviews) == (2, 0)
+    assert usage.input_tokens == 20
+    assert usage.output_tokens == 4
+    assert abs(usage.cost_usd - 0.01) < 1e-9
+    attempts, reviews, usage = totals["sonnet"]
+    assert (attempts, reviews) == (0, 1)
+    assert usage.input_tokens == 50
+    assert usage.output_tokens == 5
+    assert abs(usage.cost_usd - 0.04) < 1e-9
+
+
+def test_report_text_review_row():
+    expected = (
+        "Per tier\n"
+        "tier    attempts  reviews  input  output  cache read  cache write  cost\n"
+        "------  --------  -------  -----  ------  ----------  -----------  -------\n"
+        "haiku   2         0        20     4       0           0            $0.0100\n"
+        "sonnet  0         1        50     5       0           0            $0.0400\n"
+        "\n"
+    )
+    assert expected in report_text(_reviewed_run())
 
 
 def test_escalated_tasks():
@@ -146,11 +199,11 @@ def test_report_text_three_task_run():
         "c     blocked  1         opus    1000   200     0           0            $0.5000\n"
         "\n"
         "Per tier\n"
-        "tier    attempts  input  output  cache read  cache write  cost\n"
-        "------  --------  -----  ------  ----------  -----------  -------\n"
-        "haiku   2         200    30      0           0            $0.0200\n"
-        "sonnet  1         200    40      10          5            $0.0400\n"
-        "opus    1         1000   200     0           0            $0.5000\n"
+        "tier    attempts  reviews  input  output  cache read  cache write  cost\n"
+        "------  --------  -------  -----  ------  ----------  -----------  -------\n"
+        "haiku   2         0        200    30      0           0            $0.0200\n"
+        "sonnet  1         0        200    40      10          5            $0.0400\n"
+        "opus    1         0        1000   200     0           0            $0.5000\n"
         "\n"
         "Totals: 3 tasks: 2 done, 0 failed, 1 blocked, 0 not run; 4 attempts; cost $0.5600\n"
         "Escalated: 1 of 3 tasks (b)\n"

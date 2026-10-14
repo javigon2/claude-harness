@@ -29,14 +29,19 @@ def money(value: float) -> str:
     return f"${value:.4f}"
 
 
-def tier_totals(state: RunState) -> dict[Tier, tuple[int, Usage]]:
-    """For every tier with at least one attempt, (number of attempts, summed usage) over
-    every AttemptRecord in every task's history. Keys in TIER_LADDER order."""
-    acc: dict[Tier, tuple[int, Usage]] = {}
+def tier_totals(state: RunState) -> dict[Tier, tuple[int, int, Usage]]:
+    """For every tier with at least one worker attempt or review: (worker attempts, reviews,
+    summed usage). Each AttemptRecord adds 1 attempt and its `usage` to rec.tier; when
+    rec.review_tier is not None it also adds 1 review and its `review_usage` to
+    rec.review_tier. Keys in TIER_LADDER order."""
+    acc: dict[Tier, tuple[int, int, Usage]] = {}
     for ts in state.tasks.values():
         for rec in ts.history:
-            count, usage = acc.get(rec.tier, (0, Usage()))
-            acc[rec.tier] = (count + 1, usage.plus(rec.usage))
+            attempts, reviews, usage = acc.get(rec.tier, (0, 0, Usage()))
+            acc[rec.tier] = (attempts + 1, reviews, usage.plus(rec.usage))
+            if rec.review_tier is not None:
+                attempts, reviews, usage = acc.get(rec.review_tier, (0, 0, Usage()))
+                acc[rec.review_tier] = (attempts, reviews + 1, usage.plus(rec.review_usage))
     return {tier: acc[tier] for tier in TIER_LADDER if tier in acc}
 
 
@@ -98,12 +103,22 @@ def report_text(state: RunState) -> str:
     totals = tier_totals(state)
     if totals:
         tier_rows = [
-            [tier, str(count), *_usage_cells(usage)] for tier, (count, usage) in totals.items()
+            [tier, str(attempts), str(reviews), *_usage_cells(usage)]
+            for tier, (attempts, reviews, usage) in totals.items()
         ]
         sections.append(
             "Per tier\n"
             + format_table(
-                ["tier", "attempts", "input", "output", "cache read", "cache write", "cost"],
+                [
+                    "tier",
+                    "attempts",
+                    "reviews",
+                    "input",
+                    "output",
+                    "cache read",
+                    "cache write",
+                    "cost",
+                ],
                 tier_rows,
             )
         )
