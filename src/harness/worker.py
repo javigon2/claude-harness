@@ -1,5 +1,6 @@
 """Worker interface: one work order in, one agent session, one WorkerResult out."""
 
+import asyncio
 import inspect
 import json
 import re
@@ -434,6 +435,10 @@ FakeStep = (
 )
 
 
+FakeProgressStep = tuple[str, Mapping[str, Any]]
+FakeProgressSteps = Sequence[FakeProgressStep] | Callable[[WorkOrder], Sequence[FakeProgressStep]]
+
+
 @dataclass(frozen=True)
 class WorkerCall:
     """One recorded FakeWorker.run call."""
@@ -456,14 +461,22 @@ class FakeWorker:
         self,
         script: Mapping[str, Sequence[FakeStep]] | None = None,
         default: FakeStep | None = None,
+        *,
+        delay_s: float = 0.0,
+        progress_steps: FakeProgressSteps | None = None,
     ) -> None:
         """Copy each sequence in `script` into a per-order list (later changes to the
         caller's sequences have no effect). `default` is used when an order's queue is empty.
-        self.calls starts as an empty list[WorkerCall]."""
+        self.calls starts as an empty list[WorkerCall].
+        `delay_s` and `progress_steps` make run() look alive (see run); with the defaults
+        (0.0 and None) run() neither sleeps nor calls `progress`. `progress_steps` is a list
+        of (tool, tool_input) pairs, or a function of the order returning such a list."""
         self._queues: dict[str, list[FakeStep]] = {
             order_id: list(steps) for order_id, steps in (script or {}).items()
         }
         self._default = default
+        self._delay_s = delay_s
+        self._progress_steps = progress_steps
         self.calls: list[WorkerCall] = []
 
     def add(self, order_id: str, *steps: FakeStep) -> None:
@@ -473,6 +486,23 @@ class FakeWorker:
     def remaining(self, order_id: str) -> int:
         """Number of scripted steps still queued for order_id (0 if none). Ignores default."""
         return len(self._queues.get(order_id, []))
+
+    async def _act_busy(self, order: WorkOrder, cwd: Path, progress: ProgressFn | None) -> None:
+        """The delay_s / progress_steps pause of run(), exactly as its docstring says."""
+        raw = self._progress_steps
+        steps = list(raw(order) if callable(raw) else raw or [])
+        if steps:
+            gap = self._delay_s / len(steps)
+            for tool, tool_input in steps:
+                if progress is not None:
+                    try:
+                        await progress(describe_tool(tool, tool_input, cwd))
+                    except Exception:  # a broken callback must not end the attempt
+                        pass
+                if gap > 0:
+                    await asyncio.sleep(gap)
+        elif self._delay_s > 0:
+            await asyncio.sleep(self._delay_s)
 
     async def run(
         self,
@@ -491,7 +521,12 @@ class FakeWorker:
         - BaseException instance: raise it.
         - callable: call step(order, tier, cwd, retry_feedback); if the return value is
           awaitable, await it; return the WorkerResult.
-        `progress` is accepted and ignored.
+        Before the step runs, if delay_s > 0 or there are progress steps: with n progress
+        steps, for each in order it awaits progress(describe_tool(tool, tool_input, cwd)) (an
+        exception from `progress` is ignored, a None `progress` skips the call) and then
+        sleeps delay_s / n seconds, so the steps are spread across delay_s; with no steps it
+        just sleeps delay_s. With delay_s == 0 no sleep happens. The pause also happens
+        before a scripted exception is raised.
         A `default` step is never consumed: it is reused for every call that needs it."""
         self.calls.append(WorkerCall(order.id, tier, cwd, retry_feedback))
         queue = self._queues.get(order.id)
@@ -501,6 +536,7 @@ class FakeWorker:
             step = self._default
         else:
             raise FakeWorkerExhausted(f"no scripted step left for order {order.id}")
+        await self._act_busy(order, cwd, progress)
         if isinstance(step, WorkerResult):
             return step.model_copy(deep=True)
         if isinstance(step, BaseException):

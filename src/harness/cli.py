@@ -9,7 +9,7 @@ import typer
 from harness.config import TIER_LADDER, Tier
 from harness.events import EVENTS_FILE
 from harness.events import follow as follow_lines
-from harness.models import Plan
+from harness.models import Plan, WorkOrder
 from harness.plan import PlanError, load_plan, validate_plan
 from harness.planner import (
     PlannerError,
@@ -26,7 +26,7 @@ from harness.state import run_dir as run_dir_of
 from harness.state import runs_root as runs_root_of
 from harness.ui.server import make_server
 from harness.verify import DEFAULT_TIMEOUT_S
-from harness.worker import FakeWorker, SdkWorker, Worker, fake_result
+from harness.worker import FakeProgressStep, FakeWorker, SdkWorker, Worker, fake_result
 from harness.worktree import WorktreeError, ensure_excluded
 
 app = typer.Typer(help="Plan-and-execute harness for Claude agents.", no_args_is_help=True)
@@ -62,14 +62,28 @@ def _load_plan_or_exit(plan: Path) -> Plan:
         _fail(f"Cannot read plan: {err}")
 
 
-def _make_worker(fake: bool) -> Worker:
+def _fake_progress_steps(order: WorkOrder) -> list[FakeProgressStep]:
+    """The `--fake-delay` progress script for one order: Read of files_owned[0], Edit of
+    files_owned[-1], then Bash `uv run pytest -q`."""
+    return [
+        ("Read", {"file_path": order.files_owned[0]}),
+        ("Edit", {"file_path": order.files_owned[-1]}),
+        ("Bash", {"command": "uv run pytest -q"}),
+    ]
+
+
+def _make_worker(fake: bool, fake_delay: float = 0.0) -> Worker:
     """FakeWorker(default=fake_result("done", summary="fake worker: no changes",
-    input_tokens=1000, output_tokens=200)) if fake, else SdkWorker()."""
+    input_tokens=1000, output_tokens=200)) if fake, else SdkWorker(). With fake and
+    fake_delay > 0 the FakeWorker also gets delay_s=fake_delay and the progress steps of
+    _fake_progress_steps."""
     if fake:
         return FakeWorker(
             default=fake_result(
                 "done", summary="fake worker: no changes", input_tokens=1000, output_tokens=200
-            )
+            ),
+            delay_s=fake_delay,
+            progress_steps=_fake_progress_steps if fake_delay > 0 else None,
         )
     return SdkWorker()
 
@@ -110,6 +124,14 @@ def run(
         ),
     ] = None,
     fake: Annotated[bool, typer.Option("--fake", help="Use a fake worker: no model.")] = False,
+    fake_delay: Annotated[
+        float,
+        typer.Option(
+            "--fake-delay",
+            min=0,
+            help="With --fake: seconds each fake attempt takes, with scripted progress.",
+        ),
+    ] = 0.0,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds per command.")] = (
         DEFAULT_TIMEOUT_S
     ),
@@ -125,6 +147,8 @@ def run(
     """Run a plan."""
     if max_cost is not None and max_cost <= 0:
         _fail("--max-cost must be greater than 0")
+    if fake_delay > 0 and not fake:
+        _fail("--fake-delay requires --fake")
     if review_tier not in TIER_LADDER:
         _fail(f"Unknown tier: {review_tier}")
     p = _load_plan_or_exit(plan)
@@ -140,7 +164,7 @@ def run(
         p,
         repo_path,
         rid,
-        _make_worker(fake),
+        _make_worker(fake, fake_delay) if fake_delay > 0 else _make_worker(fake),
         plan_path=_stored_plan_path(plan, repo_path),
         max_parallel=max_parallel,
         reviewer=_make_reviewer(review, fake),
