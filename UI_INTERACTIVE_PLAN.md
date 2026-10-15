@@ -1,6 +1,6 @@
 # Interactive office UI: high-level plan
 
-Status: draft 2026-10-15
+Status: approved 2026-10-15
 Repo: /Users/javi.gonzalezpaterna/dev/projects/agent-harness
 Builds on: PROJECT_PLAN.md (run viewer MVP, stages 1–2, approved 2026-10-14). That file stays
 as it is.
