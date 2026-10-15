@@ -60,7 +60,7 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 (function () {
   var picker = document.getElementById('run-picker');
   var runs = [], latest = null, current = null, source = null;
-  var conn = false, problem = null, stopped = null;
+  var conn = false, problem = null, stopped = null, idle = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -87,6 +87,7 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
     var msg = '';
     if (conn) msg = 'Connection lost, retrying...';
     else if (problem !== null) msg = 'Problem reading the run: ' + problem;
+    else if (idle !== null) msg = 'No activity for ' + idle + ' min, the process may have crashed.';
     else if (stopped) msg = 'Stopped early: ' + stopped + '. Resume from the terminal with `harness run <plan> --repo <repo> --resume`.';
     b.textContent = msg;
   }
@@ -109,6 +110,7 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 
   function render(v) {
     stopped = v.stopped_reason || null;
+    idle = (typeof v.idle_minutes === 'number') ? v.idle_minutes : null;
     document.getElementById('stage').textContent = str(v.stage);
     var ph = document.getElementById('phase');
     ph.className = 'phase phase-' + str(v.phase);
@@ -165,7 +167,7 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
   function open(id) {
     closeSource();
     current = id;
-    conn = false; problem = null; stopped = null;
+    conn = false; problem = null; stopped = null; idle = null;
     renderBanner();
     if (!id) return;
     source = new EventSource('/api/stream/' + encodeURIComponent(id));

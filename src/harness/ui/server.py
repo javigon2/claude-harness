@@ -187,6 +187,9 @@ def make_handler(
                     last_write = time.monotonic()
                 elif time.monotonic() - last_write >= heartbeat_s:
                     self._write(b": keepalive\n\n")
+                    self._write(
+                        self._snapshot(run_id, sig)
+                    )  # idle_minutes grows with no file change
                     last_write = time.monotonic()
 
         def handle(self) -> None:

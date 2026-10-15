@@ -14,8 +14,8 @@ from harness.ui.server import make_server
 PAGE = Path(harness.ui.__file__).parent / "static" / "index.html"
 STATUSES = ["pending", "running", "verifying", "done", "failed", "blocked", "paused"]
 RUN_KEYS = [
-    "stage", "phase", "stopped_reason", "wave", "waves_total", "cost_usd", "tiers", "tasks",
-    "events",
+    "stage", "phase", "stopped_reason", "idle_minutes", "wave", "waves_total", "cost_usd",
+    "tiers", "tasks", "events",
 ]  # fmt: skip
 TASK_KEYS = [
     "task_id", "title", "status", "tier", "attempt", "max_attempts", "escalated", "cost_usd",
@@ -64,6 +64,7 @@ def test_mentions():
     text = _text()
     for word in [
         "/api/runs", "/api/stream/", "EventSource", "No runs yet", "location.hash", "problem",
+        "No activity for",
     ]:  # fmt: skip
         assert word in text
 

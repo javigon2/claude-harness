@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ from ui_fixtures import (
 
 from harness.events import EVENTS_FILE, read_events
 from harness.state import STATE_FILE, load_state, run_dir, runs_root, save_state
-from harness.ui.view import RunView, build_view, list_runs
+from harness.ui.view import IDLE_MINUTES, RunView, build_view, list_runs
 
 
 def _rows(view: RunView) -> list[tuple]:
@@ -285,3 +286,33 @@ def test_new_views_are_read_only(tmp_path: Path) -> None:
     build_view(tmp_path, "paused1")
     build_view(tmp_path, "capped1")
     assert _snapshot(tmp_path / ".harness") == before
+
+
+def _age_events(repo: Path, run_id: str, minutes: float) -> float:
+    path = run_dir(repo, run_id) / EVENTS_FILE
+    mtime = path.stat().st_mtime
+    os.utime(path, (mtime, mtime))
+    return mtime + minutes * 60
+
+
+def test_idle_running_run_gets_a_note(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    now = _age_events(tmp_path, "running1", IDLE_MINUTES + 5)
+    view = build_view(tmp_path, "running1", now=now)
+    assert view.idle_minutes == IDLE_MINUTES + 5
+    assert view.phase == "running"
+    assert view.finished is False
+
+
+def test_recent_running_run_has_no_idle_note(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    now = _age_events(tmp_path, "running1", IDLE_MINUTES - 1)
+    assert build_view(tmp_path, "running1", now=now).idle_minutes is None
+
+
+def test_finished_runs_never_idle(tmp_path: Path) -> None:
+    write_happy_run(tmp_path)
+    write_paused_run(tmp_path)
+    for run_id in ("happy1", "paused1"):
+        now = _age_events(tmp_path, run_id, 600)
+        assert build_view(tmp_path, run_id, now=now).idle_minutes is None

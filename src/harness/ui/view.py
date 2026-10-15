@@ -1,5 +1,6 @@
 """The run viewer's view model: what the page shows, built from a run's files. Read-only."""
 
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -63,12 +64,16 @@ class RunView(BaseModel):
     finished: bool
     phase: Literal["running", "stopped", "finished"]
     stopped_reason: str | None
+    idle_minutes: int | None
     wave: int
     waves_total: int
     cost_usd: float
     tiers: list[TierView]
     tasks: list[TaskView]
     events: list[EventView]
+
+
+IDLE_MINUTES = 10  # a running run whose events.jsonl is this stale is probably dead
 
 
 def _val(payload: dict, key: str) -> str:
@@ -201,7 +206,7 @@ def _read_events(path: Path) -> list[Event]:
     return events
 
 
-def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
+def build_view(repo: Path, run_id: str, max_events: int = 50, now: float | None = None) -> RunView:
     """The RunView of run `run_id` in `repo`. Exact rules in the `decision: build_view
     rules` context item. Raises FileNotFoundError(f"No run state at {path}") (path = the
     state.json path, as a str) when it is not a file; StateError from load_state
@@ -283,6 +288,15 @@ def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
     else:
         phase = "finished"
 
+    idle_minutes: int | None = None
+    if phase == "running":
+        try:
+            age = (time.time() if now is None else now) - (directory / EVENTS_FILE).stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age >= IDLE_MINUTES * 60:
+            idle_minutes = int(age // 60)
+
     feed = [e for e in events if e.type != "worker_progress"]
     tail = feed[-max_events:] if max_events > 0 else []
     return RunView(
@@ -291,6 +305,7 @@ def build_view(repo: Path, run_id: str, max_events: int = 50) -> RunView:
         finished=state.finished,
         phase=phase,
         stopped_reason=stopped_reason,
+        idle_minutes=idle_minutes,
         wave=wave,
         waves_total=waves_total,
         cost_usd=sum(ts.usage.cost_usd for ts in state.tasks.values()),

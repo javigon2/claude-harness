@@ -170,6 +170,7 @@ def test_models_forbid_unknown_fields() -> None:
             finished=False,
             phase="finished",
             stopped_reason=None,
+            idle_minutes=None,
             wave=0,
             waves_total=0,
             cost_usd=0.0,
