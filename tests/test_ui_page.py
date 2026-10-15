@@ -76,6 +76,19 @@ def test_css_rules(cls):
     assert re.search(rf"\.{cls}\s*\{{", _text())
 
 
+@pytest.mark.parametrize("cls", [f"desk-{s}" for s in STATUSES] + ["desk-boss", "bubble"])
+def test_office_css_rules(cls):
+    assert re.search(rf"\.{cls}[\s,{{]", _text())
+
+
+def test_office_labels_and_collapsible():
+    text = _text()
+    assert "'planner'" in text
+    assert "'awaiting'" in text
+    assert 'id="office"' in text
+    assert text.count('<details class="fold" open>') == 2
+
+
 def test_keys_contract(server):
     text = _text()
     for key in RUN_KEYS + TASK_KEYS + TIER_KEYS + EVENT_KEYS:

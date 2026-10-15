@@ -34,6 +34,32 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 #feed .time { color: #6b7280; margin-right: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 #feed .tid { margin-right: 6px; }
 .hidden { display: none; }
+#office { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; padding: 8px 0 14px; }
+.desk { position: relative; width: 132px; padding-top: 74px; text-align: center; }
+.desk-label { font-size: 12px; margin-top: 6px; color: #374151; word-break: break-all; }
+.desk-top { height: 30px; border-radius: 4px; border: 2px solid #9ca3af; background: #e5e7eb; position: relative; }
+.desk-top::before { content: ""; position: absolute; left: 50%; top: -14px; width: 26px; height: 12px; margin-left: -13px; border: 2px solid #9ca3af; border-radius: 2px; background: #f9fafb; }
+.worker { position: absolute; left: 50%; top: 34px; width: 28px; margin-left: -14px; height: 40px; display: none; }
+.worker::before { content: ""; position: absolute; left: 7px; top: 0; width: 14px; height: 14px; border-radius: 50%; background: #6b7280; }
+.worker::after { content: ""; position: absolute; left: 2px; top: 16px; width: 24px; height: 20px; border-radius: 10px 10px 0 0; background: #6b7280; }
+.desk-running .worker, .desk-verifying .worker, .desk-paused .worker, .desk-done .worker, .desk-failed .worker, .desk-blocked .worker, .desk-boss .worker { display: block; }
+.desk-done .worker, .desk-failed .worker, .desk-blocked .worker { opacity: 0.45; }
+.desk-pending .desk-top { border-style: dashed; background: #f3f4f6; border-color: #d1d5db; }
+.desk-running .desk-top { border-color: #2563eb; background: #dbeafe; }
+.desk-verifying .desk-top { border-color: #7c3aed; background: #ede9fe; }
+.desk-done .desk-top { border-color: #059669; background: #a7f3d0; }
+.desk-failed .desk-top { border-color: #dc2626; background: #fecaca; }
+.desk-blocked .desk-top { border-color: #991b1b; background: #fca5a5; }
+.desk-paused .desk-top { border-color: #d97706; background: #fde68a; }
+.desk-boss .desk-top { border-color: #374151; background: #d1d5db; }
+.desk-boss .worker::before, .desk-boss .worker::after { background: #1f2937; }
+.bubble { position: absolute; left: 0; right: 0; top: 0; min-height: 18px; padding: 2px 6px; border: 1px solid #9ca3af; border-radius: 8px; background: #fff; font-size: 11px; line-height: 14px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble::after { content: ""; position: absolute; left: 50%; bottom: -6px; margin-left: -5px; width: 8px; height: 8px; background: #fff; border-right: 1px solid #9ca3af; border-bottom: 1px solid #9ca3af; transform: rotate(45deg); }
+.bubble-running { border-color: #2563eb; }
+.bubble-verifying { border-color: #7c3aed; }
+.bubble-paused { border-color: #d97706; }
+details.fold { margin-top: 10px; }
+details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -49,11 +75,18 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 <main>
   <p id="empty" class="hidden">No runs yet</p>
   <div id="content">
-    <table id="tasks">
-      <thead><tr><th>Task</th><th>Status</th><th>Tier</th><th>Attempt</th><th>Tokens</th><th>Cost</th><th>Note</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <ol id="feed"></ol>
+    <div id="office" aria-label="Office"></div>
+    <details class="fold" open>
+      <summary>Tasks</summary>
+      <table id="tasks">
+        <thead><tr><th>Task</th><th>Status</th><th>Tier</th><th>Attempt</th><th>Tokens</th><th>Cost</th><th>Note</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+    <details class="fold" open>
+      <summary>Events</summary>
+      <ol id="feed"></ol>
+    </details>
   </div>
 </main>
 <script>
@@ -108,6 +141,28 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
     return td;
   }
 
+  function desk(kind, label, status, activity) {
+    var d = el('div', 'desk desk-' + kind);
+    if (status === 'running' || status === 'verifying' || status === 'paused') {
+      var text = (status === 'paused') ? 'paused' : (activity ? activity : 'awaiting');
+      d.appendChild(el('div', 'bubble bubble-' + status, text));
+    }
+    d.appendChild(el('div', 'worker'));
+    d.appendChild(el('div', 'desk-top'));
+    d.appendChild(el('div', 'desk-label', label));
+    return d;
+  }
+
+  function renderOffice(v) {
+    var desks = [desk('boss', 'planner', 'boss', null)];
+    (v.tasks || []).forEach(function (t) {
+      var st = str(t.status);
+      desks.push(desk(st, (t.tier ? t.tier : '-') + ' \u00b7 ' + str(t.task_id), st, t.activity));
+    });
+    var office = document.getElementById('office');
+    office.replaceChildren.apply(office, desks);
+  }
+
   function render(v) {
     stopped = v.stopped_reason || null;
     idle = (typeof v.idle_minutes === 'number') ? v.idle_minutes : null;
@@ -157,6 +212,7 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
     });
     var feed = document.getElementById('feed');
     feed.replaceChildren.apply(feed, items);
+    renderOffice(v);
     renderBanner();
   }
 
