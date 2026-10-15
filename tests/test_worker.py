@@ -352,3 +352,72 @@ async def test_fake_accepts_progress(tmp_path: Path) -> None:
     worker = FakeWorker(default=fake_result("done"))
     result = await worker.run(make_order(), "haiku", tmp_path, progress=never)
     assert result.status == "done"
+
+
+# FakeWorker delay and scripted progress
+
+
+async def test_fake_worker_progress_steps_in_order_spread_over_delay(monkeypatch) -> None:
+    sleeps: list[float] = []
+    seen: list[dict] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    async def progress(p: dict) -> None:
+        seen.append(p)
+
+    monkeypatch.setattr("harness.worker.asyncio.sleep", fake_sleep)
+    worker = FakeWorker(
+        default=fake_result("done"),
+        delay_s=3.0,
+        progress_steps=[("Read", {"file_path": "a.py"}), ("Bash", {"command": "uv run pytest -q"})],
+    )
+    result = await worker.run(make_order(), "haiku", Path("/tmp/x"), progress=progress)
+    assert result.status == "done"
+    assert seen == [
+        {"tool": "Read", "detail": "a.py"},
+        {"tool": "Bash", "detail": "uv run pytest -q"},
+    ]
+    assert sleeps == [1.5, 1.5]
+
+
+async def test_fake_worker_steps_can_depend_on_the_order(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    async def progress(p: dict) -> None:
+        seen.append(p)
+
+    worker = FakeWorker(
+        default=fake_result("done"),
+        progress_steps=lambda o: [("Edit", {"file_path": o.files_owned[0]})],
+    )
+    await worker.run(make_order(), "haiku", Path("/tmp/x"), progress=progress)
+    assert seen == [{"tool": "Edit", "detail": "src/x.py"}]
+
+
+async def test_fake_worker_delay_without_steps_sleeps_once(monkeypatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    monkeypatch.setattr("harness.worker.asyncio.sleep", fake_sleep)
+    await FakeWorker(default=fake_result("done"), delay_s=2.0).run(
+        make_order(), "haiku", Path("/tmp/x")
+    )
+    assert sleeps == [2.0]
+
+
+async def test_fake_worker_defaults_neither_sleep_nor_call_progress(monkeypatch) -> None:
+    async def boom(s: float) -> None:
+        raise AssertionError("slept")
+
+    async def progress(p: dict) -> None:
+        raise AssertionError("progress called")
+
+    monkeypatch.setattr("harness.worker.asyncio.sleep", boom)
+    result = await FakeWorker(default=fake_result("done")).run(
+        make_order(), "haiku", Path("/tmp/x"), progress=progress
+    )
+    assert result.status == "done"

@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -268,3 +270,62 @@ def test_resume_keeps_viewer_resolvable_plan_path(
     result = runner.invoke(app, [*args, "--resume"])
     assert result.exit_code == 0, result.output
     assert _stored_plan_path(repo, "r1") == str((tmp_path / "plan.json").resolve())
+
+
+def test_fake_delay_without_fake_fails(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    result = runner.invoke(
+        app, ["run", str(_good_plan(tmp_path)), "--fake-delay", "1", "--repo", str(repo)]
+    )
+    assert result.exit_code == 1
+    assert "--fake-delay requires --fake" in result.output
+    assert not (repo / ".harness" / "runs").exists()
+
+
+def test_fake_delay_passes_through_to_the_worker(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path)
+    made: list[tuple] = []
+
+    def make(fake: bool, fake_delay: float = 0.0) -> FakeWorker:
+        made.append((fake, fake_delay))
+        return FakeWorker(default=fake_result("done"))
+
+    monkeypatch.setattr("harness.cli._make_worker", make)
+    args = ["run", str(_good_plan(tmp_path)), "--fake", "--repo", str(repo)]
+    assert runner.invoke(app, [*args, "--fake-delay", "0.01", "--run-id", "r1"]).exit_code == 0
+    assert runner.invoke(app, [*args, "--run-id", "r2"]).exit_code == 0
+    assert made == [(True, 0.01), (True, 0.0)]
+
+
+def test_fake_delay_run_emits_progress_and_view_shows_activity(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    plan = _good_plan(tmp_path)
+    outcome: list = []
+    t = threading.Thread(
+        target=lambda: outcome.append(
+            runner.invoke(
+                app,
+                ["run", str(plan), "--fake", "--fake-delay", "0.9", "--repo", str(repo)]
+                + ["--run-id", "r1"],
+            )
+        )
+    )
+    t.start()
+    seen: list[str] = []
+    deadline = time.monotonic() + 20
+    while t.is_alive() and time.monotonic() < deadline:
+        try:
+            tasks = build_view(repo, "r1").tasks
+        except (FileNotFoundError, ValueError):
+            continue
+        for task in tasks:
+            if task.status == "running" and task.activity is not None:
+                seen.append(task.activity)
+        time.sleep(0.02)
+    t.join(20)
+    assert outcome and outcome[0].exit_code == 0, outcome[0].output if outcome else "no result"
+    assert any(a.startswith("Read: a.txt") for a in seen), seen
+    assert any(a.startswith("Bash: uv run pytest -q") for a in seen), seen
+    assert all(t.activity is None for t in build_view(repo, "r1").tasks)
+    types = [e["type"] for e in _events(repo, "r1")]
+    assert types.count("worker_progress") == 6
