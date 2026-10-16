@@ -1,7 +1,12 @@
-"""The run viewer's HTTP server: read-only, loopback only, stdlib only."""
+"""The office's HTTP server: loopback only, stdlib only.
+
+Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
+POST endpoints, each behind the Host, Origin and token checks, a JSON-only body of at most
+64 KB, and a strict per-route body schema."""
 
 import json
 import os
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,14 +14,75 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from harness.events import EVENTS_FILE
+from harness.planner import PROJECT_PLAN_FILE
 from harness.state import STATE_FILE, StateError, run_dir
+from harness.ui.markdown import parse_markdown
+from harness.ui.office import (
+    MAX_TEXT_CHARS,
+    Office,
+    OfficeConflict,
+    office_view_from_log,
+    status_of,
+)
 from harness.ui.view import build_view, list_runs
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
 HEARTBEAT_S = 15.0
+MAX_BODY_BYTES = 65536
+DRAIN_LIMIT = 1 << 20
 
 _CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)
 _VIEW_ERRORS = (FileNotFoundError, StateError, OSError, ValueError)
+
+_TOKEN_META = '<meta name="harness-token" content="">'
+_MODE_META = '<meta name="harness-mode" content="read-only">'
+
+POST_ROUTES = ("start", "message", "implement", "next-stage")
+
+
+def render_page(token: str, mode: str) -> bytes:
+    """index.html with the per-server token and the mode ("interactive" or "read-only")
+    filled into its two meta tags."""
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    page = page.replace(_TOKEN_META, f'<meta name="harness-token" content="{token}">')
+    page = page.replace(_MODE_META, f'<meta name="harness-mode" content="{mode}">')
+    return page.encode("utf-8")
+
+
+class _BadBody(ValueError):
+    """The request body does not fit the route's schema (answered with 400)."""
+
+
+def _text_field(body: dict, key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise _BadBody(f"{key} must be a non-empty string")
+    if len(value) > MAX_TEXT_CHARS:
+        raise _BadBody(f"{key} must be at most {MAX_TEXT_CHARS} characters")
+    return value
+
+
+def _check_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/planner/<route>, or _BadBody. Exactly the allowed keys:
+    start {description} or {from_draft: true}; message {text}; implement and next-stage {}."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route == "start":
+        if keys == {"description"}:
+            _text_field(body, "description")
+        elif keys == {"from_draft"}:
+            if body["from_draft"] is not True:
+                raise _BadBody("from_draft must be true")
+        else:
+            raise _BadBody("send exactly one of description or from_draft")
+    elif route == "message":
+        if keys != {"text"}:
+            raise _BadBody("send exactly: text")
+        _text_field(body, "text")
+    elif keys:
+        raise _BadBody("this endpoint takes no fields")
+    return body
 
 
 class _Server(ThreadingHTTPServer):
@@ -56,11 +122,21 @@ def _signature(repo: Path, run_id: str) -> tuple[int, int]:
 
 
 def make_handler(
-    repo: Path, poll_interval: float = 0.5, heartbeat_s: float = HEARTBEAT_S
+    repo: Path,
+    poll_interval: float = 0.5,
+    heartbeat_s: float = HEARTBEAT_S,
+    office: Office | None = None,
+    token: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
-    `/api/run/<run_id>`, `/api/stream/<run_id>`; every other method answers 405. Request
-    logging is silenced."""
+    `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
+    `office` every other method answers 405 (read-only). With one, POST
+    `/api/planner/{start,message,implement,next-stage}` is served (`token` guards it; one is
+    made if not given) and every other method still answers 405. Request logging is
+    silenced."""
+    interactive = office is not None
+    secret = (token or secrets.token_urlsafe(32)) if interactive else ""
+    mode = "interactive" if interactive else "read-only"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -93,9 +169,108 @@ def make_handler(
             if not self._host_ok():
                 self._json(403, {"error": "bad host"})
                 return
-            self._json(405, {"error": "read-only"}, extra={"Allow": "GET"})
+            if interactive:
+                self._json(405, {"error": "method not allowed"}, extra={"Allow": "GET, POST"})
+            else:
+                self._json(405, {"error": "read-only"}, extra={"Allow": "GET"})
 
-        do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _not_get
+        do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _not_get
+
+        def do_POST(self) -> None:
+            if office is None:
+                self._not_get()
+                return
+            try:
+                self._post(office)
+            except _CLIENT_GONE:
+                return
+
+        def _reject(self, code: int, message: str) -> None:
+            """Answer with an error, then discard the request body (up to DRAIN_LIMIT) so the
+            client can finish sending and read the answer."""
+            self._json(code, {"error": message})
+            self.close_connection = True
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                self.connection.settimeout(2)
+                remaining = min(max(length, 0), DRAIN_LIMIT)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except (ValueError, OSError):
+                pass
+
+        def _origin_ok(self) -> bool:
+            port = self.server.server_address[1]
+            return self.headers.get("Origin") in (
+                f"http://127.0.0.1:{port}",
+                f"http://localhost:{port}",
+            )
+
+        def _token_ok(self) -> bool:
+            sent = self.headers.get("X-Harness-Token") or ""
+            return secrets.compare_digest(sent.encode("utf-8"), secret.encode("utf-8"))
+
+        def _post(self, office: Office) -> None:
+            """Every safety rule in order; a request failing any of them changes nothing."""
+            if not self._host_ok():
+                self._reject(403, "bad host")
+                return
+            path = urlsplit(self.path).path.rstrip("/")
+            prefix = "/api/planner/"
+            route = path[len(prefix) :] if path.startswith(prefix) else ""
+            if route not in POST_ROUTES:
+                self._reject(404, "not found")
+                return
+            if not self._origin_ok():
+                self._reject(403, "bad origin")
+                return
+            if not self._token_ok():
+                self._reject(403, "bad token")
+                return
+            if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+                self._reject(415, "content type must be application/json")
+                return
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                self._reject(411, "content length required")
+                return
+            try:
+                length = int(raw_length)
+            except ValueError:
+                self._reject(400, "bad content length")
+                return
+            if length < 0:
+                self._reject(400, "bad content length")
+                return
+            if length > MAX_BODY_BYTES:
+                self._reject(413, "body too large")
+                return
+            self.connection.settimeout(10)
+            raw = self.rfile.read(length)
+            try:
+                body = _check_body(route, json.loads(raw.decode("utf-8")))
+            except (ValueError, UnicodeDecodeError) as err:
+                self._json(400, {"error": str(err) if isinstance(err, _BadBody) else "bad JSON"})
+                return
+            try:
+                if route == "start":
+                    office.start(
+                        description=body.get("description"),
+                        from_draft=body.get("from_draft") is True,
+                    )
+                elif route == "message":
+                    office.message(body["text"])
+                elif route == "implement":
+                    office.implement()
+                else:
+                    office.next_stage()
+            except OfficeConflict as err:
+                self._json(409, {"error": str(err)})
+                return
+            self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
 
         def do_GET(self) -> None:
             if not self._host_ok():
@@ -112,11 +287,18 @@ def make_handler(
                 path = path.rstrip("/")
             if path == "/":
                 try:
-                    body = (STATIC_DIR / "index.html").read_bytes()
+                    body = render_page(secret, mode)
                 except OSError:
                     self._json(404, {"error": "not found"})
                     return
                 self._send(200, body, ctype="text/html; charset=utf-8")
+                return
+            if path == "/api/office":
+                view = office.view() if office is not None else office_view_from_log(repo)
+                self._json(200, view.model_dump(mode="json"))
+                return
+            if path == "/api/plan":
+                self._plan()
                 return
             if path == "/api/runs":
                 try:
@@ -143,6 +325,19 @@ def make_handler(
                         self._run(run_id)
                     return
             self._json(404, {"error": "not found"})
+
+        def _plan(self) -> None:
+            try:
+                text = (repo / PROJECT_PLAN_FILE).read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                self._json(200, {"exists": False, "status": None, "blocks": []})
+                return
+            except OSError as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(
+                200, {"exists": True, "status": status_of(text), "blocks": parse_markdown(text)}
+            )
 
         def _run(self, run_id: str) -> None:
             try:
@@ -202,8 +397,16 @@ def make_handler(
 
 
 def make_server(
-    repo: Path, port: int, poll_interval: float = 0.5, heartbeat_s: float = HEARTBEAT_S
+    repo: Path,
+    port: int,
+    poll_interval: float = 0.5,
+    heartbeat_s: float = HEARTBEAT_S,
+    office: Office | None = None,
+    token: str | None = None,
 ) -> ThreadingHTTPServer:
     """A server bound to ("127.0.0.1", port); port 0 picks a free port. An OSError from the
-    bind propagates. The caller runs serve_forever() and later shutdown() + server_close()."""
-    return _Server(("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s))
+    bind propagates. With an `office` the POST endpoints are on (see make_handler). The caller
+    runs serve_forever() and later shutdown() + server_close()."""
+    return _Server(
+        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token)
+    )

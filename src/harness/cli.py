@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 from pathlib import Path
 from typing import Annotated, NoReturn, cast
 
@@ -26,6 +27,7 @@ from harness.scheduler import Scheduler, SchedulerError
 from harness.state import RunState, StateError, latest_run, load_state, new_run_id
 from harness.state import run_dir as run_dir_of
 from harness.state import runs_root as runs_root_of
+from harness.ui.office import Office, OfficeError
 from harness.ui.server import make_server
 from harness.verify import DEFAULT_TIMEOUT_S
 from harness.worker import FakeProgressStep, FakeWorker, SdkWorker, Worker, fake_result
@@ -211,25 +213,82 @@ def ui_cmd(
     port: Annotated[
         int, typer.Option("--port", min=1, max=65535, help="Port on 127.0.0.1.")
     ] = 8765,
+    read_only: Annotated[
+        bool,
+        typer.Option("--read-only", help="Only watch runs: no planner, no buttons, GET only."),
+    ] = False,
+    fake: Annotated[
+        bool, typer.Option("--fake", help="Scripted planner and fake workers: no model.")
+    ] = False,
+    fake_delay: Annotated[
+        float | None,
+        typer.Option(
+            "--fake-delay", min=0, help="With --fake: seconds per scripted step (default 2)."
+        ),
+    ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option("--max-cost", help="Pass --max-cost USD to the runs started from the page."),
+    ] = None,
 ) -> None:
-    """Serve the read-only run viewer on 127.0.0.1."""
+    """Serve the office page on 127.0.0.1: watch runs, and talk to the planner (unless
+    --read-only)."""
+    if fake_delay is not None and not fake:
+        _fail("--fake-delay requires --fake")
+    if max_cost is not None and max_cost <= 0:
+        _fail("--max-cost must be greater than 0")
+    if read_only and (fake or max_cost is not None):
+        _fail("--fake and --max-cost need the interactive page; drop --read-only")
     repo_path = repo.resolve()
     if not repo_path.is_dir():
         _fail(f"Not a directory: {repo_path}")
+    office: Office | None = None
+    if not read_only:
+        if not fake:
+            try:
+                check_skills()
+            except PlannerError as err:
+                _fail(str(err))
+        try:
+            ensure_excluded(repo_path)
+        except (WorktreeError, OSError):
+            pass
+        office = Office(
+            repo_path,
+            fake=fake,
+            fake_delay=2.0 if fake_delay is None else fake_delay,
+            max_cost=max_cost,
+        )
+        try:
+            office.open(port)
+        except OfficeError as err:
+            _fail(str(err))
     try:
-        server = make_server(repo_path, port)
+        if office is None:
+            server = make_server(repo_path, port)
+        else:
+            server = make_server(repo_path, port, office=office, token=secrets.token_urlsafe(32))
     except OSError as err:
+        if office is not None:
+            office.close()
         _fail(f"Cannot listen on 127.0.0.1:{port}: {err}")
     url = f"http://127.0.0.1:{port}/"
     if run_id:
         url += f"#{run_id}"
-    typer.echo(f"Serving {url} (read-only; Ctrl-C to stop)")
+    mode = "read-only" if office is None else "interactive"
+    typer.echo(f"Serving {url} ({mode}; Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        still_running = office.close() if office is not None else None
         server.server_close()
+    if still_running:
+        typer.echo(
+            f"Run {still_running} keeps running; check it with: "
+            f"harness status --repo {repo_path} --run-id {still_running}"
+        )
 
 
 @app.command()

@@ -105,17 +105,21 @@ class OfficeView(BaseModel):
 # ---------------------------------------------------------------- small helpers
 
 
-def plan_status(repo: Path) -> Literal["draft", "approved"] | None:
-    """The `Status:` of PROJECT_PLAN.md ("draft" or "approved"), None if the file or the line
-    is missing."""
-    try:
-        text = (Path(repo) / PROJECT_PLAN_FILE).read_text(encoding="utf-8")
-    except OSError:
-        return None
+def status_of(text: str) -> Literal["draft", "approved"] | None:
+    """The `Status:` of a PROJECT_PLAN.md text ("draft" or "approved"), None if the line is
+    missing."""
     m = _STATUS_RE.search(text)
     if m is None:
         return None
     return "draft" if m.group(1) == "draft" else "approved"
+
+
+def plan_status(repo: Path) -> Literal["draft", "approved"] | None:
+    """status_of(PROJECT_PLAN.md in `repo`); None if the file is missing."""
+    try:
+        return status_of((Path(repo) / PROJECT_PLAN_FILE).read_text(encoding="utf-8"))
+    except OSError:
+        return None
 
 
 def pid_alive(pid: object) -> bool:
