@@ -430,7 +430,11 @@ class Office:
                 pass
             self._owns_lock_file = False
         with self._lock:
-            return self._run_id if self._run_id and self._run_alive(self._run_id) else None
+            rid = self._run_id
+            if rid is None:
+                return None
+            running = self._popen is not None and self._popen.poll() is None
+            return rid if running or self._run_alive(rid) else None
 
     # ------------------------------------------------------------ view
 
