@@ -104,6 +104,8 @@ class ObservedSession:
         self._log = log
         self._phase = phase_fn
         self.cost_usd = 0.0
+        self.reply_text: str | None = None
+        self.ready = False
 
     def _approved(self) -> bool:
         try:
@@ -112,17 +114,20 @@ class ObservedSession:
             return False
 
     async def send(self, text: str) -> PlannerTurn:
-        self._log.emit("planner_message", {"chars": len(text)})
+        self._log.emit("planner_message", {"chars": len(text), "phase": self._phase()})
         before = _fingerprint(self._plan)
         turn = await self._inner.send(text)
         after = _fingerprint(self._plan)
         changed = after not in (None, before)
         self.cost_usd = turn.usage.cost_usd
+        self.reply_text = turn.text
+        self.ready = False
         self._log.emit(
             "planner_reply",
             {"text": turn.text, "plan_changed": changed, "cost_usd": self.cost_usd},
         )
         if changed and self._phase() == "project" and not self._approved():
+            self.ready = True
             self._log.emit(
                 "plan_ready",
                 {"path": PROJECT_PLAN_FILE.as_posix(), "cost_usd": self.cost_usd},
