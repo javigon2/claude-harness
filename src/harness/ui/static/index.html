@@ -182,6 +182,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var token = tokenMeta ? (tokenMeta.getAttribute('content') || '') : '';
   var interactive = !!modeMeta && modeMeta.getAttribute('content') === 'interactive';
   var office = null, officeSig = '', runView = null, planBlocks = null, planSeq = 0, planKey = '';
+  var lastAutoRun = null, autoInit = false;
   var forcePrompt = false, showPlan = false, modal = document.getElementById('office-modal');
 
   function needsTid(id, text) {
@@ -402,7 +403,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('office-note').textContent = o.error ? String(o.error) : '';
     if (which === 'status') {
       byId('status-line').textContent = statusLine(o);
-      var items = (o.progress || []).map(function (line) { return el('li', null, line); });
+      var shown = (o.state === 'busy' || o.state === 'staging') ? (o.progress || []) : [];
+      var items = shown.map(function (line) { return el('li', null, line); });
       var ul = byId('progress');
       ul.replaceChildren.apply(ul, items);
     }
@@ -528,11 +530,24 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
   }
 
+  function followLaunchedRun() {
+    // Switch to the run the office launched, once; never override a run the user picked.
+    if (!office || !office.run_id) return;
+    if (!autoInit) {
+      autoInit = true;
+      if (office.state !== 'supervising' && office.state !== 'staging') { lastAutoRun = office.run_id; return; }
+    }
+    if (office.run_id === lastAutoRun || runs.indexOf(office.run_id) < 0) return;
+    lastAutoRun = office.run_id;
+    location.hash = '#' + encodeURIComponent(office.run_id);
+  }
+
   function applyOffice(o) {
     var sig = JSON.stringify(o);
     if (sig === officeSig) return;
     officeSig = sig;
     office = o;
+    followLaunchedRun();
     renderOffice();
     if (modal && modal.open) renderModal();
   }
@@ -649,6 +664,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
       renderRuns();
+      followLaunchedRun();
       choose();
     }).catch(function () { /* next poll retries */ });
   }
