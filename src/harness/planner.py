@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -17,13 +18,20 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolUseBlock,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
 from harness.config import MODEL_IDS
 from harness.models import Usage
 from harness.plan import PlanError, load_plan
-from harness.worker import WORKER_ENV, session_init_facts, usage_from_result
+from harness.worker import (
+    WORKER_ENV,
+    ProgressFn,
+    describe_tool,
+    session_init_facts,
+    usage_from_result,
+)
 
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
 
@@ -184,13 +192,20 @@ class SdkPlannerSession:
         repo: Path,
         client_factory: Callable[[ClaudeAgentOptions], Any] | None = None,
         harness_root: Path = HARNESS_ROOT,
+        *,
+        progress: ProgressFn | None = None,
+        progress_interval_s: float = 2.0,
     ) -> None:
         """self.repo = Path(repo).resolve(); self.harness_root = Path(harness_root).resolve();
         self._factory = client_factory or ClaudeSDKClient (called as
         factory(options=<ClaudeAgentOptions>)); self._client = None; self._usage = Usage()
-        (the running total from the latest ResultMessage)."""
+        (the running total from the latest ResultMessage). `progress`, when given, is awaited
+        with describe_tool(...) for the tool calls of each turn, throttled like SdkWorker:
+        a new tool name, or at least `progress_interval_s` since the last report."""
         self.repo = Path(repo).resolve()
         self.harness_root = Path(harness_root).resolve()
+        self._progress = progress
+        self.progress_interval_s = progress_interval_s
         self._factory = client_factory or ClaudeSDKClient
         self._client: Any = None
         self._usage = Usage()
@@ -229,11 +244,29 @@ class SdkPlannerSession:
         last_text = ""
         error: str | None = None
         session_init: dict[str, Any] | None = None
+        last_tool: str | None = None
+        last_report = 0.0
         try:
             await self._client.query(text)
             async for message in self._client.receive_response():
                 if isinstance(message, AssistantMessage):
                     if message.parent_tool_use_id is None:
+                        if self._progress is not None:
+                            for b in message.content:
+                                if not isinstance(b, ToolUseBlock):
+                                    continue
+                                now = time.monotonic()
+                                if (
+                                    b.name != last_tool
+                                    or now - last_report >= self.progress_interval_s
+                                ):
+                                    last_tool, last_report = b.name, now
+                                    try:
+                                        await self._progress(
+                                            describe_tool(b.name, b.input, self.repo)
+                                        )
+                                    except Exception:  # a broken callback must not end the turn
+                                        pass
                         joined = "".join(
                             b.text for b in message.content if isinstance(b, TextBlock)
                         )

@@ -3,7 +3,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 
 from harness.config import MODEL_IDS
 from harness.models import Usage
@@ -638,3 +644,72 @@ async def test_run_planner_reports_session_init_once(tmp_path: Path) -> None:
     saved = tmp_path.resolve() / PLANNER_INIT_FILE
     assert json.loads(saved.read_text(encoding="utf-8")) == FACTS
     assert result.session_init == FACTS
+
+
+# ---------------------------------------------------------------- progress
+
+
+def tool_msg(*tools: tuple[str, dict], parent: str | None = None) -> AssistantMessage:
+    blocks = [ToolUseBlock(id=f"t{i}", name=n, input=inp) for i, (n, inp) in enumerate(tools)]
+    return AssistantMessage(content=blocks, model="m", parent_tool_use_id=parent)
+
+
+async def _progress_run(tmp_path: Path, messages: list[Any], interval: float = 2.0) -> list[dict]:
+    seen: list[dict] = []
+
+    async def progress(info: dict) -> None:
+        seen.append(info)
+
+    make, _ = factory(scripts=[messages])
+    s = SdkPlannerSession(
+        tmp_path, client_factory=make, progress=progress, progress_interval_s=interval
+    )
+    await s.send("go")
+    return seen
+
+
+async def test_progress_same_tool_in_a_row_reports_once(tmp_path: Path) -> None:
+    msgs = [
+        tool_msg(("Read", {"file_path": "a.py"})),
+        tool_msg(("Read", {"file_path": "b.py"})),
+        tool_msg(("Read", {"file_path": "c.py"})),
+        result_msg(),
+    ]
+    assert await _progress_run(tmp_path, msgs) == [{"tool": "Read", "detail": "a.py"}]
+
+
+async def test_progress_new_tool_reports_again(tmp_path: Path) -> None:
+    msgs = [
+        tool_msg(("Read", {"file_path": "a.py"})),
+        tool_msg(("Edit", {"file_path": "a.py"})),
+        result_msg(),
+    ]
+    seen = await _progress_run(tmp_path, msgs)
+    assert [p["tool"] for p in seen] == ["Read", "Edit"]
+
+
+async def test_progress_interval_zero_reports_every_call(tmp_path: Path) -> None:
+    msgs = [tool_msg(("Glob", {"pattern": "*.py"})), tool_msg(("Glob", {"pattern": "*.md"}))]
+    seen = await _progress_run(tmp_path, [*msgs, result_msg()], interval=0.0)
+    assert [p["detail"] for p in seen] == ["*.py", "*.md"]
+
+
+async def test_progress_ignores_subagent_tool_calls(tmp_path: Path) -> None:
+    msgs = [tool_msg(("Read", {"file_path": "a.py"}), parent="toolu_1"), result_msg()]
+    assert await _progress_run(tmp_path, msgs) == []
+
+
+async def test_progress_callback_errors_are_swallowed(tmp_path: Path) -> None:
+    async def boom(info: dict) -> None:
+        raise RuntimeError("callback broke")
+
+    make, _ = factory(scripts=[[tool_msg(("Read", {"file_path": "a.py"})), result_msg()]])
+    turn = await SdkPlannerSession(tmp_path, client_factory=make, progress=boom).send("go")
+    assert turn.error is None
+    assert turn.text == "the reply"
+
+
+async def test_no_progress_callback_is_fine(tmp_path: Path) -> None:
+    make, _ = factory(scripts=[[tool_msg(("Read", {"file_path": "a.py"})), result_msg()]])
+    turn = await SdkPlannerSession(tmp_path, client_factory=make).send("go")
+    assert turn.error is None

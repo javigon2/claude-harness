@@ -1,6 +1,7 @@
 """Command-line entry point: `harness <command>`."""
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Annotated, NoReturn, cast
 
@@ -18,6 +19,7 @@ from harness.planner import (
     check_skills,
     run_planner,
 )
+from harness.planner_log import ObservedSession, PlannerLog, new_session_id
 from harness.report import money, report_text, status_text
 from harness.review import FakeReviewer, Reviewer, SdkReviewer, fake_review
 from harness.scheduler import Scheduler, SchedulerError
@@ -285,13 +287,44 @@ def plan_cmd(
         ensure_excluded(repo_path)
     except (WorktreeError, OSError):
         pass
-    session = _make_planner_session(repo_path)
+    log = PlannerLog(repo_path, new_session_id())
+    session = ObservedSession(
+        _make_planner_session(repo_path),
+        repo_path,
+        log,
+        lambda: "project" if stage == 1 else "staging",
+    )
+    log.emit(
+        "planner_started",
+        {
+            "session_id": log.session_id,
+            "source": "terminal",
+            "pid": os.getpid(),
+            "stage": stage,
+            "description": description or "",
+            "resumed_from_draft": False,
+        },
+    )
     try:
         result = asyncio.run(
             run_planner(description or "", repo_path, session, _ask, typer.echo, stage=stage)
         )
     except PlannerError as err:
+        log.emit("planner_failed", {"reason": str(err), "cost_usd": session.cost_usd})
         _fail(str(err))
+    except KeyboardInterrupt:
+        log.emit(
+            "planner_failed", {"reason": "interrupted: terminal", "cost_usd": session.cost_usd}
+        )
+        raise
+    log.emit(
+        "planner_done",
+        {
+            "plan_path": _stored_plan_path(result.plan_path, repo_path),
+            "cost_usd": result.usage.cost_usd,
+            "rounds": result.rounds,
+        },
+    )
     typer.echo("")
     typer.echo(f"Plan written to {result.plan_path}")
     typer.echo(f"Planner cost: {money(result.usage.cost_usd)} ({result.rounds} rounds)")
