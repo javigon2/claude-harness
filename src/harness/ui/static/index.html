@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="harness-token" content="">
 <meta name="harness-mode" content="read-only">
-<title>Harness run viewer</title>
+<title>Harness office</title>
 <style>
 body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; color: #222; background: #fafafa; }
 header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; background: #fff; border-bottom: 1px solid #ddd; }
@@ -60,6 +60,42 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .bubble-running { border-color: #2563eb; }
 .bubble-verifying { border-color: #7c3aed; }
 .bubble-paused { border-color: #d97706; }
+.desk-boss.clickable { cursor: pointer; }
+.desk-boss.clickable:hover .desk-top { filter: brightness(0.94); }
+.boss-busy .desk-top, .boss-staging .desk-top { border-color: #2563eb; background: #dbeafe; }
+.boss-asking .desk-top { border-color: #d97706; background: #fde68a; }
+.boss-ready .desk-top { animation: flash 1s infinite; }
+@keyframes flash { 0%, 100% { background: #d1d5db; } 50% { background: #fde047; } }
+.boss-supervising .desk-top { border-color: #059669; background: #a7f3d0; }
+.boss-failed .desk-top { border-color: #dc2626; background: #fecaca; }
+.boss-interrupted .desk-top { border-color: #d97706; background: #fed7aa; }
+.boss-terminal .desk-top { border-color: #7c3aed; background: #ede9fe; }
+.bubble-boss { border-color: #374151; }
+.boss-ready .bubble-boss, .boss-asking .bubble-boss { border-color: #d97706; font-weight: 600; }
+.muted { color: #6b7280; }
+dialog#office-modal { width: min(900px, 94vw); max-height: 88vh; overflow: auto; border: 1px solid #9ca3af; border-radius: 8px; padding: 14px 18px; }
+dialog#office-modal::backdrop { background: rgba(0, 0, 0, 0.35); }
+.modal-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+.modal-head .grow { flex: 1; }
+#office-msg { color: #b91c1c; font-weight: 600; min-height: 1em; }
+#office-msg:empty { display: none; }
+#office-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
+#office-note:empty { display: none; }
+dialog#office-modal textarea { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+dialog#office-modal button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+dialog#office-modal button:disabled { cursor: default; opacity: 0.55; }
+.md { font-size: 14px; line-height: 1.45; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 14px 0 6px; }
+.md h1 { font-size: 20px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; }
+.md p { margin: 6px 0; }
+.md li > p { margin: 0; }
+.md table { width: auto; margin: 8px 0; }
+.md code { font-family: ui-monospace, Menlo, Consolas, monospace; background: #f3f4f6; padding: 0 3px; border-radius: 3px; }
+.md pre { background: #f3f4f6; padding: 8px; border-radius: 4px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid #d1d5db; color: #4b5563; }
+.scroll { max-height: 46vh; overflow: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 4px 10px; background: #fff; }
+#progress { list-style: none; padding: 0; margin: 6px 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #4b5563; }
 details.fold { margin-top: 10px; }
 details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 </style>
@@ -75,9 +111,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 </header>
 <div id="banner"></div>
 <main>
+  <div id="office" aria-label="Office"></div>
   <p id="empty" class="hidden">No runs yet</p>
   <div id="content">
-    <div id="office" aria-label="Office"></div>
     <details class="fold" open>
       <summary>Tasks</summary>
       <table id="tasks">
@@ -91,11 +127,62 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </details>
   </div>
 </main>
+<dialog id="office-modal" aria-labelledby="office-title">
+  <div class="modal-head">
+    <strong id="office-title">Planner</strong>
+    <span id="office-cost" class="muted"></span>
+    <span class="grow"></span>
+    <button id="office-close" type="button">Close</button>
+  </div>
+  <p id="office-note"></p>
+  <p id="office-msg" role="alert"></p>
+  <section id="sec-prompt" class="hidden">
+    <label for="desc">What should the planner plan?</label>
+    <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
+    <button id="btn-start" type="button">Start planning</button>
+  </section>
+  <section id="sec-status" class="hidden">
+    <p id="status-line"></p>
+    <ul id="progress"></ul>
+  </section>
+  <section id="sec-reply" class="hidden">
+    <div id="reply-body" class="md scroll"></div>
+    <textarea id="answer" rows="4" placeholder="Your answer"></textarea>
+    <button id="btn-send" type="button">Send</button>
+    <button id="btn-view-plan" type="button" class="hidden">View plan</button>
+  </section>
+  <section id="sec-plan" class="hidden">
+    <div id="plan-reply" class="md scroll"></div>
+    <h3>Plan</h3>
+    <div id="plan-body" class="md scroll"></div>
+    <textarea id="continue" rows="3" placeholder="Ask for changes"></textarea>
+    <button id="btn-continue" type="button">Continue conversation</button>
+    <button id="btn-implement" type="button">Start implementing</button>
+    <button id="btn-back" type="button" class="hidden">Back to the question</button>
+  </section>
+  <section id="sec-failed" class="hidden">
+    <p id="failed-line"></p>
+    <button id="btn-resume" type="button">Continue from draft</button>
+    <button id="btn-fresh" type="button">Start fresh</button>
+    <div id="draft-body" class="md scroll"></div>
+  </section>
+  <section id="sec-next" class="hidden">
+    <p id="next-line"></p>
+    <button id="btn-next" type="button">Plan next stage</button>
+    <button id="btn-new" type="button">New project</button>
+  </section>
+</dialog>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
   var runs = [], latest = null, current = null, source = null;
   var conn = false, problem = null, stopped = null, idle = null;
+  var tokenMeta = document.querySelector('meta[name="harness-token"]');
+  var modeMeta = document.querySelector('meta[name="harness-mode"]');
+  var token = tokenMeta ? (tokenMeta.getAttribute('content') || '') : '';
+  var interactive = !!modeMeta && modeMeta.getAttribute('content') === 'interactive';
+  var office = null, officeSig = '', runView = null, planBlocks = null, planSeq = 0, planKey = '';
+  var forcePrompt = false, showPlan = false, modal = document.getElementById('office-modal');
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -155,14 +242,305 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return d;
   }
 
-  function renderOffice(v) {
-    var desks = [desk('boss', 'planner', 'boss', null)];
-    (v.tasks || []).forEach(function (t) {
-      var st = str(t.status);
-      desks.push(desk(st, (t.tier ? t.tier : '-') + ' \u00b7 ' + str(t.task_id), st, t.activity));
+  function bossText(o) {
+    var st = o.state;
+    if (st === 'busy') return (o.progress && o.progress.length) ? o.progress[o.progress.length - 1] : 'thinking\u2026';
+    if (st === 'asking') return 'has a question';
+    if (st === 'ready') return 'plan ready!';
+    if (st === 'staging') return 'writing work orders';
+    if (st === 'supervising') return 'supervising ' + str(o.run_id);
+    if (st === 'interrupted') return 'interrupted';
+    if (st === 'failed') return 'failed';
+    if (st === 'terminal') return 'busy (terminal)';
+    return '';
+  }
+
+  function bossDesk() {
+    var o = office || {state: 'idle', can_click: false};
+    var clickable = interactive && !!o.can_click;
+    var d = el('div', 'desk desk-boss boss-' + str(o.state) + (clickable ? ' clickable' : ''));
+    var text = bossText(o);
+    if (text) d.appendChild(el('div', 'bubble bubble-boss', text));
+    d.appendChild(el('div', 'worker'));
+    d.appendChild(el('div', 'desk-top'));
+    d.appendChild(el('div', 'desk-label', 'planner'));
+    if (clickable) {
+      d.setAttribute('role', 'button');
+      d.setAttribute('title', 'Talk to the planner');
+      d.tabIndex = 0;
+      d.addEventListener('click', openModal);
+      d.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openModal(); } });
+    }
+    return d;
+  }
+
+  function renderOffice() {
+    var desks = [bossDesk()];
+    if (runView) {
+      (runView.tasks || []).forEach(function (t) {
+        var st = str(t.status);
+        desks.push(desk(st, (t.tier ? t.tier : '-') + ' \u00b7 ' + str(t.task_id), st, t.activity));
+      });
+    }
+    var officeEl = document.getElementById('office');
+    officeEl.replaceChildren.apply(officeEl, desks);
+  }
+
+  // ---- markdown block tree -> DOM (textContent only; links are never anchors)
+  function inlineNode(sp) {
+    var t = sp.t, text = (sp.text === null || sp.text === undefined) ? '' : String(sp.text);
+    if (t === 'strong') return el('strong', null, text);
+    if (t === 'em') return el('em', null, text);
+    if (t === 'code') return el('code', null, text);
+    if (t === 'link') {
+      var f = document.createDocumentFragment();
+      f.appendChild(document.createTextNode(text));
+      f.appendChild(el('span', 'muted', ' (' + str(sp.href) + ')'));
+      return f;
+    }
+    return document.createTextNode(text);
+  }
+  function appendInline(parent, spans) {
+    (Array.isArray(spans) ? spans : []).forEach(function (sp) { parent.appendChild(inlineNode(sp)); });
+  }
+  function renderBlock(b) {
+    var type = b && b.type, n, i;
+    if (type === 'heading') {
+      var lv = Math.min(6, Math.max(1, Number(b.level) || 1));
+      n = el('h' + lv);
+      appendInline(n, b.inline);
+      return n;
+    }
+    if (type === 'paragraph') {
+      n = el('p');
+      appendInline(n, b.inline);
+      return n;
+    }
+    if (type === 'list') {
+      n = el(b.ordered ? 'ol' : 'ul');
+      (b.items || []).forEach(function (blocks) {
+        var li = el('li');
+        li.appendChild(renderBlocks(blocks));
+        n.appendChild(li);
+      });
+      return n;
+    }
+    if (type === 'code') {
+      n = el('pre');
+      n.appendChild(el('code', null, str(b.text)));
+      return n;
+    }
+    if (type === 'table') {
+      n = el('table');
+      var head = el('tr');
+      (b.header || []).forEach(function (cell) { var th = el('th'); appendInline(th, cell); head.appendChild(th); });
+      var thead = el('thead');
+      thead.appendChild(head);
+      n.appendChild(thead);
+      var tbody = el('tbody');
+      (b.rows || []).forEach(function (row) {
+        var tr = el('tr');
+        for (i = 0; i < row.length; i++) { var td = el('td'); appendInline(td, row[i]); tr.appendChild(td); }
+        tbody.appendChild(tr);
+      });
+      n.appendChild(tbody);
+      return n;
+    }
+    if (type === 'quote') {
+      n = el('blockquote');
+      n.appendChild(renderBlocks(b.blocks));
+      return n;
+    }
+    if (type === 'hr') return el('hr');
+    return null;
+  }
+  function renderBlocks(blocks) {
+    var frag = document.createDocumentFragment();
+    (Array.isArray(blocks) ? blocks : []).forEach(function (b) {
+      var n = renderBlock(b);
+      if (n) frag.appendChild(n);
     });
-    var office = document.getElementById('office');
-    office.replaceChildren.apply(office, desks);
+    return frag;
+  }
+  function fill(id, blocks) {
+    var node = document.getElementById(id);
+    node.replaceChildren(renderBlocks(blocks));
+  }
+
+  // ---- the boss's modal
+  function byId(id) { return document.getElementById(id); }
+  function setHidden(id, hide) { byId(id).classList.toggle('hidden', hide); }
+
+  function pickSection(o) {
+    var st = o.state;
+    if (st === 'idle') return (o.next_stage && !forcePrompt) ? 'next' : 'prompt';
+    if (st === 'interrupted' || st === 'failed') return forcePrompt ? 'prompt' : 'failed';
+    if (st === 'asking') return (showPlan && o.plan_exists) ? 'plan' : 'reply';
+    if (st === 'ready') return 'plan';
+    return 'status';
+  }
+
+  function statusLine(o) {
+    if (o.state === 'busy') return 'The planner is working\u2026';
+    if (o.state === 'staging') return 'The planner is writing the stage work orders\u2026';
+    if (o.state === 'supervising') return 'Supervising run ' + str(o.run_id) + '. Planning is paused until it finishes.';
+    if (o.state === 'terminal') return 'A planner is busy in a terminal; wait for it to finish.';
+    return str(o.state);
+  }
+
+  function renderModal() {
+    var o = office;
+    if (!o || !modal) return;
+    if (o.state !== 'idle' && o.state !== 'interrupted' && o.state !== 'failed') forcePrompt = false;
+    if (o.state !== 'asking') showPlan = false;
+    var which = pickSection(o);
+    ['prompt', 'status', 'reply', 'plan', 'failed', 'next'].forEach(function (name) {
+      setHidden('sec-' + name, name !== which);
+    });
+    byId('office-title').textContent = 'Planner \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
+    byId('office-cost').textContent = o.cost_usd > 0 ? 'planner cost ' + money(o.cost_usd) : '';
+    byId('office-note').textContent = o.error ? String(o.error) : '';
+    if (which === 'status') {
+      byId('status-line').textContent = statusLine(o);
+      var items = (o.progress || []).map(function (line) { return el('li', null, line); });
+      var ul = byId('progress');
+      ul.replaceChildren.apply(ul, items);
+    }
+    if (which === 'reply') {
+      fill('reply-body', o.reply_blocks);
+      setHidden('btn-view-plan', !o.plan_exists);
+    }
+    if (which === 'plan') {
+      fill('plan-reply', o.reply_blocks);
+      setHidden('btn-back', o.state !== 'asking');
+      setHidden('btn-implement', o.plan_status !== 'draft');
+      fillPlan();
+    }
+    if (which === 'failed') {
+      byId('failed-line').textContent = o.state === 'failed' ? 'The planner stopped.' : 'The planning session was closed.';
+      setHidden('btn-resume', !o.plan_exists);
+      fillPlan();
+    }
+    if (which === 'next') {
+      byId('next-line').textContent = 'The last run finished. Plan the next stage of the approved project plan, or start a new project.';
+      byId('btn-next').textContent = 'Plan next stage (' + str(o.next_stage) + ')';
+    }
+    var key = [which, o.plan_status, o.state, o.cost_usd].join('|');
+    if (modal.open && o.plan_exists && (which === 'plan' || which === 'failed') && key !== planKey) {
+      planKey = key;
+      loadPlan();
+    }
+  }
+
+  function fillPlan() {
+    if (planBlocks === null) return;
+    fill('plan-body', planBlocks);
+    fill('draft-body', planBlocks);
+  }
+
+  function loadPlan() {
+    var seq = ++planSeq;
+    fetch('/api/plan').then(function (r) { return r.json(); }).then(function (p) {
+      if (seq !== planSeq) return;
+      planBlocks = (p && p.exists && Array.isArray(p.blocks)) ? p.blocks : [];
+      fillPlan();
+    }).catch(function () { /* the next change retries */ });
+  }
+
+  function openModal() {
+    if (!modal || !interactive) return;
+    byId('office-msg').textContent = '';
+    planKey = '';
+    renderModal();
+    if (!modal.open) {
+      if (typeof modal.showModal === 'function') modal.showModal();
+      else modal.setAttribute('open', '');
+    }
+    renderModal();
+  }
+
+  function setBusy(on) {
+    var buttons = modal.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+      if (buttons[i].id !== 'office-close') buttons[i].disabled = on;
+    }
+  }
+
+  function api(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Harness-Token': token},
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = JSON.parse(t); } catch (e) { data = null; }
+        return {ok: r.ok, status: r.status, data: data};
+      });
+    });
+  }
+
+  function act(path, body, done) {
+    var msg = byId('office-msg');
+    msg.textContent = '';
+    setBusy(true);
+    api(path, body).then(function (res) {
+      setBusy(false);
+      if (!res.ok) {
+        msg.textContent = (res.data && res.data.error) ? String(res.data.error) : 'Request failed (HTTP ' + res.status + ')';
+        return;
+      }
+      if (done) done();
+      if (res.data && res.data.office) applyOffice(res.data.office);
+    }).catch(function () {
+      setBusy(false);
+      msg.textContent = 'Connection lost; try again.';
+    });
+  }
+
+  function textOf(id) { return byId(id).value.replace(/^\s+|\s+$/g, ''); }
+
+  function send(id) {
+    var text = textOf(id);
+    if (!text) { byId('office-msg').textContent = 'Write a message first.'; return; }
+    act('/api/planner/message', {text: text}, function () { byId(id).value = ''; });
+  }
+
+  function wireModal() {
+    byId('office-close').addEventListener('click', function () { modal.close(); });
+    byId('btn-start').addEventListener('click', function () {
+      var text = textOf('desc');
+      if (!text) { byId('office-msg').textContent = 'Describe the project first.'; return; }
+      act('/api/planner/start', {description: text}, function () { byId('desc').value = ''; });
+    });
+    byId('btn-send').addEventListener('click', function () { send('answer'); });
+    byId('btn-continue').addEventListener('click', function () { send('continue'); });
+    byId('btn-view-plan').addEventListener('click', function () { showPlan = true; planKey = ''; renderModal(); });
+    byId('btn-back').addEventListener('click', function () { showPlan = false; renderModal(); });
+    byId('btn-implement').addEventListener('click', function () {
+      var cost = office ? money(office.cost_usd) : '$?';
+      var ok = window.confirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.\n\nPlanner cost so far: ' + cost);
+      if (ok) act('/api/planner/implement', {});
+    });
+    byId('btn-resume').addEventListener('click', function () { act('/api/planner/start', {from_draft: true}); });
+    byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderModal(); });
+    byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderModal(); });
+    byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
+  }
+
+  function applyOffice(o) {
+    var sig = JSON.stringify(o);
+    if (sig === officeSig) return;
+    officeSig = sig;
+    office = o;
+    renderOffice();
+    if (modal && modal.open) renderModal();
+  }
+
+  function pollOffice() {
+    fetch('/api/office').then(function (r) { return r.json(); }).then(function (o) {
+      if (o && typeof o.state === 'string') applyOffice(o);
+    }).catch(function () { /* next poll retries */ });
   }
 
   function render(v) {
@@ -214,7 +592,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
     var feed = document.getElementById('feed');
     feed.replaceChildren.apply(feed, items);
-    renderOffice(v);
+    runView = v;
+    renderOffice();
     renderBanner();
   }
 
@@ -226,6 +605,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     closeSource();
     current = id;
     conn = false; problem = null; stopped = null; idle = null;
+    runView = null;
+    renderOffice();
     renderBanner();
     if (!id) return;
     source = new EventSource('/api/stream/' + encodeURIComponent(id));
@@ -275,8 +656,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   picker.addEventListener('change', function () { location.hash = '#' + encodeURIComponent(picker.value); });
   window.addEventListener('hashchange', choose);
   renderRuns();
+  renderOffice();
+  if (modal) wireModal();
   poll();
   setInterval(poll, 2000);
+  pollOffice();
+  setInterval(pollOffice, 1000);
 })();
 </script>
 </body>
