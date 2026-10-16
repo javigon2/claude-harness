@@ -16,7 +16,7 @@ from harness.cli import app
 from harness.models import Event
 from harness.planner import PROJECT_PLAN_FILE, PlannerTurn, is_approved
 from harness.planner_log import PLANNER_EVENTS, PlannerLog, read_planner_events
-from harness.state import latest_run, load_state, run_dir
+from harness.state import latest_run, load_state, run_dir, save_state
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.office import (
     LOCK_FILE,
@@ -520,3 +520,86 @@ def test_end_to_end_with_the_real_launcher_in_fake_mode(tmp_path):
         assert latest_run(repo) == rid
     finally:
         office.close()
+
+
+# ---------------------------------------------------------------- restarts
+
+
+def test_open_after_a_crash_shows_interrupted_with_the_draft_viewable(tmp_path, make_office):
+    plan = tmp_path / PROJECT_PLAN_FILE
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Draft\n\nStatus: draft\n\n## Goal\n\nx\n")
+    log = PlannerLog(tmp_path, "planner-old")
+    log.emit(
+        "planner_started",
+        {"source": "office", "pid": _dead_pid(), "stage": 1, "description": "orig"},
+    )
+    log.emit("planner_reply", {"text": "**Draft**", "plan_changed": True, "cost_usd": 0.7})
+    office = make_office()
+    office.open(8765)
+    v = office.view()
+    assert v.state == "interrupted"
+    assert v.plan_exists and v.plan_status == "draft"
+    assert v.cost_usd == 0.7
+    assert v.reply_blocks[0]["inline"] == [{"t": "strong", "text": "Draft"}]
+    assert "draft is kept" in (v.error or "")
+    last = read_planner_events(tmp_path)[-1]
+    assert last.payload["reason"] == "interrupted: server restarted"
+    second = make_office()  # a second restart does not log it again
+    office.close()
+    second.open(8765)
+    assert _types(tmp_path).count("planner_failed") == 1
+    assert second.view().state == "interrupted"
+
+
+def test_open_with_a_failed_last_session_shows_failed(tmp_path, make_office):
+    log = PlannerLog(tmp_path, "planner-old")
+    log.emit("planner_started", {"source": "office", "pid": os.getpid(), "stage": 1})
+    log.emit("planner_failed", {"reason": "planner session failed: boom", "cost_usd": 0.1})
+    office = make_office()
+    office.open(1)
+    v = office.view()
+    assert (v.state, v.error) == ("failed", "planner session failed: boom")
+    office.start("again")  # failed boss starts over
+    wait_for(state_is(office, "asking"))
+
+
+def test_open_with_a_live_run_supervises_it_until_it_finishes(tmp_path, make_office):
+    rid = write_running_run(tmp_path)
+    office = make_office()
+    office.open(8765)
+    v = office.view()
+    assert (v.state, v.run_id) == ("supervising", rid)
+    assert v.can_click  # the modal shows the status
+    state = load_state(run_dir(tmp_path, rid))
+    state.finished = True
+    save_state(run_dir(tmp_path, rid), state)
+    v = office.view()
+    assert v.state == "idle"
+    assert v.error is None
+
+
+def test_a_supervised_run_that_goes_quiet_returns_to_idle(tmp_path, make_office):
+    rid = write_running_run(tmp_path)
+    old = time.time() - 3600
+    events = run_dir(tmp_path, rid) / "events.jsonl"
+    os.utime(events, (old, old))
+    office = make_office()
+    office.open(8765)
+    assert office.view().state == "idle"
+
+
+def test_start_fresh_archives_the_old_plan_after_a_restart(tmp_path, make_office):
+    plan = tmp_path / PROJECT_PLAN_FILE
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Old\n\nStatus: approved 2026-01-01\n")
+    PlannerLog(tmp_path, "planner-old").emit(
+        "planner_started", {"source": "office", "pid": _dead_pid(), "stage": 1}
+    )
+    office = make_office()
+    office.open(1)
+    assert office.view().state == "interrupted"
+    office.start("brand new")
+    wait_for(state_is(office, "asking"))
+    assert not plan.exists()
+    assert len(list(plan.parent.glob("PROJECT_PLAN.*.md"))) == 1

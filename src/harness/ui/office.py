@@ -374,6 +374,29 @@ class Office:
             encoding="utf-8",
         )
         self._owns_lock_file = True
+        self._restore()
+
+    def _restore(self) -> None:
+        """Rebuild the boss from the planner log after a restart. A session that never ended
+        and whose process is gone is closed in the log (planner_failed, "interrupted: server
+        restarted") exactly once, so the boss shows `interrupted` with the draft viewable. A
+        live run is picked up as `supervising` (no process handle: finished decides)."""
+        sess = last_session(read_planner_events(self.repo))
+        if sess and not any(e.type in ("planner_done", "planner_failed") for e in sess):
+            if not pid_alive(sess[0].payload.get("pid")):
+                replies = [e for e in sess if e.type == "planner_reply"]
+                cost = float(replies[-1].payload.get("cost_usd") or 0.0) if replies else 0.0
+                PlannerLog(self.repo, sess[0].run_id).emit(
+                    "planner_failed", {"reason": "interrupted: server restarted", "cost_usd": cost}
+                )
+        v = office_view_from_log(self.repo, interactive=True)
+        with self._lock:
+            self._session_id, self._stage, self._cost = v.session_id, v.stage, v.cost_usd
+            self._reply = v.reply
+            if v.state in ("interrupted", "failed"):
+                self._state, self._error = v.state, v.error
+            elif v.state == "supervising":
+                self._state, self._run_id = "supervising", v.run_id
 
     def close(self) -> str | None:
         """Shut down: stop a live planner session (logged as interrupted: server stopped,
@@ -755,7 +778,8 @@ class Office:
             return
         finished = self._run_finished(self._run_id)
         code = self._popen.poll() if self._popen is not None else None
-        if not finished and code is None:
+        gone = self._popen is None and live_run(self.repo, self._clock()) != self._run_id
+        if not (finished or code is not None or gone):
             return
         if code not in (None, 0):
             self._error = (
