@@ -611,3 +611,49 @@ Found:
 Plan decisions stand as in `plans/ui-stage2/plan.md` (Host check kept, 7 statuses, `phase`
 and `stopped_reason`, progress as `activity` not in the feed). Docs commit left to the user:
 this section is uncommitted on main.
+
+## Office UI stages 2–4
+
+All checks on scratch copies of `examples/toy_repo` (git-inited), `harness ui --fake --port 8791`,
+no model anywhere. Tools: an API walk script (stdlib HTTP), headless Chrome screenshots, and a
+small stdlib DevTools-protocol client that clicks through the real page (node 20 has no
+WebSocket, so the client is Python). Screenshots in `/private/tmp/claude-501/-Users-javi-gonzalezpaterna-dev-projects-agent-harness/cbcd41c9-09b9-42af-9e66-190fdcaab2d2/scratchpad/shots/`.
+
+Worked:
+- **Stage 2.** Walk: idle -> start 200 -> busy (progress `Glob: **/*.py`, `Read: README.md`, `Read:
+  pyproject.toml`) -> asking -> message -> busy (`Write: .harness/plans/PROJECT_PLAN.md`) -> ready ->
+  continue -> busy (`Edit: …`) -> ready; `/api/plan` = draft with heading/list/table/code/quote
+  blocks. Clicks: the boss flashes (`ready.png`), opens the plan modal (`modal-plan.png`: headings,
+  bold, code, list, table, 0 anchors), Continue -> busy status (`modal-busy.png`) -> ready with a
+  `## Revision` section. curl: foreign Origin 403, Origin but no token 403, no Origin 403, OPTIONS 405.
+  `--read-only` restart: POST with Origin and a token 405 `read-only`, boss `interrupted` (from the
+  log), not clickable, no file written.
+- **Stage 3.** Whole loop by clicks: prompt -> question (2-item list) -> Send -> plan -> Continue ->
+  plan again -> Start implementing (confirm text carries the planner cost) -> staging -> supervising;
+  the page switched to the new run by itself, desks filled (`s3-desks1.png`: boss green, two haiku desks
+  with `Bash: uv run pytest -q`, sonnet desk pending), a second implement answered 409, all desks green,
+  boss idle (`s3-done.png`). `harness status --repo` showed the same run.
+- **Stage 4.** SIGINT while ready/asking: exit 0, log ends `interrupted: server stopped`, lock gone.
+  `kill -9` mid-plan then restart: boss `interrupted` ("draft is kept"), draft viewable and `/api/plan`
+  renders (`s4-interrupted.png`), "Continue from draft" gives a fresh session that asks again
+  (`s4-resumed.png`). `kill -9` mid-run then restart (stale lock taken over): the detached run kept
+  going, the new server showed `supervising` with the same run id and `idle` once it finished.
+  "Plan next stage (2)" by click: staging -> supervising on a stage 2 run (page followed it, `s4-stage2-run.png`)
+  -> idle with the prompt again (no stage 3).
+
+Found:
+- `Status:` and `Repo:` plan lines render as one paragraph (consecutive lines join, per the handoff).
+- A `nohup … &` server ignores SIGINT; use the terminal's Ctrl-C or SIGTERM. A leftover server on the
+  port made one walk run against the wrong repo (the old "Address already in use" line was in the log).
+- `Office.close()` first missed a run launched a second earlier (state.json not written yet); the
+  subprocess shutdown test caught it.
+- `python` is not on PATH without an active venv, so the demo orders run acceptance with the absolute
+  `sys.executable`.
+- A real (non-fake) planner session from the page is **not** verified; `SdkPlannerSession` progress is
+  only tested with a fake client.
+
+Decisions:
+- `planner_message` records the phase, and an idle-timeout `planner_failed` records `idle_s`, so a restart or
+  read-only page shows `staging` and the real timeout (extra payload keys, nothing removed).
+- `--read-only` with `--fake` or `--max-cost` is an error; `--port` stays >= 1, so the banner shows the bound port.
+- `close()` cancels a turn in flight (not only a pending question), so a busy real session is disconnected.

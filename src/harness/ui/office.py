@@ -132,6 +132,34 @@ def plan_status(repo: Path) -> Literal["draft", "approved"] | None:
         return None
 
 
+def next_stage_of(repo: Path) -> int | None:
+    """The stage "Plan next stage" would plan: N+1 when the last run launched by an office
+    came from `stage-N/plan.json` and has finished, PROJECT_PLAN.md is approved and has a
+    `## Stage N+1:` heading, and no run was launched from `stage-(N+1)/plan.json` yet.
+    None otherwise."""
+    launches = [e for e in read_planner_events(repo) if e.type == "run_launched"]
+    if not launches or plan_status(repo) != "approved":
+        return None
+    m = re.search(r"stage-(\d+)/plan\.json$", str(launches[-1].payload.get("plan_path")))
+    run_id = launches[-1].payload.get("run_id")
+    if m is None or not isinstance(run_id, str):
+        return None
+    try:
+        if not load_state(run_dir(repo, run_id)).finished:
+            return None
+        text = (repo / PROJECT_PLAN_FILE).read_text(encoding="utf-8")
+    except (StateError, OSError, ValueError):
+        return None
+    following = int(m.group(1)) + 1
+    if str(following) not in re.findall(r"^## Stage (\d+): ", text, re.MULTILINE):
+        return None
+    done = any(
+        re.search(rf"stage-{following}/plan\.json$", str(e.payload.get("plan_path")))
+        for e in launches
+    )
+    return None if done else following
+
+
 def pid_alive(pid: object) -> bool:
     """True if a process with this pid exists (signal 0). False for anything that is not a
     positive int."""
@@ -262,6 +290,8 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
             state = _live_office_state(sess, fields)
     fields["state"] = state
     fields["can_click"] = interactive and state != "terminal"
+    if state == "idle":
+        fields["next_stage"] = next_stage_of(repo)
     return OfficeView(**fields)
 
 
@@ -462,6 +492,7 @@ class Office:
                     state = "terminal"
             reply = self._reply
             return OfficeView(
+                next_stage=next_stage_of(self.repo) if state == "idle" else None,
                 mode="interactive",
                 state=state,
                 session_id=self._session_id,
@@ -624,7 +655,17 @@ class Office:
             self._send(APPROVAL_TEXT)
 
     def next_stage(self) -> None:
-        raise OfficeConflict("not yet")
+        """Plan the next stage of the approved project plan: a new session runs
+        `run_planner(stage=N+1)` (staging from the start), then its run is launched.
+        Allowed when the boss is idle, no run is live and `next_stage_of` has a stage."""
+        with self._lock:
+            self._guard_idle()
+            if self._state != "idle":
+                raise OfficeConflict("the planner is not idle; start a new project instead")
+            following = next_stage_of(self.repo)
+            if following is None:
+                raise OfficeConflict("there is no next stage to plan")
+            self._begin("", f"stage {following}", stage=following)
 
     # ------------------------------------------------------------ planner thread
 
