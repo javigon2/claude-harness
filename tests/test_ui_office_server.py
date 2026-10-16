@@ -124,8 +124,6 @@ def test_message_flow_over_http(site):
     code, _, body = site.post("/api/planner/message", {"text": "answers"})
     assert code == 200
     wait_for(lambda: state(site) == "ready")
-    code, _, body = site.post("/api/planner/implement", {})
-    assert code == 409  # the launch arrives with the next steps
     code, _, body = site.post("/api/planner/message", {"text": "more"})
     assert code == 200
 

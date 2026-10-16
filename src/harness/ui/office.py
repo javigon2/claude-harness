@@ -13,6 +13,8 @@ import json
 import os
 import queue
 import re
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from harness.events import EVENTS_FILE
 from harness.models import Event
+from harness.plan import PlanError, load_plan
 from harness.planner import (
     PROJECT_PLAN_FILE,
     PlannerError,
@@ -38,7 +41,7 @@ from harness.planner_log import (
     new_session_id,
     read_planner_events,
 )
-from harness.state import STATE_FILE, StateError, load_state, run_dir
+from harness.state import STATE_FILE, StateError, load_state, new_run_id, run_dir
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
 from harness.ui.view import IDLE_MINUTES, list_runs
@@ -64,6 +67,13 @@ State = Literal[
 SessionFactory = Callable[[Path, ProgressFn], PlannerSession]
 
 _STATUS_RE = re.compile(r"^Status: (draft|approved) ?(?:\d{4}-\d{2}-\d{2})?$", re.MULTILINE)
+
+APPROVAL_TEXT = (
+    "The user approved the plan in the office page; the Status line is already set. "
+    "Reply with one short line."
+)
+
+OFFICE_DIR = Path(".harness") / "office"
 
 RESUME_PROMPT = (
     "An earlier planning session was interrupted. The current draft is {project_plan}; "
@@ -336,6 +346,8 @@ class Office:
         self._last_activity = 0.0
         self._end_reason: str | None = None
         self._owns_lock_file = False
+        self._popen: Any = None
+        self._launched_plan: str | None = None
 
     # ------------------------------------------------------------ lock file
 
@@ -413,6 +425,7 @@ class Office:
         while a run is live (also one started in a terminal) and to `terminal` while a
         `harness plan` is busy elsewhere."""
         with self._lock:
+            self._refresh_supervising()
             state, run_id, error = self._state, self._run_id, self._error
             if state in ("idle", "failed", "interrupted"):
                 live = live_run(self.repo, self._clock())
@@ -440,11 +453,14 @@ class Office:
 
     def _guard_idle(self) -> None:
         """Raise OfficeConflict unless a new planner session may start. Caller holds the lock."""
+        self._refresh_supervising()
         if self._state in ("busy", "asking", "ready", "staging"):
             raise OfficeConflict("a planning session is already in progress")
         live = live_run(self.repo, self._clock())
         if live is not None:
             raise OfficeConflict(f"a run is active ({live}); wait for it to finish")
+        if self._state == "supervising":
+            raise OfficeConflict(f"a run is active ({self._run_id}); wait for it to finish")
         sess = last_session(read_planner_events(self.repo))
         if _terminal_live(sess):
             raise OfficeConflict(
@@ -539,9 +555,12 @@ class Office:
             self._send(text)
 
     def _guard_message(self) -> None:
+        self._refresh_supervising()
         live = live_run(self.repo, self._clock())
         if live is not None:
             raise OfficeConflict(f"a run is active ({live}); wait for it to finish")
+        if self._state == "supervising":
+            raise OfficeConflict(f"a run is active ({self._run_id}); wait for it to finish")
         if self._state not in ("asking", "ready"):
             raise OfficeConflict("the planner is not waiting for a message")
 
@@ -552,7 +571,30 @@ class Office:
         self._answers.put(text)
 
     def implement(self) -> None:
-        raise OfficeConflict("not yet")
+        """Approve the draft plan and go on to stage 1's work orders and the run: rewrite
+        `Status: draft` to `Status: approved <today>`, then tell the session. Allowed when
+        the boss is asking or ready and PROJECT_PLAN.md has a `Status: draft` line."""
+        with self._lock:
+            self._refresh_supervising()
+            if self._state == "staging":
+                raise OfficeConflict("already staging: the planner is writing the work orders")
+            live = live_run(self.repo, self._clock())
+            if self._state == "supervising" or live is not None:
+                raise OfficeConflict(f"a run is already active ({live or self._run_id})")
+            if self._state not in ("asking", "ready"):
+                raise OfficeConflict("the planner is not waiting for a message")
+            plan = self.repo / PROJECT_PLAN_FILE
+            try:
+                text = plan.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            today = time.strftime("%Y-%m-%d", time.localtime(self._clock()))
+            new, n = re.subn(r"^Status: draft$", f"Status: approved {today}", text, flags=re.M)
+            if n == 0:
+                raise OfficeConflict("the plan has no `Status: draft` line to approve")
+            plan.write_text(new, encoding="utf-8")
+            self._phase = "staging"
+            self._send(APPROVAL_TEXT)
 
     def next_stage(self) -> None:
         raise OfficeConflict("not yet")
@@ -635,12 +677,13 @@ class Office:
             self._error = _reason_note(reason, self.idle_timeout_s)
 
     def _done(self, result: PlanResult) -> None:
+        """run_planner returned a valid stage plan: log it, then launch the run."""
         with self._lock:
+            try:
+                shown = result.plan_path.relative_to(self.repo).as_posix()
+            except ValueError:
+                shown = str(result.plan_path)
             if self._log is not None:
-                try:
-                    shown = result.plan_path.relative_to(self.repo).as_posix()
-                except ValueError:
-                    shown = str(result.plan_path)
                 self._log.emit(
                     "planner_done",
                     {
@@ -650,4 +693,79 @@ class Office:
                     },
                 )
             self._cost = result.usage.cost_usd
-            self._state = "idle"
+            try:
+                self._launch(shown)
+            except (PlanError, OSError, ValueError) as err:
+                reason = f"could not start the run: {err}"
+                self._state = "failed"
+                self._error = reason
+                if self._log is not None:
+                    self._log.emit("planner_failed", {"reason": reason, "cost_usd": self._cost})
+
+    def run_argv(self, rel_plan: str, run_id: str) -> list[str]:
+        """The `harness run` command line. Built only from server-side values."""
+        argv = [
+            sys.executable, "-m", "harness", "run", rel_plan,
+            "--repo", str(self.repo), "--run-id", run_id,
+        ]  # fmt: skip
+        if self.fake:
+            argv += ["--fake", "--fake-delay", str(self.fake_delay)]
+        if self.max_cost is not None:
+            argv += ["--max-cost", str(self.max_cost)]
+        return argv
+
+    def _launch(self, rel_plan: str) -> None:
+        """Validate the stage plan again, then start `harness run` as a detached process
+        (own session, so Ctrl-C on the UI leaves it running; output to
+        .harness/office/run-<id>.log). Caller holds the lock."""
+        load_plan(self.repo / rel_plan)
+        rid = new_run_id()
+        log_dir = self.repo / OFFICE_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
+        launcher = self._launcher or subprocess.Popen
+        with (log_dir / f"run-{rid}.log").open("w", encoding="utf-8") as out:
+            popen = launcher(
+                self.run_argv(rel_plan, rid),
+                cwd=self.repo,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self._popen = popen
+        self._run_id = rid
+        self._launched_plan = rel_plan
+        self._state = "supervising"
+        if self._log is not None:
+            self._log.emit(
+                "run_launched",
+                {
+                    "run_id": rid,
+                    "plan_path": rel_plan,
+                    "pid": getattr(popen, "pid", None),
+                    "fake": self.fake,
+                },
+            )
+
+    def _refresh_supervising(self) -> None:
+        """supervising -> idle once the run's state.json says finished or the process has
+        exited. A process that exited non-zero leaves an error naming its log. Caller holds
+        the lock."""
+        if self._state != "supervising" or self._run_id is None:
+            return
+        finished = self._run_finished(self._run_id)
+        code = self._popen.poll() if self._popen is not None else None
+        if not finished and code is None:
+            return
+        if code not in (None, 0):
+            self._error = (
+                f"run {self._run_id} exited with code {code}; "
+                f"see {(OFFICE_DIR / f'run-{self._run_id}.log').as_posix()}"
+            )
+        self._state = "idle"
+
+    def _run_finished(self, run_id: str) -> bool:
+        try:
+            return load_state(run_dir(self.repo, run_id)).finished
+        except (StateError, OSError, ValueError):
+            return False
