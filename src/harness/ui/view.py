@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from harness.config import Tier
 from harness.events import EVENTS_FILE
@@ -12,6 +12,19 @@ from harness.models import Event, TaskStatus
 from harness.plan import load_plan
 from harness.report import money, tier_totals
 from harness.state import STATE_FILE, load_state, run_dir, runs_root
+
+
+class StepView(BaseModel):
+    """One tool call of a worker, in plain words."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ts: str
+    attempt: int | None
+    tier: str | None
+    tool: str
+    detail: str
+    text: str
 
 
 class TaskView(BaseModel):
@@ -31,6 +44,7 @@ class TaskView(BaseModel):
     output_tokens: int
     detail: str | None
     activity: str | None
+    steps: list[StepView] = Field(default_factory=list)
 
 
 class TierView(BaseModel):
@@ -74,6 +88,48 @@ class RunView(BaseModel):
 
 
 IDLE_MINUTES = 10  # a running run whose events.jsonl is this stale is probably dead
+MAX_STEPS = 200  # newest worker_progress steps kept per task
+
+# tool -> (prefix used when there is a detail, text used when there is none)
+_STEP_WORDS: dict[str, tuple[str, str]] = {
+    "Read": ("Reading", "Reading a file"),
+    "Edit": ("Editing", "Editing a file"),
+    "Write": ("Writing", "Writing a file"),
+    "Grep": ("Searching for", "Searching the code"),
+    "Glob": ("Finding files matching", "Finding files"),
+    "Bash": ("Running", "Running a command"),
+}
+
+
+def step_text(tool: str, detail: str) -> str:
+    """Plain words for one tool call, e.g. "Reading README.md" or "Running a command".
+    Exact texts in the `decision: step_text` context item. Never raises."""
+    if tool not in _STEP_WORDS:
+        return f"Using {tool}: {detail}" if detail else f"Using {tool}"
+    prefix, bare = _STEP_WORDS[tool]
+    return f"{prefix} {detail}" if detail else bare
+
+
+def _step(e: Event) -> StepView:
+    """The StepView of one worker_progress event. Wrong-typed payload keys become None,
+    "?" or "" rather than raising."""
+    p = e.payload if isinstance(e.payload, dict) else {}
+    attempt = p.get("attempt")
+    tier = p.get("tier")
+    tool = p.get("tool")
+    detail = p.get("detail")
+    attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else None
+    tier = tier if isinstance(tier, str) else None
+    tool = tool if isinstance(tool, str) else "?"
+    detail = detail if isinstance(detail, str) else ""
+    return StepView(
+        ts=e.ts.isoformat(),
+        attempt=attempt,
+        tier=tier,
+        tool=tool,
+        detail=detail,
+        text=step_text(tool, detail),
+    )
 
 
 def _val(payload: dict, key: str) -> str:
@@ -206,10 +262,17 @@ def _read_events(path: Path) -> list[Event]:
     return events
 
 
-def build_view(repo: Path, run_id: str, max_events: int = 50, now: float | None = None) -> RunView:
+def build_view(
+    repo: Path,
+    run_id: str,
+    max_events: int = 50,
+    now: float | None = None,
+    max_steps: int = MAX_STEPS,
+) -> RunView:
     """The RunView of run `run_id` in `repo`. Exact rules in the `decision: build_view
-    rules` context item. Raises FileNotFoundError(f"No run state at {path}") (path = the
-    state.json path, as a str) when it is not a file; StateError from load_state
+    rules` context item. Each task's steps are its newest `max_steps` worker tool calls
+    (none when max_steps is 0). Raises FileNotFoundError(f"No run state at {path}") (path =
+    the state.json path, as a str) when it is not a file; StateError from load_state
     propagates. Never writes to disk."""
     directory = run_dir(repo, run_id)
     path = directory / STATE_FILE
@@ -227,6 +290,7 @@ def build_view(repo: Path, run_id: str, max_events: int = 50, now: float | None 
 
     events = _read_events(directory / EVENTS_FILE)
     activity: dict[str, str] = {}
+    steps: dict[str, list[StepView]] = {}
     for e in events:
         if e.task_id is None:
             continue
@@ -234,6 +298,7 @@ def build_view(repo: Path, run_id: str, max_events: int = 50, now: float | None 
             activity.pop(e.task_id, None)
         elif e.type == "worker_progress":
             activity[e.task_id] = _progress(e.payload)
+            steps.setdefault(e.task_id, []).append(_step(e))
 
     tasks: list[TaskView] = []
     for task_id, ts in state.tasks.items():
@@ -259,6 +324,7 @@ def build_view(repo: Path, run_id: str, max_events: int = 50, now: float | None 
                 output_tokens=ts.usage.output_tokens,
                 detail=detail,
                 activity=activity.get(task_id) if ts.status == "running" else None,
+                steps=steps.get(task_id, [])[-max_steps:] if max_steps > 0 else [],
             )
         )
 

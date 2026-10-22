@@ -16,7 +16,7 @@ from ui_fixtures import (
 
 from harness.events import EVENTS_FILE, read_events
 from harness.state import STATE_FILE, load_state, run_dir, runs_root, save_state
-from harness.ui.view import IDLE_MINUTES, RunView, build_view, list_runs
+from harness.ui.view import IDLE_MINUTES, RunView, build_view, list_runs, step_text
 
 
 def _rows(view: RunView) -> list[tuple]:
@@ -267,6 +267,60 @@ def test_feed_not_crowded_by_progress(tmp_path: Path) -> None:
     assert len(full.events) == 14
     assert all(e.type != "worker_progress" for e in full.events)
     assert build_view(tmp_path, "running1", max_events=5).events == full.events[-5:]
+
+
+@pytest.mark.parametrize(
+    ("tool", "detail", "text"),
+    [
+        ("Read", "README.md", "Reading README.md"),
+        ("Read", "", "Reading a file"),
+        ("Edit", "a.py", "Editing a.py"),
+        ("Edit", "", "Editing a file"),
+        ("Write", "b.py", "Writing b.py"),
+        ("Write", "", "Writing a file"),
+        ("Grep", "def f", "Searching for def f"),
+        ("Grep", "", "Searching the code"),
+        ("Glob", "*.py", "Finding files matching *.py"),
+        ("Glob", "", "Finding files"),
+        ("Bash", "uv run pytest -q", "Running uv run pytest -q"),
+        ("Bash", "", "Running a command"),
+        ("WebFetch", "https://x", "Using WebFetch: https://x"),
+        ("WebFetch", "", "Using WebFetch"),
+    ],
+)
+def test_step_text(tool: str, detail: str, text: str) -> None:
+    assert step_text(tool, detail) == text
+
+
+def test_steps(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    assert all(t.steps == [] for t in build_view(tmp_path, "running1").tasks)
+    prog = {"attempt": 1, "tier": "haiku", "tool": "Read", "detail": "x"}
+    append_event(tmp_path, "running1", "worker_progress", "b", prog)
+    append_event(tmp_path, "running1", "attempt_started", "b", {"attempt": 2, "tier": "haiku"})
+    append_event(
+        tmp_path,
+        "running1",
+        "worker_progress",
+        "b",
+        {"attempt": True, "tier": 3, "tool": 5},
+    )
+    view = build_view(tmp_path, "running1")
+    assert view.tasks[0].steps == []
+    b = view.tasks[1]
+    assert [(s.attempt, s.tier, s.tool, s.detail, s.text) for s in b.steps] == [
+        (1, "haiku", "Read", "x", "Reading x"),
+        (None, None, "?", "", "Using ?"),
+    ]
+    for i in range(205):
+        bash = {"attempt": 2, "tier": "haiku", "tool": "Bash", "detail": str(i)}
+        append_event(tmp_path, "running1", "worker_progress", "b", bash)
+    b = build_view(tmp_path, "running1").tasks[1]
+    assert len(b.steps) == 200
+    assert b.steps[0].detail == "5"
+    assert b.steps[-1].detail == "204"
+    assert b.steps[-1].text == "Running 204"
+    assert build_view(tmp_path, "running1", max_steps=0).tasks[1].steps == []
 
 
 def test_resumed_run_clears_stopped_reason(tmp_path: Path) -> None:
