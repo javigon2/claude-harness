@@ -91,6 +91,18 @@ class OfficeConflict(Exception):
     the server answers 409 with it."""
 
 
+class TranscriptEntry(BaseModel):
+    """One message of the conversation with Opus. `blocks` is `parse_markdown(text)` for
+    Opus's replies and [] for the user's messages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user", "opus"]
+    ts: str
+    text: str
+    blocks: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class OfficeView(BaseModel):
     """What the page shows for the boss. `reply_blocks` is `parse_markdown(reply)`."""
 
@@ -110,6 +122,7 @@ class OfficeView(BaseModel):
     run_id: str | None = None
     next_stage: int | None = None
     can_click: bool = False
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- small helpers
@@ -241,6 +254,29 @@ def _terminal_live(sess: list[Event]) -> bool:
     return pid_alive(sess[0].payload.get("pid"))
 
 
+def transcript_of(sess: list[Event]) -> list[TranscriptEntry]:
+    """The conversation of one planner session, in log order: each `planner_user` event
+    becomes a "user" entry and each `planner_reply` an "opus" entry, when its `text` is a
+    non-empty str. Other events are skipped. Never raises."""
+    out: list[TranscriptEntry] = []
+    try:
+        for e in sess:
+            text = e.payload.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            if e.type == "planner_user":
+                out.append(TranscriptEntry(role="user", ts=e.ts.isoformat(), text=text))
+            elif e.type == "planner_reply":
+                out.append(
+                    TranscriptEntry(
+                        role="opus", ts=e.ts.isoformat(), text=text, blocks=parse_markdown(text)
+                    )
+                )
+    except Exception:
+        return out
+    return out
+
+
 def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView:
     """The boss's state rebuilt from the planner event log and the run files, without
     touching anything. Used by read-only mode and on restart.
@@ -288,6 +324,7 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
             state = "terminal"
         else:
             state = _live_office_state(sess, fields)
+    fields["transcript"] = transcript_of(sess)
     fields["state"] = state
     fields["can_click"] = interactive and state != "terminal"
     if state == "idle":
@@ -477,6 +514,13 @@ class Office:
         except (StateError, OSError, ValueError):
             return False
 
+    def _transcript(self) -> list[TranscriptEntry]:
+        """The current session's conversation from the planner log. Caller holds the lock."""
+        if self._session_id is None:
+            return []
+        sid = self._session_id
+        return transcript_of([e for e in read_planner_events(self.repo) if e.run_id == sid])
+
     def view(self) -> OfficeView:
         """The boss's state now. Idle, failed and interrupted give way to `supervising`
         while a run is live (also one started in a terminal) and to `terminal` while a
@@ -504,6 +548,7 @@ class Office:
                 error=error,
                 run_id=run_id,
                 can_click=state != "terminal",
+                transcript=self._transcript(),
                 **_plan_fields(self.repo),
             )
 
@@ -595,6 +640,8 @@ class Office:
                 "resumed_from_draft": from_draft,
             },
         )
+        if stage == 1 and not from_draft:
+            log.emit("planner_user", {"text": shown})
         self._thread = threading.Thread(
             target=self._thread_main,
             args=(text, stage, observed),
@@ -610,6 +657,8 @@ class Office:
         when the boss is asking or ready and no run is live."""
         with self._lock:
             self._guard_message()
+            if self._log is not None:
+                self._log.emit("planner_user", {"text": text.strip()})
             self._send(text)
 
     def _guard_message(self) -> None:

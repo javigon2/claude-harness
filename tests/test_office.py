@@ -603,3 +603,42 @@ def test_start_fresh_archives_the_old_plan_after_a_restart(tmp_path, make_office
     wait_for(state_is(office, "asking"))
     assert not plan.exists()
     assert len(list(plan.parent.glob("PROJECT_PLAN.*.md"))) == 1
+
+
+def test_transcript_follows_the_conversation(tmp_path, make_office):
+    office = make_office()
+    assert office.view().transcript == []
+    office.start("a demo project")
+    wait_for(state_is(office, "asking"))
+    office.message("  my answers \n")
+    wait_for(state_is(office, "ready"))
+    tr = office.view().transcript
+    assert [m.role for m in tr] == ["user", "opus", "user", "opus"]
+    assert tr[0].text == "a demo project"
+    assert tr[2].text == "my answers"
+    assert all(m.blocks == [] for m in tr if m.role == "user")
+    assert all(m.blocks for m in tr if m.role == "opus")
+    assert office_view_from_log(tmp_path).transcript == tr
+
+
+def test_planner_user_only_for_typed_text(tmp_path, make_office):
+    office = make_office(launcher=Launches())
+    _to_ready(office)
+    office.implement()
+    wait_for(state_is(office, "supervising"))
+    assert _types(tmp_path).count("planner_user") == 2
+    with pytest.raises(OfficeConflict):
+        office.message("late")
+    assert _types(tmp_path).count("planner_user") == 2
+
+
+def test_transcript_of_a_terminal_session_has_only_replies(tmp_path):
+    _log(
+        tmp_path,
+        ("planner_started", {"source": "terminal", "pid": os.getpid(), "stage": 1}),
+        ("planner_message", {"chars": 3, "phase": "project"}),
+        ("planner_reply", {"text": "hello", "plan_changed": False, "cost_usd": 0.1}),
+        ("planner_reply", {"text": "", "plan_changed": False, "cost_usd": 0.1}),
+    )
+    tr = office_view_from_log(tmp_path).transcript
+    assert [(m.role, m.text) for m in tr] == [("opus", "hello")]
