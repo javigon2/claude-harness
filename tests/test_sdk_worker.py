@@ -354,6 +354,26 @@ def test_describe_tool_pattern(tmp_path: Path) -> None:
     assert describe_tool("Glob", {"pattern": "**/*.py"}, tmp_path)["detail"] == "**/*.py"
 
 
+def test_describe_tool_pattern_with_path(tmp_path: Path) -> None:
+    inside = str(tmp_path.resolve() / "src")
+    cwd = tmp_path
+    assert describe_tool("Grep", {"pattern": "logs", "path": "src/harness"}, cwd)["detail"] == (
+        "logs in src/harness"
+    )
+    assert describe_tool("Glob", {"pattern": "*.py", "path": inside}, cwd)["detail"] == (
+        "*.py in src"
+    )
+    assert describe_tool("Glob", {"pattern": "*.py", "path": "/etc"}, cwd)["detail"] == (
+        "*.py in /etc"
+    )
+    assert describe_tool("Grep", {"pattern": "x", "path": ""}, cwd)["detail"] == "x"
+    assert describe_tool("Grep", {"pattern": "x", "path": 3}, cwd)["detail"] == "x"
+    assert describe_tool("Grep", {"path": "src"}, cwd)["detail"] == ""
+    long = describe_tool("Grep", {"pattern": "p", "path": "d" * 200}, cwd)["detail"]
+    assert len(long) == PROGRESS_DETAIL_MAX
+    assert long.endswith("…")
+
+
 def test_describe_tool_bash_strips_cd(tmp_path: Path) -> None:
     got = describe_tool("Bash", {"command": "cd /a/b && uv run pytest -q\necho hi"}, tmp_path)
     assert got == {"tool": "Bash", "detail": "uv run pytest -q"}
@@ -428,6 +448,15 @@ async def test_progress_exception_is_ignored(tmp_path: Path) -> None:
     )
     assert result.status == "done"
     assert len(rec.calls) == 1
+
+
+async def test_progress_default_reports_every_call(tmp_path: Path) -> None:
+    fake, _ = scripted(
+        tool_msg("Edit", file_path="a.py"), tool_msg("Edit", file_path="b.py"), result_msg()
+    )
+    rec = _Recorder()
+    await SdkWorker(query_fn=fake).run(make_order(), "haiku", tmp_path, progress=rec)
+    assert [c["detail"] for c in rec.calls] == ["a.py", "b.py"]
 
 
 # --- rate limit detection ---------------------------------------------------------------

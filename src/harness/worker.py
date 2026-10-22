@@ -69,7 +69,8 @@ def session_init_facts(message: Any) -> dict[str, Any] | None:
 
 def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[str, str]:
     """{"tool": name, "detail": <detail>} for one tool call. Detail: the file path (relative
-    to cwd when inside it) for Read/Edit/Write, the pattern for Glob/Grep, the first command
+    to cwd when inside it) for Read/Edit/Write, the pattern for Glob/Grep, as `<pattern> in <path>`
+    when a non-empty path is given (relative to cwd when inside it), the first command
     line (a leading `cd <dir> && ` removed) for Bash, "" for anything else or when the key is
     missing or not a string; cut to PROGRESS_DETAIL_MAX characters with a trailing `…`.
     Never raises."""
@@ -87,6 +88,13 @@ def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[s
             value = tool_input.get("pattern")
             if isinstance(value, str):
                 detail = value
+                path = tool_input.get("path")
+                if isinstance(path, str) and path:
+                    try:
+                        path = str(Path(path).relative_to(Path(cwd).resolve()))
+                    except ValueError:
+                        pass
+                    detail = f"{detail} in {path}"
         elif name == "Bash":
             value = tool_input.get("command")
             if isinstance(value, str):
@@ -308,7 +316,7 @@ class SdkWorker:
         self,
         shared_context: str = "",
         query_fn: QueryFn | None = None,
-        progress_interval_s: float = 2.0,
+        progress_interval_s: float = 0.0,
     ) -> None:
         """self.system_prompt = load_system_prompt(shared_context), computed once here.
         self._query = query_fn or query (tests pass a fake with the same keyword call shape:
