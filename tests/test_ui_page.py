@@ -166,9 +166,17 @@ BOSS_STATES = [
     "terminal",
 ]  # fmt: skip
 OFFICE_IDS = [
-    "office-modal", "desc", "answer", "continue", "office-msg", "btn-start", "btn-send",
+    "composer", "desc", "answer", "continue", "office-msg", "btn-start", "btn-send",
     "btn-continue", "btn-implement", "btn-resume", "btn-fresh", "btn-next", "btn-new",
-    "reply-body", "plan-body", "progress",
+    "plan-fold", "plan-body", "progress",
+]  # fmt: skip
+SECTION_IDS = [
+    "sec-prompt", "sec-status", "sec-reply", "sec-plan", "sec-failed", "sec-next", "office-note",
+    "office-title", "office-cost", "status-line", "failed-line", "next-line",
+]  # fmt: skip
+REMOVED_IDS = [
+    "office-modal", "office-close", "reply-body", "plan-reply", "draft-body", "btn-view-plan",
+    "btn-back",
 ]  # fmt: skip
 
 
@@ -178,7 +186,54 @@ def test_modal_ids_and_meta_tags():
         assert f'id="{id_}"' in text, id_
     assert '<meta name="harness-token" content="">' in text
     assert '<meta name="harness-mode" content="read-only">' in text
-    assert "<dialog" in text
+    assert "<dialog" not in text
+
+
+def test_composer_and_plan_fold_replace_the_modal():
+    text = _text()
+    for id_ in SECTION_IDS:
+        assert f'id="{id_}"' in text, id_
+    for id_ in REMOVED_IDS:
+        assert f'id="{id_}"' not in text, id_
+        assert f"'{id_}'" not in text, id_
+    for word in ["openModal", "renderModal", "showPlan", "showModal", "modal"]:
+        assert word not in text, word
+    assert '<div id="composer" class="hidden">' in text
+    assert '<details id="plan-fold" class="hidden"><summary>Plan</summary>' in text
+    assert "What should Opus plan?" in text
+    convo = text.index('id="convo"')
+    assert convo < text.index('id="transcript"') < text.index('id="composer"')
+    assert text.index('id="composer"') < text.index('id="plan-fold"') < text.index('id="right"')
+    assert "renderComposer();" in text
+    assert "focusComposer" in text
+
+
+def test_pick_section(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    m = re.search(r"  function pickSection\(.*?\n  \}", _text(), re.S)
+    assert m
+    cases = [
+        {"state": "idle"}, {"state": "idle", "next_stage": 2}, {"state": "failed"},
+        {"state": "interrupted"}, {"state": "asking", "plan_exists": True}, {"state": "ready"},
+        {"state": "busy"}, {"state": "staging"}, {"state": "supervising"}, {"state": "terminal"},
+    ]  # fmt: skip
+    script = (
+        "var forcePrompt = false;\n" + m.group(0) + "\nvar cases = " + json.dumps(cases) + ";\n"
+        "var out = cases.map(pickSection);\n"
+        "forcePrompt = true;\n"
+        "out.push(pickSection(cases[1]), pickSection(cases[2]));\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    js = tmp_path / "pick.js"
+    js.write_text(script, encoding="utf-8")
+    proc = subprocess.run([node, str(js)], capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [
+        "prompt", "next", "failed", "failed", "reply", "plan", "status", "status", "status",
+        "status", "prompt", "prompt",
+    ]  # fmt: skip
 
 
 def test_boss_states_and_endpoints_are_in_the_script():

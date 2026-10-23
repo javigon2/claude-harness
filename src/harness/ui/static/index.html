@@ -76,17 +76,16 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .bubble-boss { border-color: #374151; }
 .boss-ready .bubble-boss, .boss-asking .bubble-boss { border-color: #d97706; font-weight: 600; }
 .muted { color: #6b7280; }
-dialog#office-modal { width: min(900px, 94vw); max-height: 88vh; overflow: auto; border: 1px solid #9ca3af; border-radius: 8px; padding: 14px 18px; }
-dialog#office-modal::backdrop { background: rgba(0, 0, 0, 0.35); }
-.modal-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
-.modal-head .grow { flex: 1; }
+.convo-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
 #office-msg { color: #b91c1c; font-weight: 600; min-height: 1em; }
 #office-msg:empty { display: none; }
 #office-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
 #office-note:empty { display: none; }
-dialog#office-modal textarea { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
-dialog#office-modal button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
-dialog#office-modal button:disabled { cursor: default; opacity: 0.55; }
+#composer textarea { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+#composer button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#composer button:disabled { cursor: default; opacity: 0.55; }
+#plan-fold { margin-top: 10px; }
+#plan-fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .md { font-size: 14px; line-height: 1.45; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 14px 0 6px; }
 .md h1 { font-size: 20px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; }
@@ -97,7 +96,6 @@ dialog#office-modal button:disabled { cursor: default; opacity: 0.55; }
 .md pre { background: #f3f4f6; padding: 8px; border-radius: 4px; overflow-x: auto; }
 .md pre code { background: none; padding: 0; }
 .md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid #d1d5db; color: #4b5563; }
-.scroll { max-height: 46vh; overflow: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 4px 10px; background: #fff; }
 #progress { list-style: none; padding: 0; margin: 6px 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #4b5563; }
 details.fold { margin-top: 10px; }
 details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
@@ -121,7 +119,44 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 <main id="layout">
   <section id="left">
     <div id="convo">
+      <div class="convo-head">
+        <strong id="office-title">Opus</strong>
+        <span id="office-cost" class="muted"></span>
+      </div>
       <ol id="transcript"></ol>
+      <div id="composer" class="hidden">
+        <p id="office-note"></p>
+        <p id="office-msg" role="alert"></p>
+        <section id="sec-prompt" class="hidden">
+          <label for="desc">What should Opus plan?</label>
+          <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
+          <button id="btn-start" type="button">Start planning</button>
+        </section>
+        <section id="sec-status" class="hidden">
+          <p id="status-line"></p>
+          <ul id="progress"></ul>
+        </section>
+        <section id="sec-reply" class="hidden">
+          <textarea id="answer" rows="4" placeholder="Your answer"></textarea>
+          <button id="btn-send" type="button">Send</button>
+        </section>
+        <section id="sec-plan" class="hidden">
+          <textarea id="continue" rows="3" placeholder="Ask for changes"></textarea>
+          <button id="btn-continue" type="button">Continue conversation</button>
+          <button id="btn-implement" type="button">Start implementing</button>
+        </section>
+        <section id="sec-failed" class="hidden">
+          <p id="failed-line"></p>
+          <button id="btn-resume" type="button">Continue from draft</button>
+          <button id="btn-fresh" type="button">Start fresh</button>
+        </section>
+        <section id="sec-next" class="hidden">
+          <p id="next-line"></p>
+          <button id="btn-next" type="button">Plan next stage</button>
+          <button id="btn-new" type="button">New project</button>
+        </section>
+      </div>
+      <details id="plan-fold" class="hidden"><summary>Plan</summary><div id="plan-body" class="md"></div></details>
     </div>
   </section>
   <section id="right">
@@ -142,51 +177,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
   </section>
 </main>
-<dialog id="office-modal" aria-labelledby="office-title">
-  <div class="modal-head">
-    <strong id="office-title">Planner</strong>
-    <span id="office-cost" class="muted"></span>
-    <span class="grow"></span>
-    <button id="office-close" type="button">Close</button>
-  </div>
-  <p id="office-note"></p>
-  <p id="office-msg" role="alert"></p>
-  <section id="sec-prompt" class="hidden">
-    <label for="desc">What should the planner plan?</label>
-    <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
-    <button id="btn-start" type="button">Start planning</button>
-  </section>
-  <section id="sec-status" class="hidden">
-    <p id="status-line"></p>
-    <ul id="progress"></ul>
-  </section>
-  <section id="sec-reply" class="hidden">
-    <div id="reply-body" class="md scroll"></div>
-    <textarea id="answer" rows="4" placeholder="Your answer"></textarea>
-    <button id="btn-send" type="button">Send</button>
-    <button id="btn-view-plan" type="button" class="hidden">View plan</button>
-  </section>
-  <section id="sec-plan" class="hidden">
-    <div id="plan-reply" class="md scroll"></div>
-    <h3>Plan</h3>
-    <div id="plan-body" class="md scroll"></div>
-    <textarea id="continue" rows="3" placeholder="Ask for changes"></textarea>
-    <button id="btn-continue" type="button">Continue conversation</button>
-    <button id="btn-implement" type="button">Start implementing</button>
-    <button id="btn-back" type="button" class="hidden">Back to the question</button>
-  </section>
-  <section id="sec-failed" class="hidden">
-    <p id="failed-line"></p>
-    <button id="btn-resume" type="button">Continue from draft</button>
-    <button id="btn-fresh" type="button">Start fresh</button>
-    <div id="draft-body" class="md scroll"></div>
-  </section>
-  <section id="sec-next" class="hidden">
-    <p id="next-line"></p>
-    <button id="btn-next" type="button">Plan next stage</button>
-    <button id="btn-new" type="button">New project</button>
-  </section>
-</dialog>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
@@ -199,7 +189,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var office = null, officeSig = '', runView = null, planBlocks = null, planSeq = 0, planKey = '';
   var lastAutoRun = null, autoInit = false;
   var shownSession = null, shownCount = 0;
-  var forcePrompt = false, showPlan = false, modal = document.getElementById('office-modal');
+  var forcePrompt = false, lastState = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -285,8 +275,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       d.setAttribute('role', 'button');
       d.setAttribute('title', 'Talk to Opus');
       d.tabIndex = 0;
-      d.addEventListener('click', openModal);
-      d.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openModal(); } });
+      d.addEventListener('click', focusComposer);
+      d.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusComposer(); } });
     }
     return d;
   }
@@ -416,7 +406,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     if (atBottom) left.scrollTop = left.scrollHeight;
   }
 
-  // ---- the boss's modal
+  // ---- the composer and the plan, below the conversation
   function byId(id) { return document.getElementById(id); }
   function setHidden(id, hide) { byId(id).classList.toggle('hidden', hide); }
 
@@ -424,7 +414,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     var st = o.state;
     if (st === 'idle') return (o.next_stage && !forcePrompt) ? 'next' : 'prompt';
     if (st === 'interrupted' || st === 'failed') return forcePrompt ? 'prompt' : 'failed';
-    if (st === 'asking') return (showPlan && o.plan_exists) ? 'plan' : 'reply';
+    if (st === 'asking') return 'reply';
     if (st === 'ready') return 'plan';
     return 'status';
   }
@@ -437,16 +427,16 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return str(o.state);
   }
 
-  function renderModal() {
+  function renderComposer() {
     var o = office;
-    if (!o || !modal) return;
+    if (!o) return;
     if (o.state !== 'idle' && o.state !== 'interrupted' && o.state !== 'failed') forcePrompt = false;
-    if (o.state !== 'asking') showPlan = false;
+    setHidden('composer', !interactive);
     var which = pickSection(o);
     ['prompt', 'status', 'reply', 'plan', 'failed', 'next'].forEach(function (name) {
       setHidden('sec-' + name, name !== which);
     });
-    byId('office-title').textContent = 'Planner \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
+    byId('office-title').textContent = 'Opus \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
     byId('office-cost').textContent = o.cost_usd > 0 ? 'planner cost ' + money(o.cost_usd) : '';
     byId('office-note').textContent = o.error ? String(o.error) : '';
     if (which === 'status') {
@@ -456,27 +446,24 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       var ul = byId('progress');
       ul.replaceChildren.apply(ul, items);
     }
-    if (which === 'reply') {
-      fill('reply-body', o.reply_blocks);
-      setHidden('btn-view-plan', !o.plan_exists);
-    }
-    if (which === 'plan') {
-      fill('plan-reply', o.reply_blocks);
-      setHidden('btn-back', o.state !== 'asking');
-      setHidden('btn-implement', o.plan_status !== 'draft');
-      fillPlan();
-    }
+    if (which === 'plan') setHidden('btn-implement', o.plan_status !== 'draft');
     if (which === 'failed') {
       byId('failed-line').textContent = o.state === 'failed' ? 'The planner stopped.' : 'The planning session was closed.';
       setHidden('btn-resume', !o.plan_exists);
-      fillPlan();
     }
     if (which === 'next') {
       byId('next-line').textContent = 'The last run finished. Plan the next stage of the approved project plan, or start a new project.';
       byId('btn-next').textContent = 'Plan next stage (' + str(o.next_stage) + ')';
     }
-    var key = [which, o.plan_status, o.state, o.cost_usd].join('|');
-    if (modal.open && o.plan_exists && (which === 'plan' || which === 'failed') && key !== planKey) {
+    renderPlanFold(o);
+  }
+
+  function renderPlanFold(o) {
+    setHidden('plan-fold', !o.plan_exists);
+    if (o.state === 'ready' && lastState !== 'ready') byId('plan-fold').open = true;
+    lastState = o.state;
+    var key = [o.plan_status, o.state, o.cost_usd].join('|');
+    if (o.plan_exists && key !== planKey) {
       planKey = key;
       loadPlan();
     }
@@ -485,7 +472,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function fillPlan() {
     if (planBlocks === null) return;
     fill('plan-body', planBlocks);
-    fill('draft-body', planBlocks);
   }
 
   function loadPlan() {
@@ -497,23 +483,19 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     }).catch(function () { /* the next change retries */ });
   }
 
-  function openModal() {
-    if (!modal || !interactive) return;
-    byId('office-msg').textContent = '';
-    planKey = '';
-    renderModal();
-    if (!modal.open) {
-      if (typeof modal.showModal === 'function') modal.showModal();
-      else modal.setAttribute('open', '');
+  function focusComposer() {
+    // the boss desk: focus the textarea of the section on show, if it has one
+    if (!interactive) return;
+    var ids = ['desc', 'answer', 'continue'];
+    for (var i = 0; i < ids.length; i++) {
+      var box = byId(ids[i]);
+      if (!box.parentNode.classList.contains('hidden')) { box.focus(); return; }
     }
-    renderModal();
   }
 
   function setBusy(on) {
-    var buttons = modal.querySelectorAll('button');
-    for (var i = 0; i < buttons.length; i++) {
-      if (buttons[i].id !== 'office-close') buttons[i].disabled = on;
-    }
+    var buttons = byId('composer').querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = on;
   }
 
   function api(path, body) {
@@ -556,8 +538,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     act('/api/planner/message', {text: text}, function () { byId(id).value = ''; });
   }
 
-  function wireModal() {
-    byId('office-close').addEventListener('click', function () { modal.close(); });
+  function wireComposer() {
     byId('btn-start').addEventListener('click', function () {
       var text = textOf('desc');
       if (!text) { byId('office-msg').textContent = 'Describe the project first.'; return; }
@@ -565,16 +546,14 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
     byId('btn-send').addEventListener('click', function () { send('answer'); });
     byId('btn-continue').addEventListener('click', function () { send('continue'); });
-    byId('btn-view-plan').addEventListener('click', function () { showPlan = true; planKey = ''; renderModal(); });
-    byId('btn-back').addEventListener('click', function () { showPlan = false; renderModal(); });
     byId('btn-implement').addEventListener('click', function () {
       var cost = office ? money(office.cost_usd) : '$?';
       var ok = window.confirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.\n\nPlanner cost so far: ' + cost);
       if (ok) act('/api/planner/implement', {});
     });
     byId('btn-resume').addEventListener('click', function () { act('/api/planner/start', {from_draft: true}); });
-    byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderModal(); });
-    byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderModal(); });
+    byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
+    byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
     byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
   }
 
@@ -598,7 +577,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     followLaunchedRun();
     renderOffice();
     renderTranscript(o);
-    if (modal && modal.open) renderModal();
+    renderComposer();
   }
 
   function pollOffice() {
@@ -722,7 +701,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   window.addEventListener('hashchange', choose);
   renderRuns();
   renderOffice();
-  if (modal) wireModal();
+  wireComposer();
   poll();
   setInterval(poll, 2000);
   pollOffice();
