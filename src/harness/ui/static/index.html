@@ -55,7 +55,12 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .worker::before { content: ""; position: absolute; left: 7px; top: 0; width: 14px; height: 14px; border-radius: 50%; background: #6b7280; }
 .worker::after { content: ""; position: absolute; left: 2px; top: 16px; width: 24px; height: 20px; border-radius: 10px 10px 0 0; background: #6b7280; }
 .desk-running .worker, .desk-verifying .worker, .desk-paused .worker, .desk-done .worker, .desk-failed .worker, .desk-blocked .worker, .desk-boss .worker { display: block; }
-.desk-done .worker, .desk-failed .worker, .desk-blocked .worker { opacity: 0.45; }
+.desk-done .worker, .desk-failed .worker, .desk-blocked .worker { opacity: 0; animation: walk-out 0.8s ease-in forwards; }
+.desk-running .worker, .desk-verifying .worker { animation: walk-in 0.8s ease-out, type 0.7s ease-in-out 0.8s infinite; }
+.settled .worker { animation: none; }
+@keyframes walk-in { from { transform: translateX(-80px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes walk-out { from { transform: none; opacity: 1; } to { transform: translateX(80px); opacity: 0; } }
+@keyframes type { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(2px); } }
 .desk-pending .desk-top { border-style: dashed; background: #f3f4f6; border-color: #d1d5db; }
 .desk-running .desk-top { border-color: #2563eb; background: #dbeafe; }
 .desk-verifying .desk-top { border-color: #7c3aed; background: #ede9fe; }
@@ -81,6 +86,14 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .boss-interrupted .desk-top { border-color: #d97706; background: #fed7aa; }
 .boss-terminal .desk-top { border-color: #7c3aed; background: #ede9fe; }
 .bubble-boss { border-color: #374151; }
+.mark { position: absolute; left: 50%; top: 24px; margin-left: 16px; font-size: 16px; font-weight: 700; line-height: 16px; color: #d97706; }
+.mark::before { display: inline-block; }
+.boss-busy .mark::before, .boss-staging .mark::before { content: "\2022\2022\2022"; color: #2563eb; animation: think 1.2s ease-in-out infinite; }
+.boss-asking .mark::before { content: "?"; animation: ask 0.9s ease-in-out infinite; }
+.boss-supervising .worker::before { animation: watch 3s ease-in-out infinite; }
+@keyframes think { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+@keyframes ask { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes watch { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 .boss-ready .bubble-boss, .boss-asking .bubble-boss { border-color: #d97706; font-weight: 600; }
 .muted { color: #6b7280; }
 .convo-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
@@ -117,6 +130,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #timeline .time { color: #6b7280; margin-right: 8px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 #timeline .step-attempt { font-weight: 600; color: #374151; padding-top: 8px; }
 #timeline .step.current { font-weight: 600; color: #1d4ed8; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>
 </head>
 <body>

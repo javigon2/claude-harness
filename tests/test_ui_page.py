@@ -670,3 +670,32 @@ def test_timeline_appends_steps_in_place(tmp_path):
         [5, 500],
         [["step-empty muted|No steps yet"], "zz · ", "- · ? · attempt ?/?"],
     ]  # fmt: skip
+
+
+KEYFRAMES = ["walk-in", "walk-out", "type", "think", "ask", "watch", "flash"]
+
+
+def test_animations_css():
+    text = _text()
+    for name in KEYFRAMES:
+        assert f"@keyframes {name} {{" in text, name
+    done = re.search(
+        r"\.desk-done \.worker, \.desk-failed \.worker, \.desk-blocked \.worker \{ opacity: 0;"
+        r" animation: walk-out [^}]*forwards; \}",
+        text,
+    )
+    assert done
+    running = r"\.desk-running \.worker, \.desk-verifying \.worker \{ animation: walk-in "
+    assert re.search(running, text)
+    settled = text.index(".settled .worker { animation: none; }")
+    assert settled > done.start()
+    assert re.search(
+        r"@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{ "
+        r"animation: none !important; transition: none !important; \}\s*\}",
+        text,
+    )
+    for state, name in [("busy", "think"), ("staging", "think"), ("asking", "ask")]:
+        assert re.search(rf"\.boss-{state} \.mark::before[^{{]*\{{[^}}]*animation: {name} ", text)
+    assert re.search(r"\.boss-supervising \.worker::before \{ animation: watch ", text)
+    for word in ["setTimeout", "requestAnimationFrame"]:
+        assert word not in text, word
