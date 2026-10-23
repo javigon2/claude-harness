@@ -17,7 +17,7 @@ from harness.planner import (
     stage_plan_dir,
 )
 from harness.state import latest_run, load_state
-from harness.ui.demo import DemoPlannerSession, demo_stage_plan
+from harness.ui.demo import DemoChatSession, DemoPlannerSession, demo_stage_plan
 from harness.ui.markdown import parse_markdown
 from harness.worktree import ensure_excluded
 
@@ -161,3 +161,31 @@ def test_harness_run_passes_the_demo_stage_plan_with_fake_worker(tmp_path):
     assert state.finished
     assert {t.status for t in state.tasks.values()} == {"done"}
     assert set(state.tasks) == {"demo-a", "demo-b", "demo-c"}
+
+
+async def test_demo_chat_session_edits_notes(tmp_path):
+    seen: list[dict] = []
+
+    async def rec(info: dict) -> None:
+        seen.append(info)
+
+    s = DemoChatSession(tmp_path, "haiku", progress=rec, delay_s=0)
+    t1 = await s.send("\n  add a line  \nmore")
+    assert [p["tool"] for p in seen] == ["Read", "Edit"]
+    assert [p["detail"] for p in seen] == ["README.md", "notes.md"]
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "- add a line\n"
+    assert t1.text == "Done (haiku demo): noted it in notes.md."
+    assert t1.usage.cost_usd == 0.002
+    t2 = await s.send("   ")
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "- add a line\n- note\n"
+    assert t2.usage.cost_usd == 0.004
+    assert s.sent == ["\n  add a line  \nmore", "   "]
+
+
+async def test_demo_chat_session_close(tmp_path):
+    s = DemoChatSession(tmp_path, "sonnet", delay_s=0)
+    assert not s.closed
+    turn = await s.send("hello")
+    assert turn.text == "Done (sonnet demo): noted it in notes.md."
+    await s.close()
+    assert s.closed

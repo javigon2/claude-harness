@@ -3,7 +3,8 @@
 DemoPlannerSession answers by what the message says, not by a fixed script, so "Continue
 conversation" can be pressed any number of times. It writes a real draft PROJECT_PLAN.md
 (shaped for the plan-project validator) and, on the stage prompt, a stage plan.json that
-`load_plan` accepts and the fake worker can pass."""
+`load_plan` accepts and the fake worker can pass. DemoChatSession is the scripted chat agent
+behind `harness ui --fake`."""
 
 import asyncio
 import json
@@ -261,4 +262,57 @@ class DemoPlannerSession:
         )
 
     async def close(self) -> None:
+        self.closed = True
+
+
+CHAT_TURN_COST_USD = 0.002
+
+
+class DemoChatSession:
+    """A scripted chat agent for `harness ui --fake`: no model, no network. Every send()
+    reports a Read of README.md and an Edit of notes.md, appends one line to
+    <repo>/notes.md and answers in one line. `usage.cost_usd` grows by 0.002 a turn."""
+
+    def __init__(
+        self, repo: Path, tier: str, progress: ProgressFn | None = None, delay_s: float = 1.0
+    ) -> None:
+        """self.repo = Path(repo).resolve(); self.tier = tier; self.sent: list[str] = [];
+        self.closed = False; keep progress and delay_s; the running cost starts at 0.0."""
+        self.repo = Path(repo).resolve()
+        self.tier = tier
+        self.sent: list[str] = []
+        self.closed = False
+        self._progress = progress
+        self._delay = delay_s
+        self._cost = 0.0
+
+    async def _step(self, tool: str, detail: str) -> None:
+        if self._progress is not None:
+            try:
+                await self._progress({"tool": tool, "detail": detail})
+            except Exception:
+                pass
+        await asyncio.sleep(self._delay)
+
+    async def send(self, text: str) -> PlannerTurn:
+        """Append text to self.sent; report ("Read", "README.md") then ("Edit", "notes.md")
+        like DemoPlannerSession._step (a broken callback is ignored; sleep delay_s after
+        each); append f"- {line}\\n" to <repo>/notes.md (created if missing, UTF-8), where
+        line is the first non-blank line of text, stripped, or "note" if there is none;
+        add CHAT_TURN_COST_USD to the cost and return PlannerTurn(text=f"Done ({self.tier}
+        demo): noted it in notes.md.", usage=Usage(cost_usd=round(cost, 4)))."""
+        self.sent.append(text)
+        await self._step("Read", "README.md")
+        await self._step("Edit", "notes.md")
+        line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "note")
+        with (self.repo / "notes.md").open("a", encoding="utf-8") as fh:
+            fh.write(f"- {line}\n")
+        self._cost += CHAT_TURN_COST_USD
+        return PlannerTurn(
+            text=f"Done ({self.tier} demo): noted it in notes.md.",
+            usage=Usage(cost_usd=round(self._cost, 4)),
+        )
+
+    async def close(self) -> None:
+        """self.closed = True."""
         self.closed = True
