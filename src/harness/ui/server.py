@@ -1,9 +1,9 @@
 """The office's HTTP server: loopback only, stdlib only.
 
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
-POST endpoints and the chat POST endpoints (POST /api/chat/{start,message,close}), each behind
-the Host, Origin and token checks, a JSON-only body of at most 64 KB, and a strict per-route
-body schema."""
+POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}) and the run
+POST endpoint (POST /api/run/resume), each behind the Host, Origin and token checks, a JSON-only
+body of at most 64 KB, and a strict per-route body schema."""
 
 import json
 import os
@@ -11,7 +11,7 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from harness.events import EVENTS_FILE
@@ -41,6 +41,8 @@ _MODE_META = '<meta name="harness-mode" content="read-only">'
 
 POST_ROUTES = ("start", "message", "implement", "next-stage")
 CHAT_ROUTES = ("start", "message", "close")
+RUN_ROUTES = ("resume",)
+ROUTE_CHOICES = ("auto", "quick", "project")
 
 
 def render_page(token: str, mode: str) -> bytes:
@@ -66,13 +68,18 @@ def _text_field(body: dict, key: str) -> str:
 
 
 def _check_body(route: str, body: object) -> dict:
-    """The body of a POST to /api/planner/<route>, or _BadBody. Exactly the allowed keys:
-    start {description} or {from_draft: true}; message {text}; implement and next-stage {}."""
+    """The body of a POST to /api/planner/<route> or /api/run/<route>, or _BadBody. Exactly
+    the allowed keys: start {description}, {description, route} or {from_draft: true};
+    message {text}; implement, next-stage and resume {}."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
     if route == "start":
-        if keys == {"description"}:
+        if keys == {"description", "route"}:
+            _text_field(body, "description")
+            if not isinstance(body["route"], str) or body["route"] not in ROUTE_CHOICES:
+                raise _BadBody("route must be auto, quick or project")
+        elif keys == {"description"}:
             _text_field(body, "description")
         elif keys == {"from_draft"}:
             if body["from_draft"] is not True:
@@ -169,9 +176,9 @@ def make_handler(
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
     `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
     `office` every other method answers 405 (read-only). With one, POST
-    `/api/planner/{start,message,implement,next-stage}` and POST `/api/chat/{start,message,close}`
-    are served (`token` guards them; one is made if not given) and every other method still
-    answers 405. Request logging is silenced."""
+    `/api/planner/{start,message,implement,next-stage}`, POST `/api/chat/{start,message,close}`
+    and POST `/api/run/resume` are served (`token` guards them; one is made if not given)
+    and every other method still answers 405. Request logging is silenced."""
     interactive = office is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
@@ -264,6 +271,9 @@ def make_handler(
             elif path.startswith("/api/chat/"):
                 kind, route = "chat", path[len("/api/chat/") :]
                 known = route in CHAT_ROUTES
+            elif path.startswith("/api/run/"):
+                kind, route = "run", path[len("/api/run/") :]
+                known = route in RUN_ROUTES
             else:
                 known = False
             if not known:
@@ -317,10 +327,13 @@ def make_handler(
                         office.chats.message(body["chat_id"], body["text"])
                     else:
                         office.chats.close_chat(body["chat_id"])
+                elif kind == "run":
+                    office.resume_run()
                 elif route == "start":
                     office.start(
                         description=body.get("description"),
                         from_draft=body.get("from_draft") is True,
+                        route=body.get("route", "project"),
                     )
                 elif route == "message":
                     office.message(body["text"])
@@ -388,16 +401,44 @@ def make_handler(
             self._json(404, {"error": "not found"})
 
         def _plan(self) -> None:
+            """The quick plan's plan.md while the office has one (kind "quick"), else
+            PROJECT_PLAN_FILE (kind "project"). Answers 500 on any other OSError."""
+            quick_plan = office.view().quick_plan if office is not None else None
+            if quick_plan is not None:
+                self._quick_plan(quick_plan)
+                return
             try:
                 text = (repo / PROJECT_PLAN_FILE).read_text(encoding="utf-8", errors="replace")
             except FileNotFoundError:
-                self._json(200, {"exists": False, "status": None, "blocks": []})
+                self._json(200, {"exists": False, "status": None, "blocks": [], "kind": "project"})
                 return
             except OSError as err:
                 self._json(500, {"error": str(err)})
                 return
             self._json(
-                200, {"exists": True, "status": status_of(text), "blocks": parse_markdown(text)}
+                200,
+                {
+                    "exists": True,
+                    "status": status_of(text),
+                    "blocks": parse_markdown(text),
+                    "kind": "project",
+                },
+            )
+
+        def _quick_plan(self, quick_plan: str) -> None:
+            """plan.md beside the quick plan.json at the repo-relative `quick_plan`."""
+            path = repo / PurePosixPath(quick_plan).parent / "plan.md"
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                self._json(200, {"exists": False, "status": None, "blocks": [], "kind": "quick"})
+                return
+            except OSError as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(
+                200,
+                {"exists": True, "status": None, "blocks": parse_markdown(text), "kind": "quick"},
             )
 
         def _run(self, run_id: str) -> None:
