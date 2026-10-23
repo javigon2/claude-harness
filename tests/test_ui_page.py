@@ -645,7 +645,7 @@ def test_timeline_appends_steps_in_place(tmp_path):
     end = text.index("  // ---- the composer and the plan")
     script = (
         _page_helpers(text)
-        + "var runView = null, selectedTask = null;\n"
+        + "var runView = null, selectedTask = null, interactive = false;\n"
         + "var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;\n"
         + "function byId(id) { return document.getElementById(id); }\n"
         + text[start:end]
@@ -986,4 +986,66 @@ def test_chat_desks_and_handoff(tmp_path):
         ["working…", 1, True],
         [["haiku", "sonnet"], "c9"],
         [["haiku", "sonnet"], "c9"],
+    ]  # fmt: skip
+
+
+def test_worker_chat_button_markup_and_wiring():
+    text = _text()
+    button = '<button id="btn-tl-chat" type="button" class="hidden">Chat</button>'
+    assert button in text
+    assert text.index('id="tl-title"') < text.index('id="btn-tl-chat"') < text.index('id="tl-meta"')
+    for word in [
+        "openChatPanel(chatTierOf(t ? t.tier : null), {run_id: current, task_id: selectedTask})",
+        "chatSend(currentChat(), chatTier, text, chatSeed)",
+    ]:
+        assert word in text, word
+
+
+WORKER_CHAT_SCENARIO = """
+var out = [];
+out.push(['haiku', 'sonnet', 'opus', null, 'gpt'].map(chatTierOf));
+var seed = {run_id: 'r1', task_id: 'demo-a'};
+out.push([chatSend(null, 'sonnet', 'fix it', seed),
+  chatSend({chat_id: 'c1', tier: 'sonnet', state: 'closed'}, 'sonnet', 'again', seed),
+  chatSend({chat_id: 'c2', tier: 'sonnet', state: 'waiting'}, 'sonnet', 'more', seed),
+  chatSend(null, 'haiku', 'plain', null)]);
+selectedTask = 'b';
+runView = {tasks: [{task_id: 'b', title: 'B', tier: 'opus', status: 'failed', steps: []}]};
+renderTimeline();
+var btn = byId('btn-tl-chat');
+out.push([btn.className, btn.text]);
+runView.tasks[0].tier = 'haiku';
+interactive = false;
+renderTimeline();
+out.push([btn.className, btn.text]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_worker_chat_tier_seed_and_button(tmp_path):
+    text = _text()
+    start = text.index("  // ---- a worker's timeline")
+    end = text.index("  // ---- the composer and the plan")
+    script = (
+        _page_helpers(text)
+        + "var runView = null, selectedTask = null, interactive = true;\n"
+        + "var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;\n"
+        + "function byId(id) { return document.getElementById(id); }\n"
+        + text[start:end]
+        + _chat_section(text)
+        + WORKER_CHAT_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    started = {"tier": "sonnet", "text": "fix it", "run_id": "r1", "task_id": "demo-a"}
+    assert out == [
+        ["haiku", "sonnet", "sonnet", "sonnet", "sonnet"],
+        [
+            {"path": "/api/chat/start", "body": started},
+            {"path": "/api/chat/start",
+             "body": {"tier": "sonnet", "text": "again", "run_id": "r1", "task_id": "demo-a"}},
+            {"path": "/api/chat/message", "body": {"chat_id": "c2", "text": "more"}},
+            {"path": "/api/chat/start", "body": {"tier": "haiku", "text": "plain"}},
+        ],
+        ["", "Chat with sonnet"],
+        ["hidden", "Chat with haiku"],
     ]  # fmt: skip

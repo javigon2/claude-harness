@@ -217,6 +217,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       <div class="convo-head">
         <button id="btn-back-opus" type="button">Back to Opus</button>
         <strong id="tl-title"></strong>
+        <button id="btn-tl-chat" type="button" class="hidden">Chat</button>
       </div>
       <p id="tl-meta" class="muted"></p>
       <ol id="timeline"></ol>
@@ -276,7 +277,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var deskNodes = {}, bossNode = null, selectedTask = null;
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
-  var chatDesks = {}, lastHandoff = null;
+  var chatDesks = {}, lastHandoff = null, chatSeed = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -630,10 +631,18 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return li;
   }
 
+  function chatTierOf(tier) {
+    // the chat agent that picks up a worker's task: haiku for haiku, else sonnet
+    return tier === 'haiku' ? 'haiku' : 'sonnet';
+  }
+
   function renderTimeline() {
     if (selectedTask === null) return;
     var t = findTask(selectedTask) || {task_id: selectedTask, steps: []};
-    var max = (t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
+    var chat = byId('btn-tl-chat');
+    chat.className = interactive ? '' : 'hidden';
+    chat.textContent = 'Chat with ' + chatTierOf(t.tier);
+    var max =(t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
     byId('tl-title').textContent = str(t.task_id) + ' · ' + (t.title === null || t.title === undefined ? '' : String(t.title));
     byId('tl-meta').textContent = (t.tier ? t.tier : '-') + ' · ' + str(t.status) + ' · attempt ' + num(t.attempt) + '/' + max;
     var list = byId('timeline');
@@ -863,12 +872,15 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return null;
   }
 
-  function chatSend(chat, tier, text) {
-    // an open chat gets a message; otherwise a new chat starts on the tier
+  function chatSend(chat, tier, text, seed) {
+    // an open chat gets a message; otherwise a new chat starts on the tier, seeded with a
+    // run's task when `seed` is {run_id, task_id}
     if (chat && (chat.state === 'working' || chat.state === 'waiting')) {
       return {path: '/api/chat/message', body: {chat_id: chat.chat_id, text: text}};
     }
-    return {path: '/api/chat/start', body: {tier: tier, text: text}};
+    var body = {tier: tier, text: text};
+    if (seed) { body.run_id = seed.run_id; body.task_id = seed.task_id; }
+    return {path: '/api/chat/start', body: body};
   }
 
   function currentChat() {
@@ -881,11 +893,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return null;
   }
 
-  function openChatPanel(tier) {
+  function openChatPanel(tier, seed) {
     selectedTask = null;
     tlTask = null;
     chatTier = tier;
     chatId = null;
+    chatSeed = seed || null;
     byId('chat-msg').textContent = '';
     showPanel('chat-view');
     renderChat();
@@ -940,8 +953,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-chat-send').addEventListener('click', function () {
       var text = textOf('chat-text');
       if (!text) { byId('chat-msg').textContent = 'Write a message first.'; return; }
-      var req = chatSend(currentChat(), chatTier, text);
+      var req = chatSend(currentChat(), chatTier, text, chatSeed);
       act(req.path, req.body, function () { byId('chat-text').value = ''; }, 'chat-msg');
+    });
+    byId('btn-tl-chat').addEventListener('click', function () {
+      var t = findTask(selectedTask);
+      openChatPanel(chatTierOf(t ? t.tier : null), {run_id: current, task_id: selectedTask});
     });
     byId('btn-chat-close').addEventListener('click', function () {
       var chat = currentChat();
