@@ -3,13 +3,19 @@
 The agent edits the repo directly on the current branch; after every turn the harness
 commits only the paths that turn changed. Every chat is logged to
 <repo>/.harness/chats/events.jsonl (one `Event` per line, `run_id` = chat id), so a restart
-or a read-only page can show past chats with `chats_from_log`."""
+or a read-only page can show past chats with `chats_from_log`. `ChatManager` runs the open
+chats, one thread each, and commits after every agent turn."""
 
+import asyncio
 import os
+import queue
+import secrets
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from claude_agent_sdk import ClaudeAgentOptions
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,9 +24,12 @@ from harness.config import MODEL_IDS, Tier
 from harness.models import Event
 from harness.plan import PlanError, load_plan
 from harness.planner import PlannerSession, SdkPlannerSession
-from harness.state import StateError, load_state, run_dir
+from harness.state import StateError, load_state, new_run_id, run_dir
+from harness.ui.chat_git import changed_paths, chat_commit_message, commit_paths, dirty_snapshot
+from harness.ui.demo import DemoChatSession
 from harness.ui.markdown import parse_markdown
 from harness.worker import WORKER_ENV, WORKER_TOOLS, ProgressFn
+from harness.worktree import WorktreeError
 
 CHAT_EVENTS = Path(".harness") / "chats" / "events.jsonl"
 CHAT_TIERS: tuple[Tier, ...] = ("haiku", "sonnet")
@@ -28,6 +37,7 @@ CHAT_MAX_TURNS = 40
 CHAT_MAX_CHARS = 20_000
 CHAT_KEEP_CLOSED = 5
 CHAT_PROGRESS_LINES = 8
+CHAT_JOIN_TIMEOUT_S = 10.0
 CHAT_APPEND = (
     "You are chatting with the user in the harness office page. Make the change they ask "
     "for in this repo, run its checks, and reply in a few lines. The harness commits your "
@@ -287,3 +297,298 @@ class SdkChatSession(SdkPlannerSession):
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
         )
+
+
+def new_chat_id() -> str:
+    """f"chat-{new_run_id()}-{secrets.token_hex(2)}", e.g. chat-20261023-101500-9f3a."""
+    return f"chat-{new_run_id()}-{secrets.token_hex(2)}"
+
+
+@dataclass
+class _Chat:
+    """One open chat. Every field is read and written under ChatManager._lock, except
+    `loop` and `turn`, which only the chat's own thread sets."""
+
+    chat_id: str
+    tier: Tier
+    log: ChatLog
+    state: ChatState = "working"
+    progress: list[str] = field(default_factory=list)
+    cost_usd: float = 0.0
+    error: str | None = None
+    last_text: str = ""
+    inbox: queue.Queue[str | None] = field(default_factory=queue.Queue)
+    thread: threading.Thread | None = None
+    loop: asyncio.AbstractEventLoop | None = None
+    turn: asyncio.Task[Any] | None = None
+
+
+def _check_text(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        raise ChatConflict("the message is empty")
+    if len(stripped) > CHAT_MAX_CHARS:
+        raise ChatConflict("the message is too long")
+    return stripped
+
+
+class ChatManager:
+    """Owns the open chats of one `harness ui` server: at most one per tier in CHAT_TIERS.
+
+    Each chat runs on its own daemon thread with its own asyncio loop; messages cross over
+    `_Chat.inbox`. `busy_fn()` returns a sentence while chats must not edit the repo (a run
+    is live, or the office is staging) and None otherwise; it is always called before
+    taking `_lock`, never while holding it. `fake` swaps in DemoChatSession;
+    `session_factory(repo, tier, progress)` overrides both."""
+
+    def __init__(
+        self,
+        repo: Path,
+        *,
+        fake: bool = False,
+        fake_delay: float = 2.0,
+        session_factory: ChatSessionFactory | None = None,
+        busy_fn: Callable[[], str | None] = lambda: None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        """self.repo = Path(repo).resolve(); keep busy_fn and clock; the factory is
+        session_factory, else (fake) DemoChatSession(repo, tier, progress=progress,
+        delay_s=fake_delay), else SdkChatSession(repo, tier, progress=progress).
+        self._lock = threading.Lock(); self._chats: dict[str, _Chat] = {}."""
+        self.repo = Path(repo).resolve()
+        self._busy_fn = busy_fn
+        self._clock = clock
+        if session_factory is not None:
+            self._factory: ChatSessionFactory = session_factory
+        elif fake:
+
+            def fake_factory(repo: Path, tier: Tier, progress: ProgressFn) -> PlannerSession:
+                return DemoChatSession(repo, tier, progress=progress, delay_s=fake_delay)
+
+            self._factory = fake_factory
+        else:
+
+            def sdk_factory(repo: Path, tier: Tier, progress: ProgressFn) -> PlannerSession:
+                return SdkChatSession(repo, tier, progress=progress)
+
+            self._factory = sdk_factory
+        self._lock = threading.Lock()
+        self._chats: dict[str, _Chat] = {}
+
+    def _refuse_if_busy(self) -> None:
+        reason = self._busy_fn()
+        if isinstance(reason, str) and reason:
+            raise ChatConflict(reason)
+
+    def _open_chat(self, chat_id: str) -> _Chat:
+        """Caller holds _lock."""
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            return chat
+        if any(e.run_id == chat_id for e in read_chat_events(self.repo)):
+            raise ChatConflict("the chat is closed")
+        raise ChatConflict("unknown chat")
+
+    def start(
+        self, tier: str, text: str, *, run_id: str | None = None, task_id: str | None = None
+    ) -> str:
+        """Open a chat on `tier` and send `text` (stripped) as its first message; return the
+        chat id. Checks in the order of the `decision: conflicts` context item."""
+        if tier not in CHAT_TIERS:
+            raise ChatConflict(f"no {tier} chat agent; use haiku or sonnet")
+        stripped = _check_text(text)
+        if (run_id is None) != (task_id is None):
+            raise ChatConflict("send both run_id and task_id")
+        self._refuse_if_busy()
+        with self._lock:
+            if any(c.tier == tier for c in self._chats.values()):
+                raise ChatConflict(f"a {tier} chat is already open")
+            first = stripped
+            if run_id is not None and task_id is not None:
+                brief = task_brief(self.repo, run_id, task_id)
+                first = f"{brief}\n\nThe user says:\n{stripped}"
+            chat_id = new_chat_id()
+            chat = _Chat(chat_id, cast(Tier, tier), ChatLog(self.repo, chat_id))
+            chat.log.emit(
+                "chat_started",
+                {"tier": tier, "run_id": run_id, "task_id": task_id, "pid": os.getpid()},
+            )
+            chat.log.emit("chat_user", {"text": stripped})
+            chat.last_text = stripped
+            self._chats[chat_id] = chat
+            chat.inbox.put(first)
+            chat.thread = threading.Thread(
+                target=self._thread_main, args=(chat,), name=f"harness-{chat_id}", daemon=True
+            )
+            chat.thread.start()
+        return chat_id
+
+    def message(self, chat_id: str, text: str) -> None:
+        """Send `text` (stripped) to a waiting chat."""
+        stripped = _check_text(text)
+        self._refuse_if_busy()
+        with self._lock:
+            chat = self._open_chat(chat_id)
+            if chat.state == "working":
+                raise ChatConflict("the agent is still working")
+            chat.log.emit("chat_user", {"text": stripped})
+            chat.state = "working"
+            chat.error = None
+            chat.progress = []
+            chat.last_text = stripped
+            chat.inbox.put(stripped)
+
+    def close_chat(self, chat_id: str) -> None:
+        """End an open chat (logged chat_closed {"reason": "closed by the user"}); a turn in
+        progress is cancelled."""
+        with self._lock:
+            chat = self._open_chat(chat_id)
+            chat.log.emit("chat_closed", {"reason": "closed by the user"})
+            self._end(chat, "closed")
+
+    def working(self) -> bool:
+        """True while any open chat is in state "working"."""
+        with self._lock:
+            return any(c.state == "working" for c in self._chats.values())
+
+    def views(self) -> list[ChatView]:
+        """Open chats (newest first, state/progress/error/cost from memory), then at most
+        CHAT_KEEP_CLOSED ended chats from chats_from_log, newest first."""
+        logged = chats_from_log(self.repo)
+        with self._lock:
+            open_chats = dict(self._chats)
+            snapshot = {
+                cid: (c.state, list(c.progress), c.error, c.cost_usd)
+                for cid, c in open_chats.items()
+            }
+        result: list[ChatView] = []
+        for view in logged:
+            mem = snapshot.get(view.chat_id)
+            if mem is None:
+                continue
+            state, progress, error, cost = mem
+            result.append(
+                view.model_copy(
+                    update={
+                        "state": state,
+                        "progress": progress if state == "working" else [],
+                        "error": error,
+                        "cost_usd": cost,
+                    }
+                )
+            )
+        ended = [v for v in logged if v.chat_id not in snapshot and v.state in ("closed", "failed")]
+        return result + ended[:CHAT_KEEP_CLOSED]
+
+    def close(self) -> None:
+        """Server shutdown: log chat_closed {"reason": "server stopped"} for every open chat,
+        end it (cancel its turn), then join the threads within CHAT_JOIN_TIMEOUT_S in
+        total."""
+        with self._lock:
+            chats = list(self._chats.values())
+            for chat in chats:
+                chat.log.emit("chat_closed", {"reason": "server stopped"})
+                self._end(chat, "closed")
+        deadline = time.monotonic() + CHAT_JOIN_TIMEOUT_S
+        for chat in chats:
+            if chat.thread is not None:
+                chat.thread.join(max(0.0, deadline - time.monotonic()))
+
+    # -- internals ---------------------------------------------------------------------
+
+    def _end(self, chat: _Chat, state: ChatState) -> None:
+        """Caller holds _lock."""
+        chat.state = state
+        self._chats.pop(chat.chat_id, None)
+        chat.inbox.put(None)
+        loop, turn = chat.loop, chat.turn
+        if loop is not None and turn is not None:
+            try:
+                loop.call_soon_threadsafe(turn.cancel)
+            except RuntimeError:
+                pass
+
+    def _fail(self, chat: _Chat, reason: str) -> None:
+        with self._lock:
+            if self._chats.get(chat.chat_id) is not chat:
+                return
+            chat.error = reason
+            chat.log.emit("chat_failed", {"reason": reason, "cost_usd": chat.cost_usd})
+            self._end(chat, "failed")
+
+    def _thread_main(self, chat: _Chat) -> None:
+        try:
+            asyncio.run(self._serve(chat))
+        except Exception as err:  # the thread must always leave the chat ended or waiting
+            self._fail(chat, f"unexpected error: {type(err).__name__}: {err}")
+
+    async def _serve(self, chat: _Chat) -> None:
+        chat.loop = asyncio.get_running_loop()
+
+        async def progress(info: dict[str, Any]) -> None:
+            with self._lock:
+                chat.progress = [*chat.progress, _progress_line(info)][-CHAT_PROGRESS_LINES:]
+            chat.log.emit(
+                "chat_progress", {"tool": info.get("tool"), "detail": info.get("detail", "")}
+            )
+
+        session = self._factory(self.repo, chat.tier, progress)
+        try:
+            while True:
+                text = await asyncio.to_thread(chat.inbox.get)
+                if text is None:
+                    break
+                chat.turn = asyncio.ensure_future(self._turn(chat, session, text))
+                try:
+                    keep_going = await chat.turn
+                except asyncio.CancelledError:
+                    break
+                finally:
+                    chat.turn = None
+                if not keep_going:
+                    break
+        finally:
+            try:
+                await session.close()
+            except Exception:
+                pass
+
+    async def _turn(self, chat: _Chat, session: PlannerSession, text: str) -> bool:
+        note: str | None = None
+        before: dict[str, str | None] | None
+        try:
+            before = await asyncio.to_thread(dirty_snapshot, self.repo)
+        except (WorktreeError, OSError) as err:
+            before = None
+            note = f"commit failed: {err}"
+        turn = await session.send(text)
+        if before is not None:
+            try:
+                after = await asyncio.to_thread(dirty_snapshot, self.repo)
+                message = chat_commit_message(chat.tier, chat.last_text)
+                # the chat log lives under .harness and is not part of the turn's work
+                paths = [p for p in changed_paths(before, after) if not p.startswith(".harness/")]
+                sha = await asyncio.to_thread(commit_paths, self.repo, paths, message)
+                if sha:
+                    chat.log.emit("chat_commit", {"sha": sha, "subject": message})
+            except (WorktreeError, OSError) as err:
+                note = f"commit failed: {err}"
+        if note:
+            chat.log.emit("chat_note", {"text": note})
+        with self._lock:
+            if self._chats.get(chat.chat_id) is not chat:
+                return False
+            chat.cost_usd = turn.usage.cost_usd
+            if turn.error:
+                chat.log.emit(
+                    "chat_failed",
+                    {"reason": f"agent session failed: {turn.error}", "cost_usd": chat.cost_usd},
+                )
+                chat.error = f"agent session failed: {turn.error}"
+                self._end(chat, "failed")
+                return False
+            chat.log.emit("chat_reply", {"text": turn.text, "cost_usd": chat.cost_usd})
+            chat.state = "waiting"
+            chat.error = note
+            chat.progress = []
+            return True
