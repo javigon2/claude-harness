@@ -175,3 +175,22 @@ EOF
 
 Report to the user: the waves, the number of orders, the decisions they may want to
 overrule, and the paths of both files.
+
+## Quick mode
+
+Use quick mode when the prompt says "quick mode". The input is a request typed in the office
+page, not a stage of a plan: there is no PROJECT_PLAN.md, so don't look for one or write one.
+
+- Read the repo yourself to find the code the request touches and the interfaces between
+  orders. That is your stage description.
+- Ask nothing. The user starts the plan with one click and won't answer questions: decide
+  every open choice yourself and record it as a `decision` item in the orders it affects.
+- Cut 2–8 orders. If the request needs more, or a choice only the user can make, still write
+  the best 2–8 orders and say so in one line of your reply.
+- Set `"stage": "quick"` in plan.json.
+- Write plan.json and plan.md to exactly the directory the prompt names, and run the
+  validation snippet as usual.
+- Everything else in this skill still applies: the process, the self-check and the output.
+
+End with a short reply: the waves, the number of orders and the decisions the user may want
+to overrule.
