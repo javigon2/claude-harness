@@ -86,6 +86,13 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .boss-interrupted .desk-top { border-color: #d97706; background: #fed7aa; }
 .boss-terminal .desk-top { border-color: #7c3aed; background: #ede9fe; }
 .bubble-boss { border-color: #374151; }
+.desk-chat { cursor: pointer; }
+.chat-working .worker, .chat-waiting .worker { display: block; }
+.chat-working .worker { animation: type 0.7s ease-in-out infinite; }
+.chat-free .desk-top { border-style: dashed; background: #f3f4f6; border-color: #d1d5db; }
+.chat-working .desk-top { border-color: #2563eb; background: #dbeafe; }
+.chat-waiting .desk-top { border-color: #059669; background: #d1fae5; }
+.bubble-chat { border-color: #059669; }
 .mark { position: absolute; left: 50%; top: 24px; margin-left: 16px; font-size: 16px; font-weight: 700; line-height: 16px; color: #d97706; }
 .mark::before { display: inline-block; }
 .boss-busy .mark::before, .boss-staging .mark::before { content: "\2022\2022\2022"; color: #2563eb; animation: think 1.2s ease-in-out infinite; }
@@ -269,6 +276,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var deskNodes = {}, bossNode = null, selectedTask = null;
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
+  var chatDesks = {}, lastHandoff = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -417,6 +425,40 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return (tier === 'opus' || tier === 'haiku') ? tier : 'sonnet';
   }
 
+  function chatDesk(tier) {
+    // a free agent desk: click to chat with a haiku or sonnet agent
+    var d = el('div', 'desk desk-chat');
+    d.id = 'desk-chat-' + tier;
+    d.setAttribute('role', 'button');
+    d.setAttribute('title', 'Chat with ' + tier);
+    d.tabIndex = 0;
+    d.appendChild(el('div', 'bubble bubble-chat hidden'));
+    d.appendChild(el('div', 'worker'));
+    d.appendChild(el('div', 'desk-top'));
+    d.appendChild(el('div', 'desk-label', tier + ' · chat'));
+    d.addEventListener('click', function () { openChatPanel(tier); });
+    d.addEventListener('keydown', onKey(function () { openChatPanel(tier); }));
+    return d;
+  }
+
+  function chatBubble(chat) {
+    if (!chat) return '';
+    if (chat.state === 'waiting') return 'your turn';
+    var p = Array.isArray(chat.progress) ? chat.progress : [];
+    return p.length ? String(p[p.length - 1]) : 'working…';
+  }
+
+  function updateChatDesk(d, tier) {
+    var chat = openChat(office ? office.chats : [], tier);
+    var st = chat ? chat.state : 'free';
+    setClass(d, 'desk desk-chat chat-' + st + (chatTier === tier ? ' selected' : ''));
+    var text = chatBubble(chat);
+    setClass(d.children[0], 'bubble bubble-chat' + (text ? '' : ' hidden'));
+    setText(d.children[0], text);
+    var box = document.getElementById('desks-' + tier);
+    if (d.parentNode !== box) box.appendChild(d);
+  }
+
   function renderOffice() {
     // desks are keyed by task id and updated in place, so animations play once
     bossDesk();
@@ -434,6 +476,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       if (d.parentNode) d.parentNode.removeChild(d);
       delete deskNodes[id];
     });
+    if (interactive) {
+      ['sonnet', 'haiku'].forEach(function (tier) {
+        if (!chatDesks[tier]) chatDesks[tier] = chatDesk(tier);
+        updateChatDesk(chatDesks[tier], tier);
+      });
+    }
     ['opus', 'sonnet', 'haiku'].forEach(function (r) {
       var empty = document.getElementById('desks-' + r).children.length === 0;
       setClass(document.getElementById('row-' + r), 'row row-' + r + (empty ? ' hidden' : ''));
@@ -874,6 +922,19 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     setHidden('btn-chat-close', !chat || ended);
   }
 
+  function followHandoff() {
+    // a request Opus handed to a chat agent opens that chat, once per hand-off
+    if (!interactive || !office || !office.handoff_chat || office.handoff_chat === lastHandoff) return;
+    var list = Array.isArray(office.chats) ? office.chats : [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].chat_id === office.handoff_chat) {
+        lastHandoff = office.handoff_chat;
+        openChatPanel(list[i].tier);
+        return;
+      }
+    }
+  }
+
   function wireChat() {
     byId('btn-chat-back').addEventListener('click', function () { selectTask(null); });
     byId('btn-chat-send').addEventListener('click', function () {
@@ -906,6 +967,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     officeSig = sig;
     office = o;
     followLaunchedRun();
+    followHandoff();
     renderOffice();
     renderTranscript(o);
     renderComposer();

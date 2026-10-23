@@ -556,7 +556,9 @@ def test_classroom_keeps_desk_nodes(tmp_path):
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null, focused = 0;\n"
         + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
+        + "var chatDesks = {};\n"
         + "function focusComposer() { focused++; }\n"
+        + _chat_section(text)
         + section
         + CLASSROOM_SCENARIO
     )
@@ -892,4 +894,96 @@ def test_chat_panel_renders_in_place(tmp_path):
         "This chat has ended; sending starts a new one.",
         ["c4", 1, False],
         "untouched",
+    ]  # fmt: skip
+
+
+def test_chat_desk_css_and_names():
+    text = _text()
+    for rule in [
+        r"\.desk-chat \{ cursor: pointer; \}",
+        r"\.chat-working \.worker, \.chat-waiting \.worker \{ display: block; \}",
+        r"\.chat-working \.worker \{ animation: type ",
+        r"\.chat-free \.desk-top \{", r"\.chat-working \.desk-top \{",
+        r"\.chat-waiting \.desk-top \{", r"\.bubble-chat \{",
+    ]:  # fmt: skip
+        assert re.search(rule, text), rule
+    assert "'desk-chat-' + tier" in text
+    apply = re.search(r"  function applyOffice\(.*?\n  \}", text, re.S)
+    assert apply and "followHandoff();" in apply.group(0)
+
+
+CHAT_DESK_SCENARIO = """
+var opened = [];
+function openChatPanel(tier) { opened.push(tier); chatTier = tier; }
+function desk(tier) { return nodes['desks-' + tier].children; }
+function info(d) {
+  return [d.id, d.className, d.children[0].className, d.children[0].text, d.children[3].text];
+}
+var out = [];
+runView = {tasks: [{task_id: 'a', tier: 'haiku', status: 'running', steps: []}]};
+renderOffice();
+out.push([desk('haiku').length, desk('sonnet').length, nodes['row-sonnet'].className]);
+interactive = true;
+office = {state: 'idle', chats: []};
+renderOffice();
+var h = chatDesks.haiku;
+out.push([info(h), h.attrs.role, h.attrs.title, h.tabIndex, desk('haiku').length,
+  nodes['row-sonnet'].className, nodes['row-opus'].className]);
+office = {state: 'idle', chats: [
+  {chat_id: 'c2', tier: 'sonnet', state: 'waiting', progress: []},
+  {chat_id: 'c1', tier: 'haiku', state: 'working', progress: ['Read: a.md', 'Edit: notes.md']},
+  {chat_id: 'c0', tier: 'haiku', state: 'closed', progress: []}
+]};
+renderOffice();
+out.push([chatDesks.haiku === h, info(h), info(chatDesks.sonnet)]);
+h.on.click();
+renderOffice();
+out.push([opened.slice(), h.className]);
+office.chats[1].progress = [];
+runView = null;
+renderOffice();
+out.push([h.children[0].text, desk('haiku').length, h.parentNode === nodes['desks-haiku']]);
+office = {state: 'idle', handoff_chat: 'c9', chats: []};
+followHandoff();
+office = {state: 'idle', handoff_chat: 'c9', chats: [{chat_id: 'c9', tier: 'sonnet',
+  state: 'working'}]};
+followHandoff();
+followHandoff();
+out.push([opened.slice(), lastHandoff]);
+interactive = false;
+office = {state: 'idle', handoff_chat: 'c10', chats: [{chat_id: 'c10', tier: 'haiku',
+  state: 'working'}]};
+followHandoff();
+out.push([opened.slice(), lastHandoff]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_chat_desks_and_handoff(tmp_path):
+    text = _text()
+    script = (
+        _page_helpers(text)
+        + "var office = null, interactive = false, runView = null;\n"
+        + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
+        + "var chatDesks = {}, lastHandoff = null;\n"
+        + "function focusComposer() {}\n"
+        + _chat_section(text)
+        + _classroom_section(text)
+        + CHAT_DESK_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    free = "bubble bubble-chat hidden"
+    assert out == [
+        [1, 0, "row row-sonnet hidden"],
+        [["desk-chat-haiku", "desk desk-chat chat-free", free, "", "haiku · chat"], "button",
+         "Chat with haiku", 0, 2, "row row-sonnet", "row row-opus hidden"],
+        [True,
+         ["desk-chat-haiku", "desk desk-chat chat-working", "bubble bubble-chat",
+          "Edit: notes.md", "haiku · chat"],
+         ["desk-chat-sonnet", "desk desk-chat chat-waiting", "bubble bubble-chat", "your turn",
+          "sonnet · chat"]],
+        [["haiku"], "desk desk-chat chat-working selected"],
+        ["working…", 1, True],
+        [["haiku", "sonnet"], "c9"],
+        [["haiku", "sonnet"], "c9"],
     ]  # fmt: skip
