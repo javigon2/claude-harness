@@ -101,6 +101,11 @@ dialog#office-modal button:disabled { cursor: default; opacity: 0.55; }
 #progress { list-style: none; padding: 0; margin: 6px 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #4b5563; }
 details.fold { margin-top: 10px; }
 details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+#transcript { list-style: none; padding: 0; margin: 0; }
+.msg { margin: 0 0 10px; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+.msg-user { background: #eff6ff; border-color: #bfdbfe; }
+.msg-who { font-size: 12px; font-weight: 600; color: #6b7280; margin-bottom: 2px; }
+.msg-text { white-space: pre-wrap; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -193,6 +198,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var interactive = !!modeMeta && modeMeta.getAttribute('content') === 'interactive';
   var office = null, officeSig = '', runView = null, planBlocks = null, planSeq = 0, planKey = '';
   var lastAutoRun = null, autoInit = false;
+  var shownSession = null, shownCount = 0;
   var forcePrompt = false, showPlan = false, modal = document.getElementById('office-modal');
 
   function needsTid(id, text) {
@@ -378,6 +384,38 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     node.replaceChildren(renderBlocks(blocks));
   }
 
+  // ---- the conversation with Opus, appended in place
+  function msgNode(entry) {
+    var user = entry.role === 'user';
+    var li = el('li', 'msg ' + (user ? 'msg-user' : 'msg-opus'));
+    li.appendChild(el('div', 'msg-who', user ? 'You' : 'Opus'));
+    if (user) {
+      li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
+    } else {
+      var md = el('div', 'md');
+      md.appendChild(renderBlocks(entry.blocks));
+      li.appendChild(md);
+    }
+    return li;
+  }
+
+  function renderTranscript(o) {
+    var list = document.getElementById('transcript');
+    var entries = Array.isArray(o.transcript) ? o.transcript : [];
+    var sid = o.session_id || null;
+    if (sid !== shownSession || entries.length < shownCount) {
+      list.replaceChildren();
+      shownSession = sid;
+      shownCount = 0;
+    }
+    if (entries.length === shownCount) return;
+    var left = document.getElementById('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    for (var i = shownCount; i < entries.length; i++) list.appendChild(msgNode(entries[i]));
+    shownCount = entries.length;
+    if (atBottom) left.scrollTop = left.scrollHeight;
+  }
+
   // ---- the boss's modal
   function byId(id) { return document.getElementById(id); }
   function setHidden(id, hide) { byId(id).classList.toggle('hidden', hide); }
@@ -559,6 +597,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     office = o;
     followLaunchedRun();
     renderOffice();
+    renderTranscript(o);
     if (modal && modal.open) renderModal();
   }
 

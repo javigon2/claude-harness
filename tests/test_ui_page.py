@@ -272,3 +272,90 @@ def test_markdown_blocks_render_to_the_expected_dom(tmp_path):
         "<tbody><tr><td><x></td><td><code>y</code></td></tr></tbody></table>"
         "<pre><code><b></code></pre><blockquote><p>q</p></blockquote><hr></hr></div>"
     )
+
+
+def test_transcript_css_and_names():
+    text = _text()
+    for word in ["msg-user", "msg-opus", "msg-who", "'You'", "renderTranscript(o)"]:
+        assert word in text, word
+    assert re.search(r"\.msg-text \{[^}]*white-space: pre-wrap;", text)
+
+
+def _transcript_script() -> str:
+    text = _text()
+    el = re.search(r"  function el\(.*?\n  \}", text, re.S)
+    string = re.search(r"  function str\(x\).*", text)
+    msg = re.search(r"  function msgNode\(.*?\n  \}", text, re.S)
+    render = re.search(r"  function renderTranscript\(.*?\n  \}", text, re.S)
+    start = text.index("  // ---- markdown block tree")
+    end = text.index("  function fill(")
+    assert el and string and msg and render
+    return (
+        STUB + "var shownSession = null, shownCount = 0;\n" + el.group(0) + "\n"
+        + string.group(0) + "\n" + text[start:end] + "\n" + msg.group(0) + "\n"
+        + render.group(0) + "\n"
+    )  # fmt: skip
+
+
+def _run_node(tmp_path, script: str) -> list[str]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    path = tmp_path / "t.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run([node, str(path)], capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.decode().strip().split("\n")
+
+
+def test_message_nodes_render_to_the_expected_dom(tmp_path):
+    user = {"role": "user", "text": "plan <b>a</b>\nnow", "blocks": []}
+    opus = {"role": "opus", "text": "Hi **x**", "blocks": parse_markdown("Hi **x**")}
+    script = (
+        _transcript_script()
+        + f"console.log(JSON.stringify(ser(msgNode({json.dumps(user)}))));\n"
+        + f"console.log(JSON.stringify(ser(msgNode({json.dumps(opus)}))));\n"
+    )
+    lines = _run_node(tmp_path, script)
+    assert json.loads(lines[0]) == (
+        '<li class="msg msg-user"><div class="msg-who">You</div>'
+        '<div class="msg-text">plan <b>a</b>\nnow</div></li>'
+    )
+    assert json.loads(lines[1]) == (
+        '<li class="msg msg-opus"><div class="msg-who">Opus</div>'
+        '<div class="md"><p>Hi <strong>x</strong></p></div></li>'
+    )
+
+
+def test_transcript_appends_in_place_and_rebuilds_on_a_new_session(tmp_path):
+    entries = [
+        {"role": "user", "text": "one", "blocks": []},
+        {"role": "opus", "text": "two", "blocks": parse_markdown("two")},
+        {"role": "user", "text": "three", "blocks": []},
+    ]
+    script = (
+        _transcript_script()
+        + "var E = " + json.dumps(entries) + ";\n"
+        + "var nodes = {transcript: mk('ol'), left: mk('section')};\n"
+        + "nodes.left.scrollHeight = 500; nodes.left.clientHeight = 100;\n"
+        + "nodes.left.scrollTop = 370;\n"
+        + "document.getElementById = function (id) { return nodes[id]; };\n"
+        + "var out = [];\n"
+        + "renderTranscript({session_id: 's1', transcript: E});\n"
+        + "out.push([nodes.transcript.children.length, nodes.left.scrollTop]);\n"
+        + "nodes.left.scrollTop = 0;\n"
+        + "var first = nodes.transcript.children[0];\n"
+        + "renderTranscript({session_id: 's1', transcript: E});\n"
+        + "out.push([nodes.transcript.children.length, nodes.left.scrollTop]);\n"
+        + "renderTranscript({session_id: 's1', transcript: E.slice(0, 2)});\n"
+        + "out.push([nodes.transcript.children.length, nodes.transcript.children[0] === first]);\n"
+        + "renderTranscript({session_id: 's1', transcript: E});\n"
+        + "first = nodes.transcript.children[0];\n"
+        + "renderTranscript({session_id: 's2', transcript: [E[2]]});\n"
+        + "out.push([nodes.transcript.children.length, nodes.transcript.children[0] === first]);\n"
+        + "renderTranscript({session_id: 's2', transcript: []});\n"
+        + "out.push([nodes.transcript.children.length]);\n"
+        + "console.log(JSON.stringify(out));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [[3, 500], [3, 0], [2, False], [1, False], [0]]
