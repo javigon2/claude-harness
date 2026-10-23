@@ -1,8 +1,9 @@
 """The office's HTTP server: loopback only, stdlib only.
 
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
-POST endpoints, each behind the Host, Origin and token checks, a JSON-only body of at most
-64 KB, and a strict per-route body schema."""
+POST endpoints and the chat POST endpoints (POST /api/chat/{start,message,close}), each behind
+the Host, Origin and token checks, a JSON-only body of at most 64 KB, and a strict per-route
+body schema."""
 
 import json
 import os
@@ -16,6 +17,7 @@ from urllib.parse import unquote, urlsplit
 from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
 from harness.state import STATE_FILE, StateError, run_dir
+from harness.ui.chat import CHAT_TIERS, ChatConflict
 from harness.ui.markdown import parse_markdown
 from harness.ui.office import (
     MAX_TEXT_CHARS,
@@ -38,6 +40,7 @@ _TOKEN_META = '<meta name="harness-token" content="">'
 _MODE_META = '<meta name="harness-mode" content="read-only">'
 
 POST_ROUTES = ("start", "message", "implement", "next-stage")
+CHAT_ROUTES = ("start", "message", "close")
 
 
 def render_page(token: str, mode: str) -> bytes:
@@ -82,6 +85,41 @@ def _check_body(route: str, body: object) -> dict:
         _text_field(body, "text")
     elif keys:
         raise _BadBody("this endpoint takes no fields")
+    return body
+
+
+def _id_field(body: dict, key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip() or len(value) > 200:
+        raise _BadBody(f"{key} must be a non-empty string")
+    return value
+
+
+def _check_chat_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/chat/<route>, or _BadBody. Exactly the allowed keys:
+    start {tier, text} or {tier, text, run_id, task_id}; message {chat_id, text};
+    close {chat_id}."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route == "start":
+        if keys not in ({"tier", "text"}, {"tier", "text", "run_id", "task_id"}):
+            raise _BadBody("send exactly: tier, text (and optionally run_id, task_id)")
+        if not isinstance(body["tier"], str) or body["tier"] not in CHAT_TIERS:
+            raise _BadBody("tier must be haiku or sonnet")
+        _text_field(body, "text")
+        for key in ("run_id", "task_id"):
+            if key in body:
+                _id_field(body, key)
+    elif route == "message":
+        if keys != {"chat_id", "text"}:
+            raise _BadBody("send exactly: chat_id, text")
+        _id_field(body, "chat_id")
+        _text_field(body, "text")
+    elif route == "close":
+        if keys != {"chat_id"}:
+            raise _BadBody("send exactly: chat_id")
+        _id_field(body, "chat_id")
     return body
 
 
@@ -131,9 +169,9 @@ def make_handler(
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
     `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
     `office` every other method answers 405 (read-only). With one, POST
-    `/api/planner/{start,message,implement,next-stage}` is served (`token` guards it; one is
-    made if not given) and every other method still answers 405. Request logging is
-    silenced."""
+    `/api/planner/{start,message,implement,next-stage}` and POST `/api/chat/{start,message,close}`
+    are served (`token` guards them; one is made if not given) and every other method still
+    answers 405. Request logging is silenced."""
     interactive = office is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
@@ -219,9 +257,16 @@ def make_handler(
                 self._reject(403, "bad host")
                 return
             path = urlsplit(self.path).path.rstrip("/")
-            prefix = "/api/planner/"
-            route = path[len(prefix) :] if path.startswith(prefix) else ""
-            if route not in POST_ROUTES:
+            kind, route = "", ""
+            if path.startswith("/api/planner/"):
+                kind, route = "planner", path[len("/api/planner/") :]
+                known = route in POST_ROUTES
+            elif path.startswith("/api/chat/"):
+                kind, route = "chat", path[len("/api/chat/") :]
+                known = route in CHAT_ROUTES
+            else:
+                known = False
+            if not known:
                 self._reject(404, "not found")
                 return
             if not self._origin_ok():
@@ -251,12 +296,28 @@ def make_handler(
             self.connection.settimeout(10)
             raw = self.rfile.read(length)
             try:
-                body = _check_body(route, json.loads(raw.decode("utf-8")))
+                parsed = json.loads(raw.decode("utf-8"))
+                if kind == "chat":
+                    body = _check_chat_body(route, parsed)
+                else:
+                    body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
                 self._json(400, {"error": str(err) if isinstance(err, _BadBody) else "bad JSON"})
                 return
             try:
-                if route == "start":
+                if kind == "chat":
+                    if route == "start":
+                        office.chats.start(
+                            body["tier"],
+                            body["text"],
+                            run_id=body.get("run_id"),
+                            task_id=body.get("task_id"),
+                        )
+                    elif route == "message":
+                        office.chats.message(body["chat_id"], body["text"])
+                    else:
+                        office.chats.close_chat(body["chat_id"])
+                elif route == "start":
                     office.start(
                         description=body.get("description"),
                         from_draft=body.get("from_draft") is True,
@@ -267,7 +328,7 @@ def make_handler(
                     office.implement()
                 else:
                     office.next_stage()
-            except OfficeConflict as err:
+            except (OfficeConflict, ChatConflict) as err:
                 self._json(409, {"error": str(err)})
                 return
             self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
