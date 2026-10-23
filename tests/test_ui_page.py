@@ -555,7 +555,7 @@ def test_classroom_keeps_desk_nodes(tmp_path):
     script = (
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null, focused = 0;\n"
-        + "var deskNodes = {}, bossNode = null, selectedTask = null;\n"
+        + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
         + "function focusComposer() { focused++; }\n"
         + section
         + CLASSROOM_SCENARIO
@@ -762,3 +762,134 @@ def test_triage_text_can_implement_and_resume_label(tmp_path):
         ["Resume run 20261023-090000", "", ""],
         "",
     ]
+
+
+def test_chat_view_markup():
+    text = _text()
+    assert '<div id="chat-view" class="hidden">' in text
+    ids = ["timeline-view", "chat-view", "btn-chat-back", "chat-title", "chat-cost",
+           "chat-transcript", "chat-progress", "chat-commits", "chat-note", "chat-msg",
+           "chat-text", "btn-chat-send", "btn-chat-close", "right"]  # fmt: skip
+    places = [text.index(f'id="{id_}"') for id_ in ids]
+    assert places == sorted(places)
+    assert '<button id="btn-chat-close" type="button" class="hidden">Close chat</button>' in text
+    assert re.search(r"#chat-note:empty \{ display: none; \}", text)
+    assert re.search(r"\.msg-agent \{", text)
+    for word in ["'/api/chat/start'", "'/api/chat/message'", "'/api/chat/close'", "renderChat();"]:
+        assert word in text, word
+
+
+def _chat_section(text: str) -> str:
+    start = text.index("  // ---- an agent chat in the left panel")
+    end = text.index("  function followLaunchedRun(")
+    return text[start:end]
+
+
+def test_open_chat_and_chat_send(tmp_path):
+    chats = [
+        {"chat_id": "c3", "tier": "haiku", "state": "closed"},
+        {"chat_id": "c2", "tier": "sonnet", "state": "working"},
+        {"chat_id": "c1", "tier": "haiku", "state": "waiting"},
+    ]
+    script = (
+        _chat_section(_text())
+        + "var C = " + json.dumps(chats) + ";\n"
+        + "function id(c) { return c ? c.chat_id : null; }\n"
+        + "console.log(JSON.stringify([id(openChat(C, 'haiku')), id(openChat(C, 'sonnet')),"
+        + " id(openChat(C.slice(0, 1), 'haiku')), id(openChat(null, 'haiku')),"
+        + " chatSend(C[2], 'haiku', 'hi'), chatSend(C[1], 'sonnet', 'yo'),"
+        + " chatSend(C[0], 'haiku', 'again'), chatSend(null, 'sonnet', 'new')]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        "c1", "c2", None, None,
+        {"path": "/api/chat/message", "body": {"chat_id": "c1", "text": "hi"}},
+        {"path": "/api/chat/message", "body": {"chat_id": "c2", "text": "yo"}},
+        {"path": "/api/chat/start", "body": {"tier": "haiku", "text": "again"}},
+        {"path": "/api/chat/start", "body": {"tier": "sonnet", "text": "new"}},
+    ]  # fmt: skip
+
+
+CHAT_SCENARIO = """
+var hidden = {}, rendered = 0;
+function setHidden(id, hide) { hidden[id] = hide; }
+function renderOffice() { rendered++; }
+function byId(id) { return document.getElementById(id); }
+var left = byId('left');
+left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 0;
+function items() {
+  return byId('chat-transcript').children.map(function (li) {
+    return li.className + '|' + li.children[0].text;
+  });
+}
+function texts(id) { return byId(id).children.map(function (li) { return li.text; }); }
+var U = {role: 'user', ts: 't1', text: 'add a flag', blocks: []};
+var A = {role: 'agent', ts: 't2', text: 'Done',
+  blocks: [{type: 'paragraph', inline: [{t: 'text', text: 'Done'}]}]};
+var out = [];
+office = {chats: []};
+selectedTask = 'a';
+openChatPanel('haiku');
+out.push([JSON.parse(JSON.stringify(hidden)), selectedTask, chatTier, chatId, rendered,
+  byId('chat-title').text, items(), hidden['btn-chat-close'], byId('chat-note').text]);
+office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'working', transcript: [U],
+  progress: ['Read: README.md'], commits: [], cost_usd: 0, error: null, task_id: null}]};
+renderChat();
+var first = byId('chat-transcript').children[0];
+out.push([chatId, byId('chat-title').text, items(), texts('chat-progress'),
+  hidden['btn-chat-close'], byId('chat-cost').text]);
+office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'waiting', transcript: [U, A],
+  progress: [], commits: ['abc1234 chat haiku: add a flag'], cost_usd: 0.002, error: null,
+  task_id: 'demo-a'}]};
+left.scrollTop = 370;
+renderChat();
+out.push([byId('chat-title').text, items(), byId('chat-transcript').children[0] === first,
+  texts('chat-progress'), texts('chat-commits'), byId('chat-cost').text, left.scrollTop]);
+office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'failed', transcript: [U, A],
+  progress: [], commits: [], cost_usd: 0.002, error: 'the agent failed', task_id: null}]};
+renderChat();
+out.push([chatId, byId('chat-title').text, byId('chat-note').text, hidden['btn-chat-close']]);
+office.chats[0].error = null;
+office.chats[0].state = 'closed';
+renderChat();
+out.push(byId('chat-note').text);
+office = {chats: [{chat_id: 'c4', tier: 'haiku', state: 'working', transcript: [U],
+  progress: [], commits: [], cost_usd: 0, error: null, task_id: null},
+  {chat_id: 'c1', tier: 'haiku', state: 'closed', transcript: [U, A]}]};
+renderChat();
+out.push([chatId, items().length, byId('chat-transcript').children[0] === first]);
+chatTier = null;
+byId('chat-title').text = 'untouched';
+renderChat();
+out.push(byId('chat-title').text);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_chat_panel_renders_in_place(tmp_path):
+    text = _text()
+    money = re.search(r"  function money\(x\).*", text)
+    msg = re.search(r"  function msgNode\(.*?\n  \}", text, re.S)
+    assert money and msg
+    start = text.index("  // ---- markdown block tree")
+    end = text.index("  function fill(")
+    script = (
+        _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
+        + "var office = null, selectedTask = null, tlTask = null;\n"
+        + "var chatTier = null, chatId = null, chatShown = null, chatCount = 0;\n"
+        + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
+        + _chat_section(text) + CHAT_SCENARIO
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    agent = "msg msg-agent|haiku"
+    assert out == [
+        [{"convo": True, "timeline-view": True, "chat-view": False, "btn-chat-close": True},
+         None, "haiku", None, 1, "haiku · new chat", [], True, ""],
+        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False, ""],
+        ["haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
+         ["committed abc1234 chat haiku: add a flag"], "$0.0020", 500],
+        ["c1", "haiku · failed", "the agent failed", True],
+        "This chat has ended; sending starts a new one.",
+        ["c4", 1, False],
+        "untouched",
+    ]  # fmt: skip

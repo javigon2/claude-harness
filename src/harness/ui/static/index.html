@@ -132,6 +132,16 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #timeline .time { color: #6b7280; margin-right: 8px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 #timeline .step-attempt { font-weight: 600; color: #374151; padding-top: 8px; }
 #timeline .step.current { font-weight: 600; color: #1d4ed8; }
+#chat-transcript { list-style: none; padding: 0; margin: 0; }
+.msg-agent { background: #f0fdf4; border-color: #bbf7d0; }
+#chat-progress, #chat-commits { list-style: none; padding: 0; margin: 6px 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #4b5563; }
+#chat-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
+#chat-note:empty { display: none; }
+#chat-msg { color: #b91c1c; font-weight: 600; }
+#chat-msg:empty { display: none; }
+#chat-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+#chat-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#chat-view button:disabled { cursor: default; opacity: 0.55; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -204,6 +214,21 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       <p id="tl-meta" class="muted"></p>
       <ol id="timeline"></ol>
     </div>
+    <div id="chat-view" class="hidden">
+      <div class="convo-head">
+        <button id="btn-chat-back" type="button">Back to Opus</button>
+        <strong id="chat-title"></strong>
+        <span id="chat-cost" class="muted"></span>
+      </div>
+      <ol id="chat-transcript"></ol>
+      <ul id="chat-progress"></ul>
+      <ul id="chat-commits"></ul>
+      <p id="chat-note"></p>
+      <p id="chat-msg" role="alert"></p>
+      <textarea id="chat-text" rows="4" placeholder="Message the agent"></textarea>
+      <button id="btn-chat-send" type="button">Send</button>
+      <button id="btn-chat-close" type="button" class="hidden">Close chat</button>
+    </div>
   </section>
   <section id="right">
     <div id="office" aria-label="Office">
@@ -243,6 +268,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var forcePrompt = false, lastState = null;
   var deskNodes = {}, bossNode = null, selectedTask = null;
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
+  var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -315,7 +341,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 
   function bossClick() {
     // back from a worker's timeline first; otherwise talk to Opus
-    if (selectedTask !== null) selectTask(null);
+    if (selectedTask !== null || chatTier !== null) selectTask(null);
     else if (interactive && office && office.can_click) focusComposer();
   }
 
@@ -417,9 +443,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function selectTask(id) {
     // a task id shows its timeline in the left panel; null shows the conversation
     selectedTask = (id === undefined) ? null : id;
+    chatTier = null;
     tlTask = null;
-    setHidden('convo', selectedTask !== null);
-    setHidden('timeline-view', selectedTask === null);
+    showPanel(selectedTask === null ? 'convo' : 'timeline-view');
     renderTimeline();
     renderOffice();
   }
@@ -506,10 +532,11 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   // ---- the conversation with Opus, appended in place
-  function msgNode(entry) {
+  function msgNode(entry, who) {
+    // `who` names a chat agent; without it the other side is Opus
     var user = entry.role === 'user';
-    var li = el('li', 'msg ' + (user ? 'msg-user' : 'msg-opus'));
-    li.appendChild(el('div', 'msg-who', user ? 'You' : 'Opus'));
+    var li = el('li', 'msg ' + (user ? 'msg-user' : who ? 'msg-agent' : 'msg-opus'));
+    li.appendChild(el('div', 'msg-who', user ? 'You' : who || 'Opus'));
     if (user) {
       li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
     } else {
@@ -704,7 +731,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function setBusy(on) {
-    var buttons = byId('composer').querySelectorAll('button');
+    var buttons = document.querySelectorAll('#composer button, #chat-view button');
     for (var i = 0; i < buttons.length; i++) buttons[i].disabled = on;
   }
 
@@ -722,8 +749,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
   }
 
-  function act(path, body, done) {
-    var msg = byId('office-msg');
+  function act(path, body, done, msgId) {
+    var msg = byId(msgId || 'office-msg');
     msg.textContent = '';
     setBusy(true);
     api(path, body).then(function (res) {
@@ -772,6 +799,95 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-resume-run').addEventListener('click', function () { act('/api/run/resume', {}); });
   }
 
+  // ---- an agent chat in the left panel, appended in place
+  function showPanel(name) {
+    // the left panel shows exactly one of the conversation, a timeline and a chat
+    ['convo', 'timeline-view', 'chat-view'].forEach(function (id) { setHidden(id, id !== name); });
+  }
+
+  function openChat(chats, tier) {
+    // the tier's open chat (one per tier), or null
+    var list = Array.isArray(chats) ? chats : [];
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i];
+      if (c.tier === tier && (c.state === 'working' || c.state === 'waiting')) return c;
+    }
+    return null;
+  }
+
+  function chatSend(chat, tier, text) {
+    // an open chat gets a message; otherwise a new chat starts on the tier
+    if (chat && (chat.state === 'working' || chat.state === 'waiting')) {
+      return {path: '/api/chat/message', body: {chat_id: chat.chat_id, text: text}};
+    }
+    return {path: '/api/chat/start', body: {tier: tier, text: text}};
+  }
+
+  function currentChat() {
+    var list = office && Array.isArray(office.chats) ? office.chats : [];
+    var open = openChat(list, chatTier);
+    if (open) chatId = open.chat_id;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].chat_id === chatId) return list[i];
+    }
+    return null;
+  }
+
+  function openChatPanel(tier) {
+    selectedTask = null;
+    tlTask = null;
+    chatTier = tier;
+    chatId = null;
+    byId('chat-msg').textContent = '';
+    showPanel('chat-view');
+    renderChat();
+    renderOffice();
+  }
+
+  function renderChat() {
+    if (chatTier === null) return;
+    var chat = currentChat();
+    var ended = !!chat && (chat.state === 'closed' || chat.state === 'failed');
+    byId('chat-title').textContent = chatTier + ' · ' + (chat ? chat.state : 'new chat') + (chat && chat.task_id ? ' · task ' + chat.task_id : '');
+    byId('chat-cost').textContent = chat && chat.cost_usd > 0 ? money(chat.cost_usd) : '';
+    var list = byId('chat-transcript');
+    var entries = chat && Array.isArray(chat.transcript) ? chat.transcript : [];
+    var cid = chat ? chat.chat_id : null;
+    if (cid !== chatShown || entries.length < chatCount) {
+      list.replaceChildren();
+      chatShown = cid;
+      chatCount = 0;
+    }
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    var added = entries.length > chatCount;
+    for (var i = chatCount; i < entries.length; i++) list.appendChild(msgNode(entries[i], chatTier));
+    chatCount = entries.length;
+    if (added && atBottom) left.scrollTop = left.scrollHeight;
+    var progress = chat && chat.state === 'working' && Array.isArray(chat.progress) ? chat.progress : [];
+    var ul = byId('chat-progress');
+    ul.replaceChildren.apply(ul, progress.map(function (line) { return el('li', null, line); }));
+    var commits = chat && Array.isArray(chat.commits) ? chat.commits : [];
+    var cl = byId('chat-commits');
+    cl.replaceChildren.apply(cl, commits.map(function (c) { return el('li', null, 'committed ' + c); }));
+    byId('chat-note').textContent = chat && chat.error ? String(chat.error) : ended ? 'This chat has ended; sending starts a new one.' : '';
+    setHidden('btn-chat-close', !chat || ended);
+  }
+
+  function wireChat() {
+    byId('btn-chat-back').addEventListener('click', function () { selectTask(null); });
+    byId('btn-chat-send').addEventListener('click', function () {
+      var text = textOf('chat-text');
+      if (!text) { byId('chat-msg').textContent = 'Write a message first.'; return; }
+      var req = chatSend(currentChat(), chatTier, text);
+      act(req.path, req.body, function () { byId('chat-text').value = ''; }, 'chat-msg');
+    });
+    byId('btn-chat-close').addEventListener('click', function () {
+      var chat = currentChat();
+      if (chat) act('/api/chat/close', {chat_id: chat.chat_id}, null, 'chat-msg');
+    });
+  }
+
   function followLaunchedRun() {
     // Switch to the run the office launched, once; never override a run the user picked.
     if (!office || !office.run_id) return;
@@ -793,6 +909,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     renderOffice();
     renderTranscript(o);
     renderComposer();
+    renderChat();
   }
 
   function pollOffice() {
@@ -918,6 +1035,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   renderRuns();
   renderOffice();
   wireComposer();
+  wireChat();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   poll();
   setInterval(poll, 2000);
