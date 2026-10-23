@@ -42,6 +42,7 @@ from harness.planner_log import (
     read_planner_events,
 )
 from harness.state import STATE_FILE, StateError, load_state, new_run_id, run_dir
+from harness.ui.chat import ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
 from harness.ui.view import IDLE_MINUTES, list_runs
@@ -51,6 +52,8 @@ LOCK_FILE = Path(".harness") / "office.lock"
 MAX_TEXT_CHARS = 20_000
 PROGRESS_LINES = 8
 JOIN_TIMEOUT_S = 10.0
+CHAT_WORKING = "an agent chat is working; wait for its turn to end"
+STAGING_BLOCK = "the office is writing stage work orders; wait for it to finish"
 
 State = Literal[
     "idle",
@@ -123,6 +126,7 @@ class OfficeView(BaseModel):
     next_stage: int | None = None
     can_click: bool = False
     transcript: list[TranscriptEntry] = Field(default_factory=list)
+    chats: list[ChatView] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- small helpers
@@ -325,6 +329,7 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
         else:
             state = _live_office_state(sess, fields)
     fields["transcript"] = transcript_of(sess)
+    fields["chats"] = chats_from_log(repo)
     fields["state"] = state
     fields["can_click"] = interactive and state != "terminal"
     if state == "idle":
@@ -362,7 +367,8 @@ class Office:
     Public calls: `start`, `message`, `implement`, `next_stage` (each raises OfficeConflict
     with a sentence when the state does not allow it), `view`, `open`, `close`. `fake` swaps
     in the scripted DemoPlannerSession; `session_factory(repo, progress)` overrides both.
-    `launcher` replaces subprocess.Popen when a run is started (tests capture argv)."""
+    `launcher` replaces subprocess.Popen when a run is started (tests capture argv).
+    `chats` is the ChatManager; `chat_session_factory` overrides its sessions."""
 
     def __init__(
         self,
@@ -374,6 +380,7 @@ class Office:
         session_factory: SessionFactory | None = None,
         idle_timeout_s: float = 7200.0,
         launcher: Callable[..., Any] | None = None,
+        chat_session_factory: ChatSessionFactory | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.repo = Path(repo).resolve()
@@ -415,6 +422,25 @@ class Office:
         self._owns_lock_file = False
         self._popen: Any = None
         self._launched_plan: str | None = None
+        self.chats = ChatManager(
+            self.repo,
+            fake=fake,
+            fake_delay=fake_delay,
+            session_factory=chat_session_factory,
+            busy_fn=self._chat_block,
+        )
+
+    def _chat_block(self) -> str | None:
+        """busy_fn for the chats: a sentence while chats must not edit the repo, else None.
+        Never takes the office lock (ChatManager calls it from request threads)."""
+        live = live_run(self.repo, self._clock())
+        if live is not None:
+            return f"a run is active ({live}); wait for it to finish"
+        if self._state == "supervising":
+            return f"a run is active ({self._run_id}); wait for it to finish"
+        if self._state == "staging":
+            return STAGING_BLOCK
+        return None
 
     # ------------------------------------------------------------ lock file
 
@@ -468,7 +494,9 @@ class Office:
     def close(self) -> str | None:
         """Shut down: stop a live planner session (logged as interrupted: server stopped,
         joined for up to JOIN_TIMEOUT_S), never touch a launched run, remove the lock file.
+        Also closes every open chat.
         Returns the id of a run that is still going, or None."""
+        self.chats.close()
         self._stopping.set()
         thread = self._thread
         live = thread is not None and thread.is_alive()
@@ -535,7 +563,7 @@ class Office:
                 elif _terminal_live(last_session(read_planner_events(self.repo))):
                     state = "terminal"
             reply = self._reply
-            return OfficeView(
+            view = OfficeView(
                 next_stage=next_stage_of(self.repo) if state == "idle" else None,
                 mode="interactive",
                 state=state,
@@ -551,6 +579,7 @@ class Office:
                 transcript=self._transcript(),
                 **_plan_fields(self.repo),
             )
+        return view.model_copy(update={"chats": self.chats.views()})
 
     # ------------------------------------------------------------ guards
 
@@ -690,6 +719,8 @@ class Office:
                 raise OfficeConflict(f"a run is already active ({live or self._run_id})")
             if self._state not in ("asking", "ready"):
                 raise OfficeConflict("the planner is not waiting for a message")
+            if self.chats.working():
+                raise OfficeConflict(CHAT_WORKING)
             plan = self.repo / PROJECT_PLAN_FILE
             try:
                 text = plan.read_text(encoding="utf-8")
@@ -714,6 +745,8 @@ class Office:
             following = next_stage_of(self.repo)
             if following is None:
                 raise OfficeConflict("there is no next stage to plan")
+            if self.chats.working():
+                raise OfficeConflict(CHAT_WORKING)
             self._begin("", f"stage {following}", stage=following)
 
     # ------------------------------------------------------------ planner thread
@@ -810,6 +843,13 @@ class Office:
                     },
                 )
             self._cost = result.usage.cost_usd
+            if self.chats.working():
+                reason = f"could not start the run: {CHAT_WORKING}"
+                self._state = "failed"
+                self._error = reason
+                if self._log is not None:
+                    self._log.emit("planner_failed", {"reason": reason, "cost_usd": self._cost})
+                return
             try:
                 self._launch(shown)
             except (PlanError, OSError, ValueError) as err:
