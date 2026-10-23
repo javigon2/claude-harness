@@ -699,3 +699,66 @@ def test_animations_css():
     assert re.search(r"\.boss-supervising \.worker::before \{ animation: watch ", text)
     for word in ["setTimeout", "requestAnimationFrame"]:
         assert word not in text, word
+
+
+ROUTE_SELECT = """          <select id="route" aria-label="Route">
+            <option value="auto">Auto (Opus decides)</option>
+            <option value="quick">Quick plan</option>
+            <option value="project">Full plan</option>
+          </select>"""
+
+
+def test_route_selector_triage_line_and_resume_button_markup():
+    text = _text()
+    assert ROUTE_SELECT in text
+    order = ['id="desc"', 'id="route"', 'id="btn-start"']
+    assert [text.index(w) for w in order] == sorted(text.index(w) for w in order)
+    assert '<p id="triage-line" class="muted"></p>' in text
+    assert text.index('id="transcript"') < text.index('id="triage-line"')
+    assert text.index('id="triage-line"') < text.index('id="composer"')
+    assert '<button id="btn-resume-run" type="button" class="hidden">Resume run</button>' in text
+    assert text.index('id="composer"') < text.index('id="btn-resume-run"')
+    assert text.index('id="btn-resume-run"') < text.index('id="sec-prompt"')
+    assert re.search(r"#triage-line:empty \{ display: none; \}", text)
+    for word in [
+        "route: byId('route').value", "'/api/run/resume'", "'Start this quick plan?'",
+        "'Start implementing'", "'Start'",
+    ]:  # fmt: skip
+        assert word in text, word
+
+
+def _functions(text: str, *names: str) -> str:
+    parts = []
+    for name in names:
+        m = re.search(rf"  function {name}\(.*?\n  \}}", text, re.S)
+        assert m, name
+        parts.append(m.group(0))
+    return "\n".join(parts) + "\n"
+
+
+def test_triage_text_can_implement_and_resume_label(tmp_path):
+    triage = [
+        {"route": "quick", "triage_reason": "two files"}, {"route": "direct", "triage_reason": ""},
+        {"route": "project", "triage_reason": None}, {"route": None, "triage_reason": "x"}, {},
+    ]  # fmt: skip
+    implement = [
+        {"plan_kind": "quick", "quick_plan": ".harness/plans/quick-1/plan.json"},
+        {"plan_kind": "quick", "quick_plan": None, "plan_status": "draft"},
+        {"plan_kind": "project", "plan_status": "draft"},
+        {"plan_kind": None, "plan_status": "draft"},
+        {"plan_kind": "project", "plan_status": "approved"},
+    ]
+    resume = [{"resumable_run": "20261023-090000"}, {"resumable_run": None}, {}]
+    script = (
+        _functions(_text(), "triageText", "canImplement", "resumeLabel")
+        + "console.log(JSON.stringify([" + json.dumps(triage) + ".map(triageText), "
+        + json.dumps(implement) + ".map(canImplement), " + json.dumps(resume)
+        + ".map(resumeLabel), triageText(null)]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        ["Opus routed this: quick (two files)", "Opus routed this: direct ()", "", "", ""],
+        [True, False, True, True, False],
+        ["Resume run 20261023-090000", "", ""],
+        "",
+    ]

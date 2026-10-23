@@ -101,6 +101,8 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 #office-msg:empty { display: none; }
 #office-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
 #office-note:empty { display: none; }
+#triage-line { margin: 0 0 8px; }
+#triage-line:empty { display: none; }
 #composer textarea { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #composer button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #composer button:disabled { cursor: default; opacity: 0.55; }
@@ -153,12 +155,19 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
         <span id="office-cost" class="muted"></span>
       </div>
       <ol id="transcript"></ol>
+      <p id="triage-line" class="muted"></p>
       <div id="composer" class="hidden">
         <p id="office-note"></p>
         <p id="office-msg" role="alert"></p>
+        <button id="btn-resume-run" type="button" class="hidden">Resume run</button>
         <section id="sec-prompt" class="hidden">
           <label for="desc">What should Opus plan?</label>
           <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
+          <select id="route" aria-label="Route">
+            <option value="auto">Auto (Opus decides)</option>
+            <option value="quick">Quick plan</option>
+            <option value="project">Full plan</option>
+          </select>
           <button id="btn-start" type="button">Start planning</button>
         </section>
         <section id="sec-status" class="hidden">
@@ -261,6 +270,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     if (conn) msg = 'Connection lost, retrying...';
     else if (problem !== null) msg = 'Problem reading the run: ' + problem;
     else if (idle !== null) msg = 'No activity for ' + idle + ' min, the process may have crashed.';
+    else if (stopped && interactive) msg = 'Stopped early: ' + stopped + '.';
     else if (stopped) msg = 'Stopped early: ' + stopped + '. Resume from the terminal with `harness run <plan> --repo <repo> --resume`.';
     b.textContent = msg;
   }
@@ -602,6 +612,22 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return str(o.state);
   }
 
+  function triageText(o) {
+    // set only when Opus triaged the request (route "auto")
+    if (!o || typeof o.triage_reason !== 'string' || !o.route) return '';
+    return 'Opus routed this: ' + o.route + ' (' + o.triage_reason + ')';
+  }
+
+  function canImplement(o) {
+    // a quick plan starts once its plan.json is written; a project once its plan is a draft
+    if (o.plan_kind === 'quick') return typeof o.quick_plan === 'string';
+    return o.plan_status === 'draft';
+  }
+
+  function resumeLabel(o) {
+    return typeof o.resumable_run === 'string' ? 'Resume run ' + o.resumable_run : '';
+  }
+
   function renderComposer() {
     var o = office;
     if (!o) return;
@@ -614,6 +640,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('office-title').textContent = 'Opus \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
     byId('office-cost').textContent = o.cost_usd > 0 ? 'planner cost ' + money(o.cost_usd) : '';
     byId('office-note').textContent = o.error ? String(o.error) : '';
+    byId('triage-line').textContent = triageText(o);
+    var resume = resumeLabel(o);
+    setHidden('btn-resume-run', !resume);
+    if (resume) byId('btn-resume-run').textContent = resume;
     if (which === 'status') {
       byId('status-line').textContent = statusLine(o);
       var shown = (o.state === 'busy' || o.state === 'staging') ? (o.progress || []) : [];
@@ -621,7 +651,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       var ul = byId('progress');
       ul.replaceChildren.apply(ul, items);
     }
-    if (which === 'plan') setHidden('btn-implement', o.plan_status !== 'draft');
+    if (which === 'plan') {
+      setHidden('btn-implement', !canImplement(o));
+      byId('btn-implement').textContent = o.plan_kind === 'quick' ? 'Start' : 'Start implementing';
+    }
     if (which === 'failed') {
       byId('failed-line').textContent = o.state === 'failed' ? 'The planner stopped.' : 'The planning session was closed.';
       setHidden('btn-resume', !o.plan_exists);
@@ -634,11 +667,13 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function renderPlanFold(o) {
-    setHidden('plan-fold', !o.plan_exists);
+    // GET /api/plan serves the quick plan's plan.md while quick_plan is set
+    var shown = !!o.plan_exists || typeof o.quick_plan === 'string';
+    setHidden('plan-fold', !shown);
     if (o.state === 'ready' && lastState !== 'ready') byId('plan-fold').open = true;
     lastState = o.state;
-    var key = [o.plan_status, o.state, o.cost_usd].join('|');
-    if (o.plan_exists && key !== planKey) {
+    var key = [o.plan_status, o.state, o.cost_usd, o.quick_plan].join('|');
+    if (shown && key !== planKey) {
       planKey = key;
       loadPlan();
     }
@@ -717,11 +752,15 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-start').addEventListener('click', function () {
       var text = textOf('desc');
       if (!text) { byId('office-msg').textContent = 'Describe the project first.'; return; }
-      act('/api/planner/start', {description: text}, function () { byId('desc').value = ''; });
+      act('/api/planner/start', {description: text, route: byId('route').value}, function () { byId('desc').value = ''; });
     });
     byId('btn-send').addEventListener('click', function () { send('answer'); });
     byId('btn-continue').addEventListener('click', function () { send('continue'); });
     byId('btn-implement').addEventListener('click', function () {
+      if (office && office.plan_kind === 'quick') {
+        if (window.confirm('Start this quick plan?')) act('/api/planner/implement', {});
+        return;
+      }
       var cost = office ? money(office.cost_usd) : '$?';
       var ok = window.confirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.\n\nPlanner cost so far: ' + cost);
       if (ok) act('/api/planner/implement', {});
@@ -730,6 +769,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
     byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
     byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
+    byId('btn-resume-run').addEventListener('click', function () { act('/api/run/resume', {}); });
   }
 
   function followLaunchedRun() {
