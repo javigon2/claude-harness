@@ -578,3 +578,95 @@ def test_classroom_keeps_desk_nodes(tmp_path):
         1,
         ["desk desk-boss boss-idle", "bubble bubble-boss hidden", False],
     ]  # fmt: skip
+
+
+def test_timeline_markup():
+    text = _text()
+    for word in ['id="timeline-view"', "btn-back-opus", "tl-title", "tl-meta", 'id="timeline"']:
+        assert word in text, word
+    assert '<div id="timeline-view" class="hidden">' in text
+    assert text.index('id="convo"') < text.index('id="timeline-view"') < text.index('id="right"')
+    for word in [
+        "Back to Opus",
+        "'No steps yet'",
+        "step-attempt",
+        "renderTimeline();",
+        "selectTask(null)",
+    ]:
+        assert word in text, word
+
+
+TIMELINE_SCENARIO = """
+var S0 = {ts: '2026-10-23T09:00:01+00:00', attempt: 1, tier: 'haiku', text: 'Reading a.py'};
+var S1 = {ts: '2026-10-23T09:00:02+00:00', attempt: 1, tier: 'haiku', text: 'Running ls'};
+var S2 = {ts: '2026-10-23T09:01:00+00:00', attempt: 2, tier: 'sonnet', text: 'Editing a.py'};
+var S3 = {ts: '2026-10-23T09:01:05+00:00', attempt: 2, tier: 'sonnet', text: 'Writing b.py'};
+var left = byId('left');
+left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 0;
+function desc(li) {
+  var t = li.children.length ? li.children.map(function (c) { return c.text; }).join(' ') : li.text;
+  return li.className + '|' + t;
+}
+function items() { return byId('timeline').children.map(desc); }
+function run(tier, status, attempt, steps) {
+  runView = {tasks: [{task_id: 'a', title: 'Do A', tier: tier, status: status,
+    attempt: attempt, max_attempts: 3, steps: steps}]};
+  renderTimeline();
+}
+var out = [];
+out.push(stepKey(S0, 0));
+selectedTask = 'a';
+run('haiku', 'running', 1, []);
+out.push([items(), byId('tl-title').text, byId('tl-meta').text]);
+run('haiku', 'running', 1, [S0]);
+var first = byId('timeline').children[1];
+out.push(items());
+run('haiku', 'running', 1, [S0, S1]);
+out.push([items(), byId('timeline').children[1] === first, left.scrollTop]);
+run('sonnet', 'done', 2, [S0, S1, S2]);
+out.push([items(), byId('tl-meta').text]);
+run('sonnet', 'running', 2, [S1, S2]);
+out.push([items(), byId('timeline').children[1] === first]);
+left.scrollTop = 370;
+run('sonnet', 'running', 2, [S1, S2, S3]);
+out.push([byId('timeline').children.length, left.scrollTop]);
+selectedTask = 'zz';
+renderTimeline();
+out.push([items(), byId('tl-title').text, byId('tl-meta').text]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_timeline_appends_steps_in_place(tmp_path):
+    text = _text()
+    start = text.index("  // ---- a worker's timeline")
+    end = text.index("  // ---- the composer and the plan")
+    script = (
+        _page_helpers(text)
+        + "var runView = null, selectedTask = null;\n"
+        + "var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;\n"
+        + "function byId(id) { return document.getElementById(id); }\n"
+        + text[start:end]
+        + TIMELINE_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    head = ["step-attempt|attempt 1 on haiku", "step|09:00:01 Reading a.py"]
+    two = [*head, "step current|09:00:02 Running ls"]
+    assert out == [
+        "2026-10-23T09:00:01+00:00|0",
+        [["step-empty muted|No steps yet"], "a · Do A", "haiku · running · attempt 1/3"],
+        ["step-attempt|attempt 1 on haiku", "step current|09:00:01 Reading a.py"],
+        [two, True, 0],
+        [
+            [*head, "step|09:00:02 Running ls", "step-attempt|attempt 2 on sonnet",
+             "step|09:01:00 Editing a.py"],
+            "sonnet · done · attempt 2/3",
+        ],
+        [
+            ["step-attempt|attempt 1 on haiku", "step|09:00:02 Running ls",
+             "step-attempt|attempt 2 on sonnet", "step current|09:01:00 Editing a.py"],
+            False,
+        ],
+        [5, 500],
+        [["step-empty muted|No steps yet"], "zz · ", "- · ? · attempt ?/?"],
+    ]  # fmt: skip

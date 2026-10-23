@@ -111,6 +111,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .msg-user { background: #eff6ff; border-color: #bfdbfe; }
 .msg-who { font-size: 12px; font-weight: 600; color: #6b7280; margin-bottom: 2px; }
 .msg-text { white-space: pre-wrap; font-size: 14px; }
+#btn-back-opus { font: inherit; padding: 2px 10px; cursor: pointer; }
+#timeline { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+#timeline li { padding: 3px 0; border-bottom: 1px solid #eee; }
+#timeline .time { color: #6b7280; margin-right: 8px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+#timeline .step-attempt { font-weight: 600; color: #374151; padding-top: 8px; }
+#timeline .step.current { font-weight: 600; color: #1d4ed8; }
 </style>
 </head>
 <body>
@@ -165,6 +171,14 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       </div>
       <details id="plan-fold" class="hidden"><summary>Plan</summary><div id="plan-body" class="md"></div></details>
     </div>
+    <div id="timeline-view" class="hidden">
+      <div class="convo-head">
+        <button id="btn-back-opus" type="button">Back to Opus</button>
+        <strong id="tl-title"></strong>
+      </div>
+      <p id="tl-meta" class="muted"></p>
+      <ol id="timeline"></ol>
+    </div>
   </section>
   <section id="right">
     <div id="office" aria-label="Office">
@@ -203,6 +217,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var shownSession = null, shownCount = 0;
   var forcePrompt = false, lastState = null;
   var deskNodes = {}, bossNode = null, selectedTask = null;
+  var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -273,7 +288,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function bossClick() {
-    if (interactive && office && office.can_click) focusComposer();
+    // back from a worker's timeline first; otherwise talk to Opus
+    if (selectedTask !== null) selectTask(null);
+    else if (interactive && office && office.can_click) focusComposer();
   }
 
   function bossDesk() {
@@ -372,7 +389,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function selectTask(id) {
+    // a task id shows its timeline in the left panel; null shows the conversation
     selectedTask = (id === undefined) ? null : id;
+    tlTask = null;
+    setHidden('convo', selectedTask !== null);
+    setHidden('timeline-view', selectedTask === null);
+    renderTimeline();
     renderOffice();
   }
 
@@ -487,6 +509,60 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     for (var i = shownCount; i < entries.length; i++) list.appendChild(msgNode(entries[i]));
     shownCount = entries.length;
     if (atBottom) left.scrollTop = left.scrollHeight;
+  }
+
+  // ---- a worker's timeline, appended in place
+  function stepKey(s, i) { return s.ts + '|' + i; }
+
+  function findTask(id) {
+    var tasks = runView ? (runView.tasks || []) : [];
+    for (var i = 0; i < tasks.length; i++) {
+      if (tasks[i].task_id === id) return tasks[i];
+    }
+    return null;
+  }
+
+  function stepNode(s) {
+    var li = el('li', 'step');
+    li.appendChild(el('span', 'time', typeof s.ts === 'string' ? s.ts.slice(11, 19) : '?'));
+    li.appendChild(document.createTextNode(s.text === null || s.text === undefined ? '' : String(s.text)));
+    return li;
+  }
+
+  function renderTimeline() {
+    if (selectedTask === null) return;
+    var t = findTask(selectedTask) || {task_id: selectedTask, steps: []};
+    var max = (t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
+    byId('tl-title').textContent = str(t.task_id) + ' · ' + (t.title === null || t.title === undefined ? '' : String(t.title));
+    byId('tl-meta').textContent = (t.tier ? t.tier : '-') + ' · ' + str(t.status) + ' · attempt ' + num(t.attempt) + '/' + max;
+    var list = byId('timeline');
+    var steps = Array.isArray(t.steps) ? t.steps : [];
+    var first = steps.length ? stepKey(steps[0], 0) : null;
+    if (t.task_id !== tlTask || first !== tlFirst || steps.length < tlCount) {
+      list.replaceChildren();
+      tlTask = t.task_id;
+      tlFirst = first;
+      tlCount = 0;
+      tlAttempt = null;
+      tlLast = null;
+      if (!steps.length) list.appendChild(el('li', 'step-empty muted', 'No steps yet'));
+    }
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    var added = steps.length > tlCount;
+    for (var i = tlCount; i < steps.length; i++) {
+      var s = steps[i];
+      if (i === 0 || s.attempt !== tlAttempt) {
+        list.appendChild(el('li', 'step-attempt', 'attempt ' + num(s.attempt) + ' on ' + (s.tier ? s.tier : '-')));
+      }
+      tlAttempt = s.attempt;
+      if (tlLast) tlLast.className = 'step';
+      tlLast = stepNode(s);
+      list.appendChild(tlLast);
+    }
+    tlCount = steps.length;
+    if (tlLast) tlLast.className = t.status === 'running' ? 'step current' : 'step';
+    if (added && atBottom) left.scrollTop = left.scrollHeight;
   }
 
   // ---- the composer and the plan, below the conversation
@@ -720,6 +796,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     feed.replaceChildren.apply(feed, items);
     runView = v;
     renderOffice();
+    renderTimeline();
     renderBanner();
   }
 
@@ -732,7 +809,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     current = id;
     conn = false; problem = null; stopped = null; idle = null;
     runView = null;
-    renderOffice();
+    selectTask(null);
     renderBanner();
     if (!id) return;
     source = new EventSource('/api/stream/' + encodeURIComponent(id));
@@ -785,6 +862,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   renderRuns();
   renderOffice();
   wireComposer();
+  byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   poll();
   setInterval(poll, 2000);
   pollOffice();
