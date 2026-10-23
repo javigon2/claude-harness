@@ -47,6 +47,8 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .row-desks { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; }
 .desk { position: relative; width: 132px; padding-top: 74px; text-align: center; }
 .desk-label { font-size: 12px; margin-top: 6px; color: #374151; word-break: break-all; }
+.desk[data-task] { cursor: pointer; }
+.desk.selected .desk-top { box-shadow: 0 0 0 3px #f59e0b; }
 .desk-top { height: 30px; border-radius: 4px; border: 2px solid #9ca3af; background: #e5e7eb; position: relative; }
 .desk-top::before { content: ""; position: absolute; left: 50%; top: -14px; width: 26px; height: 12px; margin-left: -13px; border: 2px solid #9ca3af; border-radius: 2px; background: #f9fafb; }
 .worker { position: absolute; left: 50%; top: 34px; width: 28px; margin-left: -14px; height: 40px; display: none; }
@@ -200,6 +202,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var lastAutoRun = null, autoInit = false;
   var shownSession = null, shownCount = 0;
   var forcePrompt = false, lastState = null;
+  var deskNodes = {}, bossNode = null, selectedTask = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -247,18 +250,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return td;
   }
 
-  function desk(kind, label, status, activity) {
-    var d = el('div', 'desk desk-' + kind);
-    if (status === 'running' || status === 'verifying' || status === 'paused') {
-      var text = (status === 'paused') ? 'paused' : (activity ? activity : 'awaiting');
-      d.appendChild(el('div', 'bubble bubble-' + status, text));
-    }
-    d.appendChild(el('div', 'worker'));
-    d.appendChild(el('div', 'desk-top'));
-    d.appendChild(el('div', 'desk-label', label));
-    return d;
-  }
-
   // ---- the classroom: Opus at the teacher's desk, workers in rows by tier
   function bossText(o) {
     var st = o.state;
@@ -273,23 +264,82 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return '';
   }
 
+  var FINISHED = {done: true, failed: true, blocked: true};
+
+  function setClass(node, cls) { if (node.className !== cls) node.className = cls; }
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
+  function onKey(fn) {
+    return function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fn(); } };
+  }
+
+  function bossClick() {
+    if (interactive && office && office.can_click) focusComposer();
+  }
+
   function bossDesk() {
+    // built once inside #teacher, then updated in place
+    if (!bossNode) {
+      bossNode = el('div', 'desk desk-boss');
+      bossNode.appendChild(el('div', 'bubble bubble-boss hidden'));
+      bossNode.appendChild(el('div', 'mark'));
+      bossNode.appendChild(el('div', 'worker'));
+      bossNode.appendChild(el('div', 'desk-top'));
+      bossNode.appendChild(el('div', 'desk-label', 'Opus'));
+      bossNode.addEventListener('click', bossClick);
+      bossNode.addEventListener('keydown', onKey(bossClick));
+      document.getElementById('teacher').appendChild(bossNode);
+    }
     var o = office || {state: 'idle', can_click: false};
     var clickable = interactive && !!o.can_click;
-    var d = el('div', 'desk desk-boss boss-' + str(o.state) + (clickable ? ' clickable' : ''));
+    setClass(bossNode, 'desk desk-boss boss-' + str(o.state) + (clickable ? ' clickable' : ''));
     var text = bossText(o);
-    if (text) d.appendChild(el('div', 'bubble bubble-boss', text));
+    setClass(bossNode.children[0], 'bubble bubble-boss' + (text ? '' : ' hidden'));
+    setText(bossNode.children[0], text);
+    if (clickable) {
+      bossNode.setAttribute('role', 'button');
+      bossNode.setAttribute('title', 'Talk to Opus');
+      bossNode.tabIndex = 0;
+    } else {
+      bossNode.removeAttribute('role');
+      bossNode.removeAttribute('title');
+      bossNode.tabIndex = -1;
+    }
+  }
+
+  function taskDesk(t) {
+    // a desk first seen finished is settled: its worker never walks out on screen
+    var id = t.task_id;
+    var d = el('div', FINISHED[t.status] ? 'settled' : '');
+    d.setAttribute('data-task', str(id));
+    d.setAttribute('role', 'button');
+    d.tabIndex = 0;
+    d.appendChild(el('div', 'bubble hidden'));
     d.appendChild(el('div', 'worker'));
     d.appendChild(el('div', 'desk-top'));
-    d.appendChild(el('div', 'desk-label', 'Opus'));
-    if (clickable) {
-      d.setAttribute('role', 'button');
-      d.setAttribute('title', 'Talk to Opus');
-      d.tabIndex = 0;
-      d.addEventListener('click', focusComposer);
-      d.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusComposer(); } });
-    }
+    d.appendChild(el('div', 'desk-label'));
+    d.addEventListener('click', function () { selectTask(id); });
+    d.addEventListener('keydown', onKey(function () { selectTask(id); }));
     return d;
+  }
+
+  function bubbleText(t) {
+    if (t.status === 'paused') return 'paused';
+    var steps = Array.isArray(t.steps) ? t.steps : [];
+    var last = steps.length ? steps[steps.length - 1] : null;
+    if (last && last.text) return String(last.text);
+    return t.activity ? String(t.activity) : 'awaiting';
+  }
+
+  function updateDesk(d, t) {
+    var st = str(t.status);
+    var settled = !!FINISHED[st] && (' ' + d.className + ' ').indexOf(' settled ') >= 0;
+    setClass(d, 'desk desk-' + st + (settled ? ' settled' : '') + (selectedTask === t.task_id ? ' selected' : ''));
+    var talking = st === 'running' || st === 'verifying' || st === 'paused';
+    setClass(d.children[0], 'bubble bubble-' + st + (talking ? '' : ' hidden'));
+    if (talking) setText(d.children[0], bubbleText(t));
+    setText(d.children[3], (t.tier ? t.tier : '-') + ' · ' + str(t.task_id));
+    var box = document.getElementById('desks-' + rowOf(t));
+    if (d.parentNode !== box) box.appendChild(d);
   }
 
   function rowOf(t) {
@@ -299,20 +349,31 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function renderOffice() {
-    var teacher = document.getElementById('teacher');
-    teacher.replaceChildren(bossDesk());
-    var rows = {opus: [], sonnet: [], haiku: []};
-    if (runView) {
-      (runView.tasks || []).forEach(function (t) {
-        var st = str(t.status);
-        rows[rowOf(t)].push(desk(st, (t.tier ? t.tier : '-') + ' \u00b7 ' + str(t.task_id), st, t.activity));
-      });
-    }
-    ['opus', 'sonnet', 'haiku'].forEach(function (r) {
-      var box = document.getElementById('desks-' + r);
-      box.replaceChildren.apply(box, rows[r]);
-      document.getElementById('row-' + r).className = 'row row-' + r + (rows[r].length ? '' : ' hidden');
+    // desks are keyed by task id and updated in place, so animations play once
+    bossDesk();
+    var tasks = runView ? (runView.tasks || []) : [];
+    var seen = {};
+    tasks.forEach(function (t) {
+      var id = str(t.task_id);
+      seen[id] = true;
+      if (!deskNodes[id]) deskNodes[id] = taskDesk(t);
+      updateDesk(deskNodes[id], t);
     });
+    Object.keys(deskNodes).forEach(function (id) {
+      if (seen[id]) return;
+      var d = deskNodes[id];
+      if (d.parentNode) d.parentNode.removeChild(d);
+      delete deskNodes[id];
+    });
+    ['opus', 'sonnet', 'haiku'].forEach(function (r) {
+      var empty = document.getElementById('desks-' + r).children.length === 0;
+      setClass(document.getElementById('row-' + r), 'row row-' + r + (empty ? ' hidden' : ''));
+    });
+  }
+
+  function selectTask(id) {
+    selectedTask = (id === undefined) ? null : id;
+    renderOffice();
   }
 
   // ---- markdown block tree -> DOM (textContent only; links are never anchors)

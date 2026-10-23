@@ -449,3 +449,132 @@ def test_row_of(tmp_path):
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == ["sonnet", "haiku", "opus", "sonnet", "sonnet", "sonnet"]
+
+
+DOM = """
+function mk(tag) {
+  return {
+    tag: tag, className: '', text: '', children: [], parentNode: null, attrs: {}, on: {},
+    tabIndex: -1,
+    get textContent() { return this.text; },
+    set textContent(v) { this.text = String(v); },
+    appendChild: function (c) {
+      if (c.parentNode) c.parentNode.removeChild(c);
+      c.parentNode = this;
+      this.children.push(c);
+      return c;
+    },
+    removeChild: function (c) {
+      this.children.splice(this.children.indexOf(c), 1);
+      c.parentNode = null;
+      return c;
+    },
+    replaceChildren: function () {
+      while (this.children.length) this.removeChild(this.children[0]);
+      for (var i = 0; i < arguments.length; i++) this.appendChild(arguments[i]);
+    },
+    setAttribute: function (k, v) { this.attrs[k] = String(v); },
+    removeAttribute: function (k) { delete this.attrs[k]; },
+    addEventListener: function (type, fn) { this.on[type] = fn; }
+  };
+}
+var nodes = {};
+var document = {
+  createElement: mk,
+  createTextNode: function (t) { var n = mk('#text'); n.text = String(t); return n; },
+  getElementById: function (id) { return nodes[id] || (nodes[id] = mk('div')); }
+};
+"""
+
+
+def _page_helpers(text: str) -> str:
+    el = re.search(r"  function el\(.*?\n  \}", text, re.S)
+    num = re.search(r"  function num\(x\).*", text)
+    string = re.search(r"  function str\(x\).*", text)
+    assert el and num and string
+    return DOM + el.group(0) + "\n" + num.group(0) + "\n" + string.group(0) + "\n"
+
+
+CLASSROOM_SCENARIO = """
+var out = [];
+function ids(tier) {
+  return nodes['desks-' + tier].children.map(function (d) { return d.attrs['data-task']; });
+}
+function rows() { return [ids('opus'), ids('sonnet'), ids('haiku')]; }
+runView = {tasks: [
+  {task_id: 'a', tier: 'sonnet', status: 'running', activity: 'Edit',
+   steps: [{text: 'Reading a.py'}]},
+  {task_id: 'b', tier: 'haiku', status: 'pending', activity: null, steps: []},
+  {task_id: 'c', tier: null, status: 'done', steps: []},
+  {task_id: 'd', tier: 'haiku', status: 'paused', activity: 'x', steps: [{text: 'y'}]}
+]};
+renderOffice();
+var a = deskNodes.a, b = deskNodes.b;
+out.push(rows());
+out.push([nodes['row-opus'].className, nodes['row-sonnet'].className]);
+out.push([a.className, a.children[0].className, a.children[0].text, a.children[3].text,
+  a.attrs.role, a.tabIndex]);
+out.push([b.className, b.children[0].className]);
+out.push([deskNodes.c.className, deskNodes.c.children[3].text, deskNodes.d.children[0].text]);
+runView = {tasks: [
+  {task_id: 'a', tier: 'sonnet', status: 'done', steps: []},
+  {task_id: 'b', tier: 'opus', status: 'running', activity: 'Bash', steps: []}
+]};
+selectedTask = 'b';
+renderOffice();
+out.push([deskNodes.a === a, a.className, deskNodes.b === b]);
+out.push(rows());
+out.push([nodes['row-haiku'].className, 'c' in deskNodes, 'd' in deskNodes]);
+out.push([b.className, b.children[0].text, b.children[3].text]);
+runView = null;
+selectedTask = null;
+renderOffice();
+out.push([Object.keys(deskNodes).length, nodes['row-opus'].className,
+  nodes['row-sonnet'].className, nodes['row-haiku'].className]);
+var boss = bossNode;
+interactive = true;
+office = {state: 'asking', can_click: true};
+renderOffice();
+out.push([nodes.teacher.children.length, bossNode === boss, boss.className,
+  boss.children[0].className, boss.children[0].text, boss.attrs.role]);
+boss.on.click();
+out.push(focused);
+office = {state: 'idle', can_click: false};
+renderOffice();
+out.push([boss.className, boss.children[0].className, 'role' in boss.attrs]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_classroom_keeps_desk_nodes(tmp_path):
+    text = _text()
+    section = _classroom_section(text)
+    assert "replaceChildren" not in section
+    for word in ["deskNodes", "settled", "selectTask", "data-task"]:
+        assert word in section, word
+    script = (
+        _page_helpers(text)
+        + "var office = null, interactive = false, runView = null, focused = 0;\n"
+        + "var deskNodes = {}, bossNode = null, selectedTask = null;\n"
+        + "function focusComposer() { focused++; }\n"
+        + section
+        + CLASSROOM_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        [[], ["a", "c"], ["b", "d"]],
+        ["row row-opus hidden", "row row-sonnet"],
+        ["desk desk-running", "bubble bubble-running", "Reading a.py", "sonnet · a",
+         "button", 0],
+        ["desk desk-pending", "bubble bubble-pending hidden"],
+        ["desk desk-done settled", "- · c", "paused"],
+        [True, "desk desk-done", True],
+        [["b"], ["a"], []],
+        ["row row-haiku hidden", False, False],
+        ["desk desk-running selected", "Bash", "opus · b"],
+        [0, "row row-opus hidden", "row row-sonnet hidden", "row row-haiku hidden"],
+        [1, True, "desk desk-boss boss-asking clickable", "bubble bubble-boss",
+         "has a question", "button"],
+        1,
+        ["desk desk-boss boss-idle", "bubble bubble-boss hidden", False],
+    ]  # fmt: skip
