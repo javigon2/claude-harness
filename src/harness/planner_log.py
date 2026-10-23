@@ -90,7 +90,8 @@ class ObservedSession:
     with `plan_changed` = the PROJECT_PLAN.md fingerprint changed during the turn (to a
     file that exists). If it changed, `phase_fn()` is "project" and the plan is still
     `Status: draft`, it also logs `plan_ready`. The turn is returned unchanged; close()
-    delegates. `cost_usd` is the session's running cost after the latest turn."""
+    delegates. `cost_usd` is `cost_base()` plus the session's running cost after the latest
+    turn (the office passes the triage session's cost, so Opus's figure includes it)."""
 
     def __init__(
         self,
@@ -98,14 +99,20 @@ class ObservedSession:
         repo: Path,
         log: PlannerLog,
         phase_fn: Callable[[], str] = lambda: "project",
+        cost_base: Callable[[], float] = lambda: 0.0,
     ) -> None:
         self._inner = inner
+        self._cost_base = cost_base
+        self._own_cost = 0.0
         self._plan = Path(repo).resolve() / PROJECT_PLAN_FILE
         self._log = log
         self._phase = phase_fn
-        self.cost_usd = 0.0
         self.reply_text: str | None = None
         self.ready = False
+
+    @property
+    def cost_usd(self) -> float:
+        return self._cost_base() + self._own_cost
 
     def _approved(self) -> bool:
         try:
@@ -119,7 +126,7 @@ class ObservedSession:
         turn = await self._inner.send(text)
         after = _fingerprint(self._plan)
         changed = after not in (None, before)
-        self.cost_usd = turn.usage.cost_usd
+        self._own_cost = turn.usage.cost_usd
         self.reply_text = turn.text
         self.ready = False
         self._log.emit(

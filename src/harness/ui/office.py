@@ -35,6 +35,7 @@ from harness.planner import (
     Route,
     RouteChoice,
     SdkPlannerSession,
+    SdkTriageSession,
     Triage,
     quick_plan_dir,
     run_planner,
@@ -412,12 +413,13 @@ def _live_office_state(sess: list[Event], fields: dict[str, Any]) -> State:
 class Office:
     """Owns the one planner session of a `harness ui` server.
 
-    `start` takes a route: "auto" (Opus triages; direct work goes to a chat), "quick" (a
-    one-stage plan) or "project" (the full flow).
+    `start` takes a route: "auto" (a one-turn Sonnet session triages; direct work goes to a
+    chat and never reaches Opus), "quick" (a one-stage plan) or "project" (the full flow).
 
     Public calls: `start`, `message`, `implement`, `next_stage` (each raises OfficeConflict
     with a sentence when the state does not allow it), `view`, `open`, `close`. `fake` swaps
-    in the scripted DemoPlannerSession; `session_factory(repo, progress)` overrides both.
+    in the scripted DemoPlannerSession; `session_factory(repo, progress)` overrides both, and
+    `triage_session_factory` does the same for the triage session (SdkTriageSession).
     `launcher` replaces subprocess.Popen when a run is started (tests capture argv).
     `chats` is the ChatManager; `chat_session_factory` overrides its sessions.
     With `auto_advance` (default) a stage-N run that ends with every task done starts the
@@ -431,6 +433,7 @@ class Office:
         fake_delay: float = 2.0,
         max_cost: float | None = None,
         session_factory: SessionFactory | None = None,
+        triage_session_factory: SessionFactory | None = None,
         idle_timeout_s: float = 7200.0,
         launcher: Callable[..., Any] | None = None,
         chat_session_factory: ChatSessionFactory | None = None,
@@ -454,6 +457,14 @@ class Office:
             )
         else:
             self._factory = lambda repo, progress: SdkPlannerSession(repo, progress=progress)
+        if triage_session_factory is not None:
+            self._triage_factory: SessionFactory = triage_session_factory
+        elif fake:
+            self._triage_factory = lambda repo, progress: DemoPlannerSession(
+                repo, progress=progress, delay_s=fake_delay
+            )
+        else:
+            self._triage_factory = lambda repo, progress: SdkTriageSession(repo, progress=progress)
 
         self._lock = threading.Lock()
         self._state: State = "idle"
@@ -764,8 +775,22 @@ class Office:
         self._stopping.clear()
         self._waiting = False
         self._state = "busy" if stage == 1 else "staging"
+        triage = (
+            ObservedSession(
+                self._triage_factory(self.repo, self._on_progress),
+                self.repo,
+                log,
+                lambda: self._phase,
+            )
+            if route == "auto"
+            else None
+        )
         observed = ObservedSession(
-            self._factory(self.repo, self._on_progress), self.repo, log, lambda: self._phase
+            self._factory(self.repo, self._on_progress),
+            self.repo,
+            log,
+            lambda: self._phase,
+            cost_base=(lambda: triage.cost_usd) if triage is not None else lambda: 0.0,
         )
         self._observed = observed
         log.emit(
@@ -785,7 +810,7 @@ class Office:
             log.emit("planner_user", {"text": shown})
         self._thread = threading.Thread(
             target=self._thread_main,
-            args=(text, stage, observed),
+            args=(text, stage, observed, triage),
             name="harness-planner",
             daemon=False,
         )
@@ -928,7 +953,13 @@ class Office:
             with self._lock:
                 self._waiting = False
 
-    async def _plan(self, text: str, stage: int, observed: ObservedSession) -> PlanResult:
+    async def _plan(
+        self,
+        text: str,
+        stage: int,
+        observed: ObservedSession,
+        triage: ObservedSession | None = None,
+    ) -> PlanResult:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
         return await run_planner(
@@ -941,10 +972,11 @@ class Office:
             route=self._route_choice,
             on_triage=self._on_triage,
             quick_dir=self._quick_dir,
+            triage_session=triage,
         )
 
     def _on_triage(self, triage: Triage) -> None:
-        """run_planner's on_triage: keep Opus's routing and log it."""
+        """run_planner's on_triage: keep the Sonnet triage's routing and log it."""
         with self._lock:
             self._triage = triage
             self._route = triage.route
@@ -957,9 +989,15 @@ class Office:
                 {"route": triage.route, "tier": triage.tier, "reason": triage.reason},
             )
 
-    def _thread_main(self, text: str, stage: int, observed: ObservedSession) -> None:
+    def _thread_main(
+        self,
+        text: str,
+        stage: int,
+        observed: ObservedSession,
+        triage: ObservedSession | None = None,
+    ) -> None:
         try:
-            result = asyncio.run(self._plan(text, stage, observed))
+            result = asyncio.run(self._plan(text, stage, observed, triage))
         except PlannerError as err:
             self._failed(str(err))
         except asyncio.CancelledError:

@@ -6,6 +6,7 @@ from git_helpers import init_repo
 from test_office import Launches, wait_for
 from test_planner import VALID_PLAN
 
+from harness.models import Usage
 from harness.planner import PROJECT_PLAN_FILE, FakePlannerSession, PlannerTurn, quick_plan_dir
 from harness.planner_log import read_planner_events
 from harness.ui.office import Office, OfficeConflict, office_view_from_log
@@ -15,9 +16,11 @@ QUICK_DIR = Path(".harness/plans/quick-20270115-080000")
 QUICK_REL = (QUICK_DIR / "plan.json").as_posix()
 
 
-def triage(route: str, tier: str = "haiku", reason: str = "small") -> PlannerTurn:
+def triage(
+    route: str, tier: str = "haiku", reason: str = "small", cost: float = 0.0
+) -> PlannerTurn:
     body = json.dumps({"route": route, "tier": tier, "reason": reason})
-    return PlannerTurn(text="ok\n\n```json\n" + body + "\n```")
+    return PlannerTurn(text="ok\n\n```json\n" + body + "\n```", usage=Usage(cost_usd=cost))
 
 
 def write_quick(root: Path):
@@ -30,11 +33,11 @@ def write_quick(root: Path):
     return step
 
 
-def write_draft(root: Path):
+def write_draft(root: Path, cost: float = 0.0):
     def step(_text: str) -> PlannerTurn:
         (root / PROJECT_PLAN_FILE).parent.mkdir(parents=True, exist_ok=True)
         (root / PROJECT_PLAN_FILE).write_text("# P\n\nStatus: draft\n", encoding="utf-8")
-        return PlannerTurn(text="draft written")
+        return PlannerTurn(text="draft written", usage=Usage(cost_usd=cost))
 
     return step
 
@@ -48,18 +51,22 @@ def repo(tmp_path):
 def make(repo):
     made: list[Office] = []
 
-    def build(steps, **kwargs):
+    def build(steps, triage_steps=(), **kwargs):
+        """The Opus fake is returned; the triage fake is `office.triage_fake`."""
         session = FakePlannerSession(steps)
+        triage_fake = FakePlannerSession(triage_steps)
         launches = Launches()
         office = Office(
             repo,
             fake=True,
             fake_delay=0,
             session_factory=lambda _r, _p: session,
+            triage_session_factory=lambda _r, _p: triage_fake,
             launcher=launches,
             clock=lambda: NOW,
             **kwargs,
         )
+        office.triage_fake = triage_fake  # type: ignore[attr-defined]
         made.append(office)
         return office, session, launches
 
@@ -77,9 +84,11 @@ def types(repo: Path) -> list[str]:
 
 
 def test_auto_direct_hands_to_a_chat(repo, make):
-    office, _s, launches = make([triage("direct")])
+    office, session, launches = make([], [triage("direct")])
     office.start("note this", route="auto")
     wait_for(lambda: office.view().handoff_chat)
+    assert session.sent == []
+    assert len(office.triage_fake.sent) == 1 and office.triage_fake.closed
     view = office.view()
     assert view.state == "idle"
     assert view.route == "direct"
@@ -109,7 +118,7 @@ def test_auto_direct_hands_to_a_chat(repo, make):
 
 
 def test_direct_handoff_refused(repo, make):
-    office, _s, _l = make([triage("direct")])
+    office, _s, _l = make([], [triage("direct")])
     office.chats.start("haiku", "x")
     wait_for(lambda: office.view().chats[0].state == "waiting")
     office.start("note this", route="auto")
@@ -151,23 +160,37 @@ def test_quick_implement_before_plan_loads(repo, make):
 
 
 def test_auto_to_quick(repo, make):
-    office, _s, _l = make([triage("quick", "sonnet", "one stage"), write_quick(repo)])
+    office, session, _l = make([write_quick(repo)], [triage("quick", "sonnet", "one stage")])
     office.start("add a flag", route="auto")
     wait_for(state_is(office, "ready"))
     assert "planner_triage" in types(repo)
     phases = [e.payload["phase"] for e in read_planner_events(repo) if e.type == "planner_message"]
     assert phases == ["triage", "quick"]
     assert office.view().triage_reason == "one stage"
+    assert "quick mode" in session.sent[0]
 
 
 def test_auto_to_project(repo, make):
-    office, session, _l = make([triage("project", "sonnet", "big"), write_draft(repo)])
+    office, session, _l = make([write_draft(repo)], [triage("project", "sonnet", "big")])
     office.start("build an app", route="auto")
     wait_for(state_is(office, "ready"))
     view = office.view()
     assert view.route == "project" and view.plan_kind == "project"
-    assert "plan-project" in session.sent[1]
+    assert "plan-project" in session.sent[0]
     assert "plan_ready" in types(repo)
+
+
+def test_planner_cost_includes_the_triage_turn(repo, make):
+    office, _s, _l = make([write_draft(repo, 0.25)], [triage("project", "sonnet", "big", 0.03)])
+    office.start("build an app", route="auto")
+    wait_for(state_is(office, "ready"))
+    assert office.view().cost_usd == pytest.approx(0.28)
+    events = read_planner_events(repo)
+    replies = [e.payload for e in events if e.type == "planner_reply"]
+    assert [r["cost_usd"] for r in replies] == pytest.approx([0.03, 0.28])
+    phases = [e.payload["phase"] for e in events if e.type == "planner_message"]
+    assert phases == ["triage", "project"]
+    assert office_view_from_log(repo).cost_usd == pytest.approx(0.28)
 
 
 def test_from_draft_forces_project_route(repo, make):

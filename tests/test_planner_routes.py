@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from test_planner import INVALID_PLAN, VALID_PLAN, asker, step, write_project
 
+from harness.config import MODEL_IDS
 from harness.models import Usage
 from harness.planner import (
     APPROVE_QUICK,
@@ -12,10 +13,13 @@ from harness.planner import (
     PROJECT_PLAN_FILE,
     QUICK_PROMPT,
     STAGE_PLAN_DIR,
+    TRIAGE_MAX_TURNS,
     TRIAGE_PROMPT,
+    TRIAGE_TOOLS,
     FakePlannerSession,
     PlannerError,
     PlannerTurn,
+    SdkTriageSession,
     Triage,
     parse_triage,
     quick_plan_dir,
@@ -56,28 +60,67 @@ def test_quick_plan_dir() -> None:
     assert quick_plan_dir(1_800_000_000.0) == PLANS_DIR / "quick-20270115-080000"
 
 
+def test_triage_options(tmp_path: Path) -> None:
+    o = SdkTriageSession(tmp_path).options()
+    assert o.model == MODEL_IDS["sonnet"]
+    assert o.tools == list(TRIAGE_TOOLS) == ["Read", "Glob", "Grep"]
+    assert o.allowed_tools == list(TRIAGE_TOOLS)
+    assert o.skills == [] and o.setting_sources == []
+    assert o.max_turns == TRIAGE_MAX_TURNS
+    assert o.cwd == str(tmp_path.resolve())
+
+
 async def test_auto_direct(tmp_path: Path) -> None:
-    session = FakePlannerSession([step(triage_text("direct", "haiku"), 0.1)])
+    session = FakePlannerSession([])
+    sonnet = FakePlannerSession([step(triage_text("direct", "haiku"), 0.1)])
     ask, asked = asker([])
     seen: list[Triage] = []
     result = await run_planner(
-        "  fix it  ", tmp_path, session, ask, lambda _t: None, route="auto", on_triage=seen.append
+        "  fix it  ",
+        tmp_path,
+        session,
+        ask,
+        lambda _t: None,
+        route="auto",
+        on_triage=seen.append,
+        triage_session=sonnet,
     )
     assert result.route == "direct"
     assert result.plan_path is None
     assert result.triage is not None and result.triage.tier == "haiku"
     assert result.rounds == 1
-    assert session.sent == [TRIAGE_PROMPT.format(repo=tmp_path.resolve(), description="fix it")]
+    assert result.usage.cost_usd == pytest.approx(0.1)
+    assert sonnet.sent == [TRIAGE_PROMPT.format(repo=tmp_path.resolve(), description="fix it")]
+    assert session.sent == []
     assert seen == [result.triage]
     assert asked == []
+    assert session.closed and sonnet.closed
+
+
+async def test_auto_needs_a_triage_session(tmp_path: Path) -> None:
+    session = FakePlannerSession([])
+    ask, _ = asker([])
+    with pytest.raises(PlannerError, match="the auto route needs a triage session"):
+        await run_planner("x", tmp_path, session, ask, lambda _t: None, route="auto")
+    assert session.sent == []
     assert session.closed
 
 
-async def test_auto_no_route_falls_back_to_project(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "triage_turn",
+    [
+        PlannerTurn(text="I do not know.", usage=Usage(cost_usd=0.1)),
+        PlannerTurn(text="```json\n{not json\n```", usage=Usage(cost_usd=0.1)),
+        PlannerTurn(text=triage_text("quick"), usage=Usage(cost_usd=0.1), error="boom"),
+    ],
+)
+async def test_auto_no_route_falls_back_to_project(
+    tmp_path: Path, triage_turn: PlannerTurn
+) -> None:
     repo = tmp_path.resolve()
+    sonnet = FakePlannerSession([triage_turn])
     session = FakePlannerSession(
         [
-            step("I do not know.", 0.1),
             step("Questions?", 0.1),
             step("Draft.", 0.1, lambda: write_project(repo, "draft")),
             step("Approved.", 0.1, lambda: write_project(repo, "approved 2026-10-14")),
@@ -89,12 +132,21 @@ async def test_auto_no_route_falls_back_to_project(tmp_path: Path) -> None:
     ask, _ = asker(["defaults", "approve"])
     seen: list[Triage] = []
     result = await run_planner(
-        "x", tmp_path, session, ask, lambda _t: None, route="auto", on_triage=seen.append
+        "x",
+        tmp_path,
+        session,
+        ask,
+        lambda _t: None,
+        route="auto",
+        on_triage=seen.append,
+        triage_session=sonnet,
     )
     expected = Triage(route="project", reason="triage gave no route; planning in full")
     assert seen == [expected]
-    assert session.sent[1].startswith("Use the plan-project skill")
+    assert session.sent[0].startswith("Use the plan-project skill")
     assert result.route == "project"
+    assert result.usage.cost_usd == pytest.approx(0.2)
+    assert sonnet.closed
     assert result.triage == expected
     assert result.plan_path == repo / STAGE_PLAN_DIR / "plan.json"
 
@@ -103,12 +155,12 @@ async def test_auto_quick_flow(tmp_path: Path) -> None:
     repo = tmp_path.resolve()
     qdir = repo / ".harness/plans/quick-x"
     plan = qdir / "plan.json"
+    sonnet = FakePlannerSession([step(triage_text("quick"), 0.02)])
     session = FakePlannerSession(
         [
-            step(triage_text("quick"), 0.1),
             step("Plan written.", 0.1, lambda: write_plan(plan, INVALID_PLAN)),
-            step("Fixed.", 0.1, lambda: write_plan(plan, VALID_PLAN)),
-            step("Smaller.", 0.1),
+            step("Fixed.", 0.2, lambda: write_plan(plan, VALID_PLAN)),
+            step("Smaller.", 0.3),
         ]
     )
     ask, asked = asker(["make it smaller", APPROVE_QUICK])
@@ -120,10 +172,13 @@ async def test_auto_quick_flow(tmp_path: Path) -> None:
         lambda _t: None,
         route="auto",
         quick_dir=Path(".harness/plans/quick-x"),
+        triage_session=sonnet,
     )
-    assert session.sent[1] == QUICK_PROMPT.format(repo=repo, stage_dir=qdir, description="do it")
-    assert session.sent[2].startswith(FIX_PROMPT.split("{")[0])
-    assert session.sent[3] == "make it smaller"
+    assert len(sonnet.sent) == 1
+    assert session.sent[0] == QUICK_PROMPT.format(repo=repo, stage_dir=qdir, description="do it")
+    assert session.sent[1].startswith(FIX_PROMPT.split("{")[0])
+    assert session.sent[2] == "make it smaller"
+    assert result.usage.cost_usd == pytest.approx(0.32)
     assert result.route == "quick"
     assert result.plan_path == plan
     assert result.rounds == 4

@@ -1,8 +1,8 @@
 """Planner behind `harness plan`: one interactive Opus session that runs the plan-project
 skill until the user approves PROJECT_PLAN.md, then plan-stage on stage N until it writes a
 plan.json that load_plan accepts. Every file goes under <repo>/.harness/plans/. run_planner can
-also triage a request (direct, quick or project) and write a quick one-stage plan under
-.harness/plans/quick-<stamp>/."""
+also triage a request (direct, quick or project) in a separate one-turn Sonnet session with
+read-only tools, and write a quick one-stage plan under .harness/plans/quick-<stamp>/."""
 
 import asyncio
 import hashlib
@@ -42,6 +42,10 @@ PLANNER_SKILLS: tuple[str, ...] = ("plan-project", "plan-stage")
 PLANNER_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
 
 PLANNER_MAX_TURNS = 80
+
+TRIAGE_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+
+TRIAGE_MAX_TURNS = 20
 
 PLANS_DIR = Path(".harness") / "plans"
 
@@ -115,7 +119,7 @@ def quick_plan_dir(now: float) -> Path:
 
 
 class Triage(BaseModel):
-    """Opus's routing of a request: how much planning it needs."""
+    """Sonnet's routing of a request (the triage session): how much planning it needs."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -191,7 +195,8 @@ class PlannerTurn(BaseModel):
 
 class PlanResult(BaseModel):
     """What run_planner produced. `plan_path` is None for the direct route (no plan is
-    written); `triage` is Opus's routing when the route was chosen by triage."""
+    written); `triage` is the Sonnet triage's routing when the route was chosen by triage.
+    `usage` includes the triage turn."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -374,6 +379,25 @@ class SdkPlannerSession:
             self._client = None
 
 
+class SdkTriageSession(SdkPlannerSession):
+    """The one-turn triage session: Sonnet with read-only tools, no skills, no settings."""
+
+    def options(self) -> ClaudeAgentOptions:
+        return ClaudeAgentOptions(
+            model=MODEL_IDS["sonnet"],
+            system_prompt={"type": "preset", "preset": "claude_code", "append": PLANNER_APPEND},
+            tools=list(TRIAGE_TOOLS),
+            allowed_tools=list(TRIAGE_TOOLS),
+            skills=[],
+            setting_sources=[],
+            permission_mode="default",
+            cwd=str(self.repo),
+            max_turns=TRIAGE_MAX_TURNS,
+            strict_mcp_config=True,
+            env=dict(WORKER_ENV),
+        )
+
+
 class FakePlannerSession:
     """A scripted PlannerSession for tests. Each send() takes the next step: a PlannerTurn
     (returned as a deep copy) or a callable (text) -> PlannerTurn, which may write files
@@ -413,13 +437,19 @@ async def run_planner(
     route: RouteChoice = "project",
     on_triage: Callable[[Triage], None] | None = None,
     quick_dir: Path | None = None,
+    triage_session: PlannerSession | None = None,
 ) -> PlanResult:
-    """Drive the planner for one request. Always closes the session (finally). Raises
-    PlannerError when it stops without a valid plan."""
+    """Drive the planner for one request. Always closes both sessions (finally). Raises
+    PlannerError when it stops without a valid plan.
+
+    The "auto" route needs `triage_session`: it gets the one TRIAGE_PROMPT turn, and
+    `session` (Opus) gets no message unless the route is quick or project. A triage turn
+    that fails or gives no valid route falls back to planning in full (NO_ROUTE_REASON)."""
     repo = Path(repo).resolve()
     project_plan = repo / PROJECT_PLAN_FILE
     rounds = 0
     usage = Usage()
+    triage_usage = Usage()
     session_init: dict[str, Any] | None = None
     plan_fp: str | None = None
     fixes = 0
@@ -445,6 +475,19 @@ async def run_planner(
         if t.error:
             raise PlannerError(f"planner session failed: {t.error}")
         return t
+
+    async def triage_turn(sonnet: PlannerSession, msg: str) -> Triage:
+        nonlocal rounds, triage_usage
+        rounds += 1
+        try:
+            t = await sonnet.send(msg)
+        finally:
+            await sonnet.close()
+        triage_usage = t.usage
+        if t.text.strip():
+            say(t.text)
+        parsed = parse_triage(t.text) if not t.error else None
+        return parsed or Triage(route="project", reason=NO_ROUTE_REASON)
 
     async def answer() -> str:
         a = await asyncio.to_thread(ask, "> ")
@@ -478,7 +521,7 @@ async def run_planner(
         return PlanResult(
             project_plan=project_plan,
             plan_path=plan_path,
-            usage=usage,
+            usage=triage_usage.plus(usage),
             rounds=rounds,
             session_init=session_init,
             route=route,
@@ -494,8 +537,11 @@ async def run_planner(
         triage: Triage | None = None
         effective: Route
         if route == "auto":
-            t = await turn(TRIAGE_PROMPT.format(repo=repo, description=description.strip()))
-            triage = parse_triage(t.text) or Triage(route="project", reason=NO_ROUTE_REASON)
+            if triage_session is None:
+                raise PlannerError("the auto route needs a triage session")
+            triage = await triage_turn(
+                triage_session, TRIAGE_PROMPT.format(repo=repo, description=description.strip())
+            )
             if on_triage is not None:
                 on_triage(triage)
             effective = triage.route
@@ -552,4 +598,6 @@ async def run_planner(
             msg = await answer()
         return result(plan_path, "project", triage)
     finally:
+        if triage_session is not None:
+            await triage_session.close()
         await session.close()

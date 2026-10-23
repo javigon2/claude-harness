@@ -254,6 +254,7 @@ async def test_run_planner_quick_lane_with_the_demo(tmp_path):
         said.append,
         route="auto",
         quick_dir=Path(".harness/plans/quick-1"),
+        triage_session=DemoPlannerSession(tmp_path, delay_s=0),
     )
     assert result.route == "quick"
     assert result.plan_path == tmp_path.resolve() / ".harness/plans/quick-1/plan.json"
@@ -270,6 +271,7 @@ async def test_run_planner_direct_lane_with_the_demo(tmp_path):
         ask,
         lambda text: None,
         route="auto",
+        triage_session=DemoPlannerSession(tmp_path, delay_s=0),
     )
     assert result.route == "direct"
     assert result.plan_path is None
@@ -291,6 +293,6 @@ async def test_auto_project_lane_still_asks(tmp_path):
             ask,
             lambda text: None,
             route="auto",
+            triage_session=DemoPlannerSession(tmp_path, delay_s=0),
         )
-    assert len(session.sent) >= 2
-    assert session.sent[1].startswith("Use the plan-project skill")
+    assert session.sent[0].startswith("Use the plan-project skill")
