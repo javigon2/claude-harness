@@ -23,6 +23,10 @@ TURN_COST_USD = 0.01
 
 _STAGE_RE = re.compile(r"plan-stage skill on stage (\d+)")
 
+_ROUTE_WORD_RE = re.compile(r"\s*(direct|quick)\b", re.IGNORECASE)
+
+_QUICK_DIR_RE = re.compile(r"to (.+?)/ \(exactly")
+
 QUESTIONS = """Two questions before I write the plan:
 
 1. Should the demo core be **one module** or split into `store` and `cli`?
@@ -186,6 +190,10 @@ def demo_stage_plan(stage: int) -> dict[str, Any]:
 class DemoPlannerSession:
     """A PlannerSession with scripted behaviour chosen by the message:
 
+    - the triage prompt: a JSON route block: direct or quick when the request starts with
+      that word, else project; tier haiku.
+    - the quick prompt: a quick plan (demo_stage_plan(1), stage "quick") in the directory
+      the prompt names.
     - the plan-project prompt, or "earlier planning session was interrupted": three progress
       steps, then a Markdown question. No file is written.
     - "Now use the plan-stage skill on stage K": progress, then stage-K/plan.json + plan.md.
@@ -220,6 +228,10 @@ class DemoPlannerSession:
     async def send(self, text: str) -> PlannerTurn:
         self.sent.append(text)
         plan = self.repo / PROJECT_PLAN_FILE
+        if text.startswith("Decide how much planning this request needs."):
+            return await self._triage(text)
+        if "plan-stage skill in quick mode" in text:
+            return await self._write_quick(text)
         if (
             "Use the plan-project skill" in text
             or "earlier planning session was interrupted" in text
@@ -244,6 +256,37 @@ class DemoPlannerSession:
         echo = " ".join(text.split())[:80]
         plan.write_text(f"{body.rstrip()}\n\n## Revision {n}\n\n> {echo}\n", encoding="utf-8")
         return self._turn(DRAFT_REPLY)
+
+    async def _triage(self, text: str) -> PlannerTurn:
+        """Route by the request's first word: direct, quick, else project; tier haiku."""
+        request = text.split("Request:\n\n", 1)[-1]
+        m = _ROUTE_WORD_RE.match(request)
+        route = m.group(1).lower() if m else "project"
+        await self._step("Read", "README.md")
+        block = json.dumps({"route": route, "tier": "haiku", "reason": f"demo triage: {route}"})
+        return self._turn(f"Routing this as {route}.\n\n```json\n{block}\n```")
+
+    async def _write_quick(self, text: str) -> PlannerTurn:
+        """Write demo_stage_plan(1), stage "quick", plus a plan.md into the prompt's dir."""
+        m = _QUICK_DIR_RE.search(text)
+        if m is None:
+            return self._turn("No plan directory given.")
+        directory = self.repo / m.group(1)
+        await self._step("Read", "README.md")
+        await self._step("Write", f"{m.group(1)}/plan.json")
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "plan.json"
+        data = {**demo_stage_plan(1), "stage": "quick"}
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        (directory / "plan.md").write_text(
+            "# Quick plan (demo)\n\nWritten by the scripted demo planner.\n", encoding="utf-8"
+        )
+        plan = load_plan(path)
+        waves = validate_plan(plan)
+        return self._turn(
+            f"Quick plan: {len(plan.orders)} orders in {len(waves)} waves, validated. "
+            "Press Start to run it."
+        )
 
     async def _write_stage(self, stage: int) -> PlannerTurn:
         await self._step("Read", PROJECT_PLAN_FILE.as_posix())
