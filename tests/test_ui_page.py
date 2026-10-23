@@ -414,3 +414,38 @@ def test_transcript_appends_in_place_and_rebuilds_on_a_new_session(tmp_path):
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == [[3, 500], [3, 0], [2, False], [1, False], [0]]
+
+
+def _classroom_section(text: str) -> str:
+    start = text.index("  // ---- the classroom")
+    end = text.index("  // ---- markdown block tree")
+    return text[start:end]
+
+
+def test_classroom_markup():
+    text = _text()
+    ids = ["office", "teacher", "row-opus", "row-sonnet", "row-haiku", "empty"]
+    places = [text.index(f'id="{id_}"') for id_ in ids]
+    assert places == sorted(places)
+    for tier in ["opus", "sonnet", "haiku"]:
+        row = (
+            f'<div id="row-{tier}" class="row row-{tier} hidden"><div class="row-label">{tier}'
+            f'</div><div id="desks-{tier}" class="row-desks"></div></div>'
+        )
+        assert row in text, tier
+    assert re.search(r"\.row\.hidden \{ display: none; \}", text)
+    assert re.search(r"\.teacher \{[^}]*justify-content: center;", text)
+    assert "'Opus'" in _classroom_section(text)
+
+
+def test_row_of(tmp_path):
+    tasks = [
+        {"tier": "sonnet"}, {"tier": "haiku"}, {"tier": "opus"}, {"tier": None}, {"tier": "gpt"},
+        {},
+    ]  # fmt: skip
+    script = (
+        _classroom_section(_text())
+        + "console.log(JSON.stringify(" + json.dumps(tasks) + ".map(rowOf)));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == ["sonnet", "haiku", "opus", "sonnet", "sonnet", "sonnet"]
