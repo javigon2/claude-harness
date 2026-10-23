@@ -27,11 +27,16 @@ from harness.events import EVENTS_FILE
 from harness.models import Event
 from harness.plan import PlanError, load_plan
 from harness.planner import (
+    APPROVE_QUICK,
     PROJECT_PLAN_FILE,
     PlannerError,
     PlannerSession,
     PlanResult,
+    Route,
+    RouteChoice,
     SdkPlannerSession,
+    Triage,
+    quick_plan_dir,
     run_planner,
 )
 from harness.planner_log import (
@@ -42,7 +47,7 @@ from harness.planner_log import (
     read_planner_events,
 )
 from harness.state import STATE_FILE, StateError, load_state, new_run_id, run_dir
-from harness.ui.chat import ChatManager, ChatSessionFactory, ChatView, chats_from_log
+from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
 from harness.ui.view import IDLE_MINUTES, list_runs
@@ -66,6 +71,8 @@ State = Literal[
     "failed",
     "terminal",
 ]
+
+Phase = Literal["triage", "project", "quick", "staging"]
 
 SessionFactory = Callable[[Path, ProgressFn], PlannerSession]
 
@@ -127,6 +134,12 @@ class OfficeView(BaseModel):
     can_click: bool = False
     transcript: list[TranscriptEntry] = Field(default_factory=list)
     chats: list[ChatView] = Field(default_factory=list)
+    route: Route | None = None
+    triage_reason: str | None = None
+    plan_kind: Literal["project", "quick"] | None = None
+    quick_plan: str | None = None
+    resumable_run: str | None = None
+    handoff_chat: str | None = None
 
 
 # ---------------------------------------------------------------- small helpers
@@ -302,6 +315,23 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
         fields["session_id"] = sess[0].run_id
         stage = started.get("stage")
         fields["stage"] = stage if isinstance(stage, int) else None
+        route = started.get("route")
+        route = route if route in ("quick", "project") else None
+        for e in sess:
+            if e.type == "planner_triage" and e.payload.get("route") in (
+                "direct",
+                "quick",
+                "project",
+            ):
+                route = e.payload["route"]
+                reason = e.payload.get("reason")
+                fields["triage_reason"] = reason if isinstance(reason, str) else None
+        fields["route"] = route
+        fields["plan_kind"] = route if route in ("quick", "project") else None
+        if route == "quick":
+            paths = [e.payload.get("path") for e in sess if e.type == "plan_ready"]
+            if paths and isinstance(paths[-1], str):
+                fields["quick_plan"] = paths[-1]
         replies = [e for e in sess if e.type == "planner_reply"]
         if replies:
             fields["cost_usd"] = float(replies[-1].payload.get("cost_usd") or 0.0)
@@ -364,6 +394,9 @@ def _live_office_state(sess: list[Event], fields: dict[str, Any]) -> State:
 class Office:
     """Owns the one planner session of a `harness ui` server.
 
+    `start` takes a route: "auto" (Opus triages; direct work goes to a chat), "quick" (a
+    one-stage plan) or "project" (the full flow).
+
     Public calls: `start`, `message`, `implement`, `next_stage` (each raises OfficeConflict
     with a sentence when the state does not allow it), `view`, `open`, `close`. `fake` swaps
     in the scripted DemoPlannerSession; `session_factory(repo, progress)` overrides both.
@@ -401,7 +434,14 @@ class Office:
 
         self._lock = threading.Lock()
         self._state: State = "idle"
-        self._phase: Literal["project", "staging"] = "project"
+        self._phase: Phase = "project"
+        self._route_choice: RouteChoice = "project"
+        self._route: Route | None = None
+        self._triage: Triage | None = None
+        self._description = ""
+        self._quick_dir: Path | None = None
+        self._quick_plan: str | None = None
+        self._handoff_chat: str | None = None
         self._session_id: str | None = None
         self._stage: int | None = None
         self._error: str | None = None
@@ -577,6 +617,17 @@ class Office:
                 run_id=run_id,
                 can_click=state != "terminal",
                 transcript=self._transcript(),
+                route=self._route,
+                triage_reason=self._triage.reason if self._triage else None,
+                plan_kind=(
+                    "quick"
+                    if self._route == "quick"
+                    else "project"
+                    if self._route == "project"
+                    else None
+                ),
+                quick_plan=self._quick_plan,
+                handoff_chat=self._handoff_chat,
                 **_plan_fields(self.repo),
             )
         return view.model_copy(update={"chats": self.chats.views()})
@@ -601,7 +652,12 @@ class Office:
 
     # ------------------------------------------------------------ start
 
-    def start(self, description: str | None = None, from_draft: bool = False) -> None:
+    def start(
+        self,
+        description: str | None = None,
+        from_draft: bool = False,
+        route: RouteChoice = "project",
+    ) -> None:
         """Start a stage-1 planner session. With `description`, an existing PROJECT_PLAN.md is
         first archived as PROJECT_PLAN.<UTC timestamp>.md. With `from_draft`, the session is
         told to pick up the draft on disk. Raises OfficeConflict if a session or run is
@@ -624,7 +680,13 @@ class Office:
                 text = shown
                 if plan.exists():
                     self._archive(plan)
-            self._begin(text, shown, stage=1, from_draft=from_draft)
+            self._begin(
+                text,
+                shown,
+                stage=1,
+                from_draft=from_draft,
+                route="project" if from_draft else route,
+            )
 
     def _previous_description(self) -> str:
         sess = last_session(read_planner_events(self.repo))
@@ -640,11 +702,29 @@ class Office:
             target = plan.with_name(f"PROJECT_PLAN.{stamp}-{n}.md")
         plan.rename(target)
 
-    def _begin(self, text: str, shown: str, *, stage: int, from_draft: bool = False) -> None:
+    def _begin(
+        self,
+        text: str,
+        shown: str,
+        *,
+        stage: int,
+        from_draft: bool = False,
+        route: RouteChoice = "project",
+        auto: bool = False,
+    ) -> None:
         """Start the planner thread. Caller holds the lock and has passed _guard_idle."""
         sid = new_session_id()
         log = PlannerLog(self.repo, sid)
-        self._phase = "project" if stage == 1 else "staging"
+        if from_draft or stage != 1:
+            route = "project"
+        self._phase = "staging" if stage != 1 else "triage" if route == "auto" else route
+        self._route_choice = route
+        self._route = None if route == "auto" else route
+        self._triage = None
+        self._description = shown
+        self._quick_dir = quick_plan_dir(self._clock()) if route in ("auto", "quick") else None
+        self._quick_plan = None
+        self._handoff_chat = None
         self._session_id, self._stage, self._log = sid, stage, log
         self._error = self._reply = self._run_id = None
         self._progress_lines = []
@@ -667,6 +747,8 @@ class Office:
                 "stage": stage,
                 "description": shown,
                 "resumed_from_draft": from_draft,
+                "route": route,
+                "auto": auto,
             },
         )
         if stage == 1 and not from_draft:
@@ -721,6 +803,11 @@ class Office:
                 raise OfficeConflict("the planner is not waiting for a message")
             if self.chats.working():
                 raise OfficeConflict(CHAT_WORKING)
+            if self._phase == "quick":
+                if self._quick_plan is None:
+                    raise OfficeConflict("the quick plan is not written yet")
+                self._send(APPROVE_QUICK)
+                return
             plan = self.repo / PROJECT_PLAN_FILE
             try:
                 text = plan.read_text(encoding="utf-8")
@@ -767,7 +854,22 @@ class Office:
         observed = self._observed
         with self._lock:
             self._reply = observed.reply_text if observed is not None else self._reply
-            self._state = "ready" if observed is not None and observed.ready else "asking"
+            if self._phase == "quick" and self._quick_dir is not None:
+                rel = (self._quick_dir / "plan.json").as_posix()
+                try:
+                    load_plan(self.repo / self._quick_dir / "plan.json")
+                except (PlanError, OSError, ValueError):
+                    self._quick_plan = None
+                    self._state = "asking"
+                else:
+                    self._quick_plan = rel
+                    self._state = "ready"
+                    if self._log is not None:
+                        self._log.emit(
+                            "plan_ready", {"path": rel, "cost_usd": self._current_cost()}
+                        )
+            else:
+                self._state = "ready" if observed is not None and observed.ready else "asking"
             self._waiting = True
             self._last_activity = self._clock()
         poll = min(1.0, max(0.05, self.idle_timeout_s / 4))
@@ -799,7 +901,31 @@ class Office:
     async def _plan(self, text: str, stage: int, observed: ObservedSession) -> PlanResult:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
-        return await run_planner(text, self.repo, observed, self._ask, lambda _t: None, stage=stage)
+        return await run_planner(
+            text,
+            self.repo,
+            observed,
+            self._ask,
+            lambda _t: None,
+            stage=stage,
+            route=self._route_choice,
+            on_triage=self._on_triage,
+            quick_dir=self._quick_dir,
+        )
+
+    def _on_triage(self, triage: Triage) -> None:
+        """run_planner's on_triage: keep Opus's routing and log it."""
+        with self._lock:
+            self._triage = triage
+            self._route = triage.route
+            if triage.route in ("quick", "project"):
+                self._phase = triage.route
+            log = self._log
+        if log is not None:
+            log.emit(
+                "planner_triage",
+                {"route": triage.route, "tier": triage.tier, "reason": triage.reason},
+            )
 
     def _thread_main(self, text: str, stage: int, observed: ObservedSession) -> None:
         try:
@@ -829,10 +955,12 @@ class Office:
     def _done(self, result: PlanResult) -> None:
         """run_planner returned a valid stage plan: log it, then launch the run."""
         with self._lock:
-            try:
-                shown = result.plan_path.relative_to(self.repo).as_posix()
-            except ValueError:
-                shown = str(result.plan_path)
+            shown: str | None = None
+            if result.plan_path is not None:
+                try:
+                    shown = result.plan_path.relative_to(self.repo).as_posix()
+                except ValueError:
+                    shown = str(result.plan_path)
             if self._log is not None:
                 self._log.emit(
                     "planner_done",
@@ -840,9 +968,23 @@ class Office:
                         "plan_path": shown,
                         "cost_usd": result.usage.cost_usd,
                         "rounds": result.rounds,
+                        "route": result.route,
                     },
                 )
             self._cost = result.usage.cost_usd
+            if result.route == "direct" or shown is None:
+                tier = result.triage.tier if result.triage else "sonnet"
+                try:
+                    self._handoff_chat = self.chats.start(tier, self._description)
+                except ChatConflict as err:
+                    reason = f"could not hand to {tier}: {err}"
+                    self._state = "failed"
+                    self._error = reason
+                    if self._log is not None:
+                        self._log.emit("planner_failed", {"reason": reason, "cost_usd": self._cost})
+                else:
+                    self._state = "idle"
+                return
             if self.chats.working():
                 reason = f"could not start the run: {CHAT_WORKING}"
                 self._state = "failed"
