@@ -85,10 +85,24 @@ def test_office_css_rules(cls):
 
 def test_office_labels_and_collapsible():
     text = _text()
-    assert "'planner'" in text
+    assert "'Opus'" in text
+    assert "'planner'" not in text
     assert "'awaiting'" in text
     assert 'id="office"' in text
-    assert text.count('<details class="fold" open>') == 2
+    assert text.count('<details class="fold">') == 2
+    assert '<details class="fold" open>' not in text
+
+
+def test_two_panel_layout():
+    text = _text()
+    for id_ in ["layout", "left", "right", "convo", "transcript"]:
+        assert f'id="{id_}"' in text, id_
+    assert '<main id="layout">' in text
+    assert text.index('id="left"') < text.index('id="transcript"') < text.index('id="right"')
+    assert text.index('id="right"') < text.index('id="office"') < text.index('id="content"')
+    assert re.search(r"#layout \{[^}]*grid-template-columns: 1fr 1fr;", text)
+    assert re.search(r"#left \{[^}]*overflow: auto;", text)
+    assert "@media (max-width: 900px)" in text
 
 
 def test_keys_contract(server):
