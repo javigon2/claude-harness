@@ -16,7 +16,7 @@ from harness.worktree import ensure_excluded
 def site(tmp_path):
     repo = init_repo(tmp_path / "repo")
     ensure_excluded(repo)
-    s = Site(repo, Office(repo, fake=True, fake_delay=0))
+    s = Site(repo, Office(repo, fake=True, fake_delay=0, auto_advance=False))
     yield s
     s.stop()
 

@@ -423,6 +423,7 @@ def test_implement_approves_stages_and_launches_with_fixed_argv(tmp_path, make_o
     launched = read_planner_events(tmp_path)[-1].payload
     assert launched == {
         "run_id": rid, "plan_path": ".harness/plans/stage-1/plan.json", "pid": 4242, "fake": True,
+        "resume": False,
     }  # fmt: skip
 
 
@@ -500,7 +501,7 @@ def test_a_run_process_that_exits_without_finishing_returns_to_idle_with_an_erro
 def test_end_to_end_with_the_real_launcher_in_fake_mode(tmp_path):
     repo = init_repo(tmp_path / "repo")
     ensure_excluded(repo)
-    office = Office(repo, fake=True, fake_delay=0)
+    office = Office(repo, fake=True, fake_delay=0, auto_advance=False)
     try:
         _to_ready(office)
         office.implement()

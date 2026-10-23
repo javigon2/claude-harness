@@ -46,7 +46,7 @@ from harness.planner_log import (
     new_session_id,
     read_planner_events,
 )
-from harness.state import STATE_FILE, StateError, load_state, new_run_id, run_dir
+from harness.state import STATE_FILE, StateError, latest_run, load_state, new_run_id, run_dir
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
@@ -230,6 +230,22 @@ def live_run(repo: Path, now: float | None = None) -> str | None:
     return None
 
 
+def resumable_run_of(repo: Path) -> str | None:
+    """latest_run(repo) if finished with a task not done and not live; else None."""
+    rid = latest_run(repo)
+    if rid is None:
+        return None
+    try:
+        state = load_state(run_dir(repo, rid))
+    except (StateError, OSError, ValueError):
+        return None
+    if not state.finished or all(t.status == "done" for t in state.tasks.values()):
+        return None
+    if live_run(repo) is not None:
+        return None
+    return rid
+
+
 def _duration(seconds: float) -> str:
     if seconds >= 3600 and seconds % 3600 == 0:
         return f"{int(seconds // 3600)} h"
@@ -362,6 +378,8 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
     fields["chats"] = chats_from_log(repo)
     fields["state"] = state
     fields["can_click"] = interactive and state != "terminal"
+    if state in ("idle", "failed", "interrupted"):
+        fields["resumable_run"] = resumable_run_of(repo)
     if state == "idle":
         fields["next_stage"] = next_stage_of(repo)
     return OfficeView(**fields)
@@ -401,7 +419,9 @@ class Office:
     with a sentence when the state does not allow it), `view`, `open`, `close`. `fake` swaps
     in the scripted DemoPlannerSession; `session_factory(repo, progress)` overrides both.
     `launcher` replaces subprocess.Popen when a run is started (tests capture argv).
-    `chats` is the ChatManager; `chat_session_factory` overrides its sessions."""
+    `chats` is the ChatManager; `chat_session_factory` overrides its sessions.
+    With `auto_advance` (default) a stage-N run that ends with every task done starts the
+    planning of stage N+1 by itself; `resume_run` resumes a stopped run."""
 
     def __init__(
         self,
@@ -415,7 +435,10 @@ class Office:
         launcher: Callable[..., Any] | None = None,
         chat_session_factory: ChatSessionFactory | None = None,
         clock: Callable[[], float] = time.time,
+        auto_advance: bool = True,
     ) -> None:
+        self.auto_advance = auto_advance
+        self._resume_stamp: int | None = None
         self.repo = Path(repo).resolve()
         self.fake = fake
         self.fake_delay = fake_delay
@@ -630,7 +653,14 @@ class Office:
                 handoff_chat=self._handoff_chat,
                 **_plan_fields(self.repo),
             )
-        return view.model_copy(update={"chats": self.chats.views()})
+        return view.model_copy(
+            update={
+                "chats": self.chats.views(),
+                "resumable_run": resumable_run_of(self.repo)
+                if view.state in ("idle", "failed", "interrupted")
+                else None,
+            }
+        )
 
     # ------------------------------------------------------------ guards
 
@@ -1013,18 +1043,26 @@ class Office:
             argv += ["--max-cost", str(self.max_cost)]
         return argv
 
-    def _launch(self, rel_plan: str) -> None:
+    def _launch(self, rel_plan: str, *, run_id: str | None = None, resume: bool = False) -> None:
         """Validate the stage plan again, then start `harness run` as a detached process
         (own session, so Ctrl-C on the UI leaves it running; output to
-        .harness/office/run-<id>.log). Caller holds the lock."""
+        .harness/office/run-<id>.log). With `resume` it adds --resume for `run_id` and
+        appends to the log. Caller holds the lock."""
         load_plan(self.repo / rel_plan)
-        rid = new_run_id()
+        rid = run_id or new_run_id()
         log_dir = self.repo / OFFICE_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         launcher = self._launcher or subprocess.Popen
-        with (log_dir / f"run-{rid}.log").open("w", encoding="utf-8") as out:
+        argv = self.run_argv(rel_plan, rid) + (["--resume"] if resume else [])
+        self._resume_stamp = None
+        if resume:
+            try:
+                self._resume_stamp = (run_dir(self.repo, rid) / STATE_FILE).stat().st_mtime_ns
+            except OSError:
+                self._resume_stamp = None
+        with (log_dir / f"run-{rid}.log").open("a" if resume else "w", encoding="utf-8") as out:
             popen = launcher(
-                self.run_argv(rel_plan, rid),
+                argv,
                 cwd=self.repo,
                 stdin=subprocess.DEVNULL,
                 stdout=out,
@@ -1043,6 +1081,7 @@ class Office:
                     "plan_path": rel_plan,
                     "pid": getattr(popen, "pid", None),
                     "fake": self.fake,
+                    "resume": resume,
                 },
             )
 
@@ -1063,8 +1102,67 @@ class Office:
                 f"see {(OFFICE_DIR / f'run-{self._run_id}.log').as_posix()}"
             )
         self._state = "idle"
+        self._after_run()
+
+    def _after_run(self) -> None:
+        """After a run ends: plan the next stage when every task is done, else leave a
+        one-line count of what stopped. Caller holds the lock."""
+        m = re.search(r"stage-(\d+)/plan\.json$", self._launched_plan or "")
+        if m is None or self._run_id is None:
+            return
+        try:
+            state = load_state(run_dir(self.repo, self._run_id))
+        except (StateError, OSError, ValueError):
+            return
+        if not state.finished:
+            return
+        n = int(m.group(1))
+        statuses = [t.status for t in state.tasks.values()]
+        if all(s == "done" for s in statuses):
+            if (
+                self.auto_advance
+                and next_stage_of(self.repo) == n + 1
+                and live_run(self.repo, self._clock()) is None
+                and not self.chats.working()
+            ):
+                self._begin("", f"stage {n + 1}", stage=n + 1, auto=True)
+            return
+        self._error = (
+            f"Stage {n} stopped: {statuses.count('done')} done, {statuses.count('failed')} "
+            f"failed, {statuses.count('blocked')} blocked, {statuses.count('paused')} paused."
+        )
+
+    def resume_run(self) -> None:
+        """Resume the stopped run (resumable_run_of) with `harness run --resume`: the same
+        run id, skipping tasks already done."""
+        with self._lock:
+            self._guard_idle()
+            if self.chats.working():
+                raise OfficeConflict(CHAT_WORKING)
+            rid = resumable_run_of(self.repo)
+            if rid is None:
+                raise OfficeConflict("there is no stopped run to resume")
+            try:
+                plan_path = load_state(run_dir(self.repo, rid)).plan_path
+            except (StateError, OSError, ValueError):
+                raise OfficeConflict("there is no stopped run to resume") from None
+            if self._log is None:
+                self._log = PlannerLog(self.repo, self._session_id or new_session_id())
+            try:
+                self._launch(plan_path, run_id=rid, resume=True)
+            except (PlanError, OSError, ValueError) as err:
+                raise OfficeConflict(f"could not resume the run: {err}") from err
+            self._error = None
 
     def _run_finished(self, run_id: str) -> bool:
+        if self._resume_stamp is not None:
+            try:
+                now = (run_dir(self.repo, run_id) / STATE_FILE).stat().st_mtime_ns
+            except OSError:
+                now = None
+            if now == self._resume_stamp:
+                return False
+            self._resume_stamp = None
         try:
             return load_state(run_dir(self.repo, run_id)).finished
         except (StateError, OSError, ValueError):
