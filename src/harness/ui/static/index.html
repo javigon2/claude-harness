@@ -163,6 +163,11 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-line:empty { display: none; }
 #office-total { font-weight: 600; }
 #btn-convo-back { font: inherit; padding: 2px 10px; cursor: pointer; }
+#orch-msg { color: #b91c1c; font-weight: 600; }
+#orch-msg:empty { display: none; }
+#orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+#orch-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#orch-view button:disabled { cursor: default; opacity: 0.55; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -188,6 +193,17 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       </div>
       <ol id="orch-transcript"></ol>
       <p id="orch-line" class="muted"></p>
+      <div id="orch-composer" class="hidden">
+        <p id="orch-msg" role="alert"></p>
+        <textarea id="orch-text" rows="4" placeholder="Ask the office for anything"></textarea>
+        <select id="orch-route" aria-label="Who takes it">
+          <option value="orchestrator">Orchestrator decides</option>
+          <option value="quick">Opus: quick plan</option>
+          <option value="project">Opus: project plan</option>
+        </select>
+        <button id="btn-orch-send" type="button">Send</button>
+        <button id="btn-orch-new" type="button">New request</button>
+      </div>
     </div>
     <div id="convo" class="hidden">
       <div class="convo-head">
@@ -205,7 +221,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
           <label for="desc">What should Opus plan?</label>
           <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
           <select id="route" aria-label="Route">
-            <option value="auto">Auto (Opus decides)</option>
             <option value="quick">Quick plan</option>
             <option value="project">Full plan</option>
           </select>
@@ -414,7 +429,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function orchClick() {
+    // the Orchestrator desk: its thread in the left panel, ready to type
     selectTask(null);
+    if (interactive) document.getElementById('orch-text').focus();
   }
 
   function orchDesk() {
@@ -685,8 +702,35 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return v && v.holder ? 'With ' + v.holder + ' (' + str(v.holder_id) + ')' : '';
   }
 
+  function orchSend(v, route, text) {
+    // a follow-up (someone holds the work) and "Orchestrator decides" go to the
+    // Orchestrator; "Opus: quick plan" and "Opus: project plan" start Opus directly
+    if ((v && v.holder) || (route !== 'quick' && route !== 'project')) {
+      return {path: '/api/orchestrator/message', body: {text: text}};
+    }
+    return {path: '/api/planner/start', body: {description: text, route: route}};
+  }
+
+  function wireOrch() {
+    byId('btn-orch-send').addEventListener('click', function () {
+      var text = textOf('orch-text');
+      if (!text) { byId('orch-msg').textContent = 'Write a message first.'; return; }
+      var req = orchSend(office ? office.orchestrator : null, byId('orch-route').value, text);
+      act(req.path, req.body, function () {
+        byId('orch-text').value = '';
+        byId('orch-route').value = 'orchestrator';
+        if (req.path === '/api/planner/start') showOpus();
+      }, 'orch-msg');
+    });
+    byId('btn-orch-new').addEventListener('click', function () {
+      act('/api/orchestrator/new', {}, null, 'orch-msg');
+    });
+  }
+
   function renderOrch(v) {
     var o = v || {};
+    setHidden('orch-composer', !interactive);
+    setHidden('orch-route', !!o.holder);
     byId('orch-cost').textContent = orchCostText(o);
     byId('orch-line').textContent = orchLine(o);
     var list = byId('orch-transcript');
@@ -792,9 +836,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function triageText(o) {
-    // set only when Opus triaged the request (route "auto")
+    // set only when the triage picked the route (route "auto")
     if (!o || typeof o.triage_reason !== 'string' || !o.route) return '';
-    return 'Opus routed this: ' + o.route + ' (' + o.triage_reason + ')';
+    return 'Triage routed this: ' + o.route + ' (' + o.triage_reason + ')';
   }
 
   function canImplement(o) {
@@ -883,7 +927,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function setBusy(on) {
-    var buttons = document.querySelectorAll('#composer button, #chat-view button');
+    var buttons = document.querySelectorAll('#composer button, #chat-view button, #orch-view button');
     for (var i = 0; i < buttons.length; i++) buttons[i].disabled = on;
   }
 
@@ -1222,6 +1266,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   renderOffice();
   wireComposer();
   wireChat();
+  wireOrch();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
   poll();

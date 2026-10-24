@@ -717,7 +717,6 @@ def test_animations_css():
 
 
 ROUTE_SELECT = """          <select id="route" aria-label="Route">
-            <option value="auto">Auto (Opus decides)</option>
             <option value="quick">Quick plan</option>
             <option value="project">Full plan</option>
           </select>"""
@@ -772,7 +771,7 @@ def test_triage_text_can_implement_and_resume_label(tmp_path):
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == [
-        ["Opus routed this: quick (two files)", "Opus routed this: direct ()", "", "", ""],
+        ["Triage routed this: quick (two files)", "Triage routed this: direct ()", "", "", ""],
         [True, False, True, True, False],
         ["Resume run 20261023-090000", "", ""],
         "",
@@ -1163,11 +1162,15 @@ left.scrollTop = 0;
 renderOrch({thread_id: 'orch-1', transcript: [U, R, A], holder: 'haiku', holder_id: 'c1',
   cost_usd: 0.01});
 out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-line').text,
-  left.scrollTop]);
+  left.scrollTop, hidden['orch-route']]);
 renderOrch({thread_id: 'orch-2', transcript: [U], holder: null, cost_usd: 0.02});
 out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-cost').text]);
+out.push([hidden['orch-composer'], hidden['orch-route']]);
 renderOrch({thread_id: null, transcript: [], cost_usd: 0.02});
-out.push([items(), byId('orch-line').text]);
+out.push([items(), byId('orch-line').text, hidden['orch-route']]);
+interactive = false;
+renderOrch(null);
+out.push(hidden['orch-composer']);
 console.log(JSON.stringify(out));
 """  # fmt: skip
 
@@ -1183,7 +1186,8 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     orch_end = text.index("  // ---- a worker's timeline")
     script = (
         _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
-        + "var orchShown = null, orchCount = 0;\n"
+        + "var orchShown = null, orchCount = 0, interactive = true, hidden = {};\n"
+        + "function setHidden(id, hide) { hidden[id] = hide; }\n"
         + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
         + text[orch_start:orch_end] + ORCH_SCENARIO
     )  # fmt: skip
@@ -1192,9 +1196,11 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     assert out == [
         [[], "", ""],
         [[you, routed], "orchestrator $0.0100", "", 500],
-        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0],
+        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0, True],
         [[you], False, "orchestrator $0.0200"],
-        [[], ""],
+        [False, False],
+        [[], "", False],
+        True,
     ]  # fmt: skip
 
 
@@ -1251,8 +1257,10 @@ def test_orchestrator_desk_css():
 
 
 DESKS_SCENARIO = """
-var selected = [];
+var selected = [], focused = 0;
 function selectTask(id) { selected.push(id); }
+nodes['orch-text'] = mk('textarea');
+nodes['orch-text'].focus = function () { focused++; };
 function info(d) { return [d.className, d.children[0].className, d.children[0].text]; }
 function opusRow() {
   return nodes['desks-opus'].children.map(function (d) { return d.id || d.attrs['data-task']; });
@@ -1276,7 +1284,7 @@ renderOffice();
 out.push([info(orch), nodes.teacher.children[0] === orch, nodes.teacher.children.length]);
 orch.on.click();
 orch.on.keydown({key: 'Enter', preventDefault: function () {}});
-out.push(selected);
+out.push([selected, focused]);
 runView = {tasks: [{task_id: 'x', tier: 'opus', status: 'running', steps: []}]};
 renderOffice();
 out.push(opusRow());
@@ -1309,8 +1317,55 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
         ["desk desk-orch orch-routing", "bubble bubble-orch", "Grep: TODO"],
         ["desk desk-orch orch-idle", "bubble bubble-orch", "→ sonnet"],
         [["desk desk-orch orch-failed", "bubble bubble-orch", "failed"], True, 1],
-        [None, None],
+        [[None, None], 2],
         ["desk-opus", "x"],
         ["x", "desk-opus"],
         [["desk-opus", "x"], "row row-opus"],
     ]  # fmt: skip
+
+
+# ---------------------------------------------------------------- the Orchestrator composer
+
+ORCH_ROUTE_SELECT = """        <select id="orch-route" aria-label="Who takes it">
+          <option value="orchestrator">Orchestrator decides</option>
+          <option value="quick">Opus: quick plan</option>
+          <option value="project">Opus: project plan</option>
+        </select>"""
+
+
+def test_orchestrator_composer_markup():
+    text = _text()
+    assert '<div id="orch-composer" class="hidden">' in text
+    ids = ["orch-view", "orch-line", "orch-composer", "orch-msg", "orch-text", "orch-route",
+           "btn-orch-send", "btn-orch-new", "convo"]  # fmt: skip
+    places = [text.index(f'id="{id_}"') for id_ in ids]
+    assert places == sorted(places)
+    assert ORCH_ROUTE_SELECT in text
+    assert '<button id="btn-orch-send" type="button">Send</button>' in text
+    assert '<button id="btn-orch-new" type="button">New request</button>' in text
+    assert re.search(r"#orch-msg:empty \{ display: none; \}", text)
+    for word in [
+        "'/api/orchestrator/message'", "'/api/orchestrator/new'", "wireOrch();",
+        "'#composer button, #chat-view button, #orch-view button'",
+        "setHidden('orch-composer', !interactive);", "setHidden('orch-route', !!o.holder);",
+    ]:  # fmt: skip
+        assert word in text, word
+    for gone in ["Opus routed this", "Auto (Opus decides)", '<option value="auto">']:
+        assert gone not in text, gone
+
+
+def test_orchestrator_send_picks_the_endpoint(tmp_path):
+    script = (
+        _functions(_text(), "orchSend")
+        + "console.log(JSON.stringify([orchSend(null, 'orchestrator', 'a'),"
+        + " orchSend({holder: null}, 'quick', 'b'), orchSend({holder: null}, 'project', 'c'),"
+        + " orchSend({holder: 'haiku'}, 'quick', 'd'), orchSend(null, 'auto', 'e')]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        {"path": "/api/orchestrator/message", "body": {"text": "a"}},
+        {"path": "/api/planner/start", "body": {"description": "b", "route": "quick"}},
+        {"path": "/api/planner/start", "body": {"description": "c", "route": "project"}},
+        {"path": "/api/orchestrator/message", "body": {"text": "d"}},
+        {"path": "/api/orchestrator/message", "body": {"text": "e"}},
+    ]
