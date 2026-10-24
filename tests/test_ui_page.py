@@ -435,7 +435,10 @@ def test_classroom_markup():
         assert row in text, tier
     assert re.search(r"\.row\.hidden \{ display: none; \}", text)
     assert re.search(r"\.teacher \{[^}]*justify-content: center;", text)
-    assert "'Opus'" in _classroom_section(text)
+    section = _classroom_section(text)
+    assert "'Opus'" not in section
+    for word in ["'opus · agent'", "'Orchestrator'", "'desk-orch'", "'desk-opus'"]:
+        assert word in section, word
 
 
 def test_row_of(tmp_path):
@@ -467,6 +470,14 @@ function mk(tag) {
     removeChild: function (c) {
       this.children.splice(this.children.indexOf(c), 1);
       c.parentNode = null;
+      return c;
+    },
+    insertBefore: function (c, ref) {
+      if (c.parentNode) c.parentNode.removeChild(c);
+      c.parentNode = this;
+      var i = ref ? this.children.indexOf(ref) : -1;
+      if (i < 0) this.children.push(c);
+      else this.children.splice(i, 0, c);
       return c;
     },
     replaceChildren: function () {
@@ -535,7 +546,8 @@ var boss = bossNode;
 interactive = true;
 office = {state: 'asking', can_click: true};
 renderOffice();
-out.push([nodes.teacher.children.length, bossNode === boss, boss.className,
+out.push([nodes.teacher.children.length, nodes.teacher.children[0] === orchNode,
+  nodes['desks-opus'].children[0] === boss, bossNode === boss, boss.className,
   boss.children[0].className, boss.children[0].text, boss.attrs.role]);
 boss.on.click();
 out.push([focused, hidden.convo, hidden['orch-view']]);
@@ -555,8 +567,8 @@ def test_classroom_keeps_desk_nodes(tmp_path):
     script = (
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null, focused = 0;\n"
-        + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
-        + "var chatDesks = {}, tlTask = null, hidden = {};\n"
+        + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
+        + "var chatTier = null, chatDesks = {}, tlTask = null, hidden = {};\n"
         + "function focusComposer() { focused++; }\n"
         + "function setHidden(id, hide) { hidden[id] = hide; }\n"
         + _chat_section(text)
@@ -565,21 +577,21 @@ def test_classroom_keeps_desk_nodes(tmp_path):
     )
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == [
-        [[], ["a", "c"], ["b", "d"]],
-        ["row row-opus hidden", "row row-sonnet"],
+        [[None], ["a", "c"], ["b", "d"]],
+        ["row row-opus", "row row-sonnet"],
         ["desk desk-running", "bubble bubble-running", "Reading a.py", "sonnet · a",
          "button", 0],
         ["desk desk-pending", "bubble bubble-pending hidden"],
         ["desk desk-done settled", "- · c", "paused"],
         [True, "desk desk-done", True],
-        [["b"], ["a"], []],
+        [[None, "b"], ["a"], []],
         ["row row-haiku hidden", False, False],
         ["desk desk-running selected", "Bash", "opus · b"],
-        [0, "row row-opus hidden", "row row-sonnet hidden", "row row-haiku hidden"],
-        [1, True, "desk desk-boss boss-asking clickable", "bubble bubble-boss",
+        [0, "row row-opus", "row row-sonnet hidden", "row row-haiku hidden"],
+        [1, True, True, True, "desk desk-boss boss-asking clickable", "bubble bubble-boss",
          "has a question", "button"],
         [1, False, True],
-        ["desk desk-boss boss-idle", "bubble bubble-boss hidden", False],
+        ["desk desk-boss boss-idle clickable", "bubble bubble-boss hidden", True],
     ]  # fmt: skip
 
 
@@ -966,8 +978,8 @@ def test_chat_desks_and_handoff(tmp_path):
     script = (
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null;\n"
-        + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
-        + "var chatDesks = {}, lastHandoff = null;\n"
+        + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
+        + "var chatTier = null, chatDesks = {}, lastHandoff = null;\n"
         + "function focusComposer() {}\n"
         + _chat_section(text)
         + _classroom_section(text)
@@ -978,7 +990,7 @@ def test_chat_desks_and_handoff(tmp_path):
     assert out == [
         [1, 0, "row row-sonnet hidden"],
         [["desk-chat-haiku", "desk desk-chat chat-free", free, "", "haiku · chat"], "button",
-         "Chat with haiku", 0, 2, "row row-sonnet", "row row-opus hidden"],
+         "Chat with haiku", 0, 2, "row row-sonnet", "row row-opus"],
         [True,
          ["desk-chat-haiku", "desk desk-chat chat-working", "bubble bubble-chat",
           "Edit: notes.md", "haiku · chat"],
@@ -1222,3 +1234,83 @@ def test_back_buttons_and_opus_desk_lead_to_the_right_panel(tmp_path):
     ]  # fmt: skip
     back = "byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });"
     assert back in text
+
+
+# ---------------------------------------------------------------- the Orchestrator and Opus desks
+
+
+def test_orchestrator_desk_css():
+    text = _text()
+    for rule in [
+        r"\.desk-orch \{ cursor: pointer; \}", r"\.desk-orch \.worker \{ display: block; \}",
+        r"\.orch-idle \.desk-top \{", r"\.orch-routing \.desk-top \{",
+        r"\.orch-failed \.desk-top \{",
+        r"\.orch-routing \.mark::before \{[^}]*animation: think ", r"\.bubble-orch \{",
+    ]:  # fmt: skip
+        assert re.search(rule, text), rule
+
+
+DESKS_SCENARIO = """
+var selected = [];
+function selectTask(id) { selected.push(id); }
+function info(d) { return [d.className, d.children[0].className, d.children[0].text]; }
+function opusRow() {
+  return nodes['desks-opus'].children.map(function (d) { return d.id || d.attrs['data-task']; });
+}
+var out = [];
+renderOffice();
+var orch = nodes.teacher.children[0];
+out.push([nodes.teacher.children.length, orch.id, orch.children[4].text, orch.attrs.role,
+  orch.attrs.title, orch.tabIndex, info(orch), opusRow(), bossNode.children[4].text]);
+office = {state: 'idle', orchestrator: {state: 'routing', progress: [], holder: null}};
+renderOffice();
+out.push(info(orch));
+office.orchestrator.progress = ['Read: README.md', 'Grep: TODO'];
+renderOffice();
+out.push(info(orch));
+office.orchestrator = {state: 'idle', progress: [], holder: 'sonnet'};
+renderOffice();
+out.push(info(orch));
+office.orchestrator = {state: 'failed', progress: [], holder: 'sonnet'};
+renderOffice();
+out.push([info(orch), nodes.teacher.children[0] === orch, nodes.teacher.children.length]);
+orch.on.click();
+orch.on.keydown({key: 'Enter', preventDefault: function () {}});
+out.push(selected);
+runView = {tasks: [{task_id: 'x', tier: 'opus', status: 'running', steps: []}]};
+renderOffice();
+out.push(opusRow());
+nodes['desks-opus'].appendChild(bossNode);
+out.push(opusRow());
+renderOffice();
+out.push([opusRow(), nodes['row-opus'].className]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_orchestrator_desk_and_opus_desk(tmp_path):
+    text = _text()
+    script = (
+        _page_helpers(text)
+        + "var office = null, interactive = true, runView = null;\n"
+        + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
+        + "var chatTier = null, chatDesks = {}, lastHandoff = null;\n"
+        + "function focusComposer() {}\n"
+        + _chat_section(text)
+        + _classroom_section(text)
+        + DESKS_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        [1, "desk-orch", "Orchestrator", "button", "Talk to the Orchestrator", 0,
+         ["desk desk-orch orch-idle", "bubble bubble-orch hidden", ""], ["desk-opus"],
+         "opus · agent"],
+        ["desk desk-orch orch-routing", "bubble bubble-orch", "routing…"],
+        ["desk desk-orch orch-routing", "bubble bubble-orch", "Grep: TODO"],
+        ["desk desk-orch orch-idle", "bubble bubble-orch", "→ sonnet"],
+        [["desk desk-orch orch-failed", "bubble bubble-orch", "failed"], True, 1],
+        [None, None],
+        ["desk-opus", "x"],
+        ["x", "desk-opus"],
+        [["desk-opus", "x"], "row row-opus"],
+    ]  # fmt: skip

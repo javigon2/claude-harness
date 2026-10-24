@@ -86,6 +86,14 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .boss-interrupted .desk-top { border-color: #d97706; background: #fed7aa; }
 .boss-terminal .desk-top { border-color: #7c3aed; background: #ede9fe; }
 .bubble-boss { border-color: #374151; }
+.desk-orch { cursor: pointer; }
+.desk-orch .worker { display: block; }
+.desk-orch .worker::before, .desk-orch .worker::after { background: #1f2937; }
+.orch-idle .desk-top { border-color: #374151; background: #d1d5db; }
+.orch-routing .desk-top { border-color: #2563eb; background: #dbeafe; }
+.orch-failed .desk-top { border-color: #dc2626; background: #fecaca; }
+.orch-routing .mark::before { content: "\2022\2022\2022"; color: #2563eb; animation: think 1.2s ease-in-out infinite; }
+.bubble-orch { border-color: #374151; }
 .desk-chat { cursor: pointer; }
 .chat-working .worker, .chat-waiting .worker { display: block; }
 .chat-working .worker { animation: type 0.7s ease-in-out infinite; }
@@ -290,7 +298,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var lastAutoRun = null, autoInit = false;
   var shownSession = null, shownCount = 0;
   var forcePrompt = false, lastState = null;
-  var deskNodes = {}, bossNode = null, selectedTask = null;
+  var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
@@ -343,7 +351,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return td;
   }
 
-  // ---- the classroom: Opus at the teacher's desk, workers in rows by tier
+  // ---- the classroom: the Orchestrator at the teacher's desk, the rest in rows by tier
   function bossText(o) {
     var st = o.state;
     if (st === 'busy') return (o.progress && o.progress.length) ? o.progress[o.progress.length - 1] : 'thinking\u2026';
@@ -370,33 +378,67 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function bossDesk() {
-    // built once inside #teacher, then updated in place
+    // the Opus agent desk: built once, kept first in the opus row, then updated in place
     if (!bossNode) {
       bossNode = el('div', 'desk desk-boss');
+      bossNode.id = 'desk-opus';
       bossNode.appendChild(el('div', 'bubble bubble-boss hidden'));
       bossNode.appendChild(el('div', 'mark'));
       bossNode.appendChild(el('div', 'worker'));
       bossNode.appendChild(el('div', 'desk-top'));
-      bossNode.appendChild(el('div', 'desk-label', 'Opus'));
-      bossNode.addEventListener('click', bossClick);
-      bossNode.addEventListener('keydown', onKey(bossClick));
-      document.getElementById('teacher').appendChild(bossNode);
-    }
-    var o = office || {state: 'idle', can_click: false};
-    var clickable = interactive && !!o.can_click;
-    setClass(bossNode, 'desk desk-boss boss-' + str(o.state) + (clickable ? ' clickable' : ''));
-    var text = bossText(o);
-    setClass(bossNode.children[0], 'bubble bubble-boss' + (text ? '' : ' hidden'));
-    setText(bossNode.children[0], text);
-    if (clickable) {
+      bossNode.appendChild(el('div', 'desk-label', 'opus · agent'));
       bossNode.setAttribute('role', 'button');
       bossNode.setAttribute('title', 'Talk to Opus');
       bossNode.tabIndex = 0;
-    } else {
-      bossNode.removeAttribute('role');
-      bossNode.removeAttribute('title');
-      bossNode.tabIndex = -1;
+      bossNode.addEventListener('click', bossClick);
+      bossNode.addEventListener('keydown', onKey(bossClick));
     }
+    var box = document.getElementById('desks-opus');
+    if (box.children[0] !== bossNode) box.insertBefore(bossNode, box.children[0] || null);
+    var o = office || {state: 'idle'};
+    setClass(bossNode, 'desk desk-boss boss-' + str(o.state) + ' clickable');
+    var text = bossText(o);
+    setClass(bossNode.children[0], 'bubble bubble-boss' + (text ? '' : ' hidden'));
+    setText(bossNode.children[0], text);
+  }
+
+  function orchText(v) {
+    // the Orchestrator's bubble: its last step while routing, else who holds the work
+    if (!v) return '';
+    if (v.state === 'routing') {
+      var p = Array.isArray(v.progress) ? v.progress : [];
+      return p.length ? String(p[p.length - 1]) : 'routing\u2026';
+    }
+    if (v.state === 'failed') return 'failed';
+    return v.holder ? '\u2192 ' + v.holder : '';
+  }
+
+  function orchClick() {
+    selectTask(null);
+  }
+
+  function orchDesk() {
+    // built once inside #teacher, then updated in place
+    if (!orchNode) {
+      orchNode = el('div', 'desk desk-orch');
+      orchNode.id = 'desk-orch';
+      orchNode.appendChild(el('div', 'bubble bubble-orch hidden'));
+      orchNode.appendChild(el('div', 'mark'));
+      orchNode.appendChild(el('div', 'worker'));
+      orchNode.appendChild(el('div', 'desk-top'));
+      orchNode.appendChild(el('div', 'desk-label', 'Orchestrator'));
+      orchNode.setAttribute('role', 'button');
+      orchNode.setAttribute('title', 'Talk to the Orchestrator');
+      orchNode.tabIndex = 0;
+      orchNode.addEventListener('click', orchClick);
+      orchNode.addEventListener('keydown', onKey(orchClick));
+      document.getElementById('teacher').appendChild(orchNode);
+    }
+    var v = office ? office.orchestrator : null;
+    setClass(orchNode, 'desk desk-orch orch-' + (v && v.state ? v.state : 'idle'));
+    var text = orchText(v);
+    setClass(orchNode.children[0], 'bubble bubble-orch' + (text ? '' : ' hidden'));
+    setText(orchNode.children[0], text);
   }
 
   function taskDesk(t) {
@@ -477,6 +519,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 
   function renderOffice() {
     // desks are keyed by task id and updated in place, so animations play once
+    orchDesk();
     bossDesk();
     var tasks = runView ? (runView.tasks || []) : [];
     var seen = {};
