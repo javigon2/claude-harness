@@ -51,6 +51,12 @@ from harness.state import STATE_FILE, StateError, latest_run, load_state, new_ru
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
+from harness.ui.orchestrator import (
+    HandoffRefused,
+    Orchestrator,
+    OrchestratorView,
+    orchestrator_view_from_log,
+)
 from harness.ui.view import IDLE_MINUTES, list_runs
 from harness.worker import ProgressFn
 
@@ -108,7 +114,7 @@ class TranscriptEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["user", "opus"]
+    role: Literal["user", "opus", "orchestrator"]
     ts: str
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
@@ -141,6 +147,8 @@ class OfficeView(BaseModel):
     quick_plan: str | None = None
     resumable_run: str | None = None
     handoff_chat: str | None = None
+    orchestrator: OrchestratorView | None = None
+    total_cost_usd: float = 0.0
 
 
 # ---------------------------------------------------------------- small helpers
@@ -291,10 +299,15 @@ def _terminal_live(sess: list[Event]) -> bool:
 def transcript_of(sess: list[Event]) -> list[TranscriptEntry]:
     """The conversation of one planner session, in log order: each `planner_user` event
     becomes a "user" entry and each `planner_reply` an "opus" entry, when its `text` is a
-    non-empty str. Other events are skipped. Never raises."""
+    non-empty str. Other events are skipped. In an auto-routed session (planner_started
+    route "auto") every reply before the first planner_triage is the old Sonnet triage's and
+    gets role "orchestrator". Never raises."""
     out: list[TranscriptEntry] = []
     try:
+        auto = bool(sess) and sess[0].payload.get("route") == "auto"
         for e in sess:
+            if e.type == "planner_triage":
+                auto = False
             text = e.payload.get("text")
             if not isinstance(text, str) or not text:
                 continue
@@ -303,7 +316,10 @@ def transcript_of(sess: list[Event]) -> list[TranscriptEntry]:
             elif e.type == "planner_reply":
                 out.append(
                     TranscriptEntry(
-                        role="opus", ts=e.ts.isoformat(), text=text, blocks=parse_markdown(text)
+                        role="orchestrator" if auto else "opus",
+                        ts=e.ts.isoformat(),
+                        text=text,
+                        blocks=parse_markdown(text),
                     )
                 )
     except Exception:
@@ -377,6 +393,13 @@ def office_view_from_log(repo: Path, *, interactive: bool = False) -> OfficeView
             state = _live_office_state(sess, fields)
     fields["transcript"] = transcript_of(sess)
     fields["chats"] = chats_from_log(repo)
+    orch = orchestrator_view_from_log(repo)
+    fields["orchestrator"] = orch
+    fields["total_cost_usd"] = (
+        orch.cost_usd
+        + float(fields.get("cost_usd", 0.0))
+        + sum(c.cost_usd for c in fields["chats"])
+    )
     fields["state"] = state
     fields["can_click"] = interactive and state != "terminal"
     if state in ("idle", "failed", "interrupted"):
@@ -422,6 +445,7 @@ class Office:
     `triage_session_factory` does the same for the triage session (SdkTriageSession).
     `launcher` replaces subprocess.Popen when a run is started (tests capture argv).
     `chats` is the ChatManager; `chat_session_factory` overrides its sessions.
+    `orchestrator` is the Orchestrator; `orchestrator_session_factory` overrides its session.
     With `auto_advance` (default) a stage-N run that ends with every task done starts the
     planning of stage N+1 by itself; `resume_run` resumes a stopped run."""
 
@@ -439,6 +463,7 @@ class Office:
         chat_session_factory: ChatSessionFactory | None = None,
         clock: Callable[[], float] = time.time,
         auto_advance: bool = True,
+        orchestrator_session_factory: SessionFactory | None = None,
     ) -> None:
         self.auto_advance = auto_advance
         self._resume_stamp: int | None = None
@@ -503,6 +528,14 @@ class Office:
             session_factory=chat_session_factory,
             busy_fn=self._chat_block,
         )
+        self.orchestrator = Orchestrator(
+            self.repo,
+            self.chats,
+            _OfficeOpusDesk(self),
+            fake=fake,
+            fake_delay=fake_delay,
+            session_factory=orchestrator_session_factory,
+        )
 
     def _chat_block(self) -> str | None:
         """busy_fn for the chats: a sentence while chats must not edit the repo, else None.
@@ -542,6 +575,7 @@ class Office:
         )
         self._owns_lock_file = True
         self._restore()
+        self.orchestrator.restore()
 
     def _restore(self) -> None:
         """Rebuild the boss from the planner log after a restart. A session that never ended
@@ -570,6 +604,7 @@ class Office:
         joined for up to JOIN_TIMEOUT_S), never touch a launched run, remove the lock file.
         Also closes every open chat.
         Returns the id of a run that is still going, or None."""
+        self.orchestrator.close()
         self.chats.close()
         self._stopping.set()
         thread = self._thread
@@ -664,9 +699,13 @@ class Office:
                 handoff_chat=self._handoff_chat,
                 **_plan_fields(self.repo),
             )
+        chats = self.chats.views()
+        orch = self.orchestrator.view()
         return view.model_copy(
             update={
-                "chats": self.chats.views(),
+                "chats": chats,
+                "orchestrator": orch,
+                "total_cost_usd": orch.cost_usd + view.cost_usd + sum(c.cost_usd for c in chats),
                 "resumable_run": resumable_run_of(self.repo)
                 if view.state in ("idle", "failed", "interrupted")
                 else None,
@@ -674,6 +713,12 @@ class Office:
         )
 
     # ------------------------------------------------------------ guards
+
+    def boss_status(self) -> tuple[str | None, State]:
+        """(session id, state) of the planner session right now, under the office lock. Never
+        calls the Orchestrator, so the Orchestrator may call it while holding its own lock."""
+        with self._lock:
+            return self._session_id, self._state
 
     def _guard_idle(self) -> None:
         """Raise OfficeConflict unless a new planner session may start. Caller holds the lock."""
@@ -1205,3 +1250,32 @@ class Office:
             return load_state(run_dir(self.repo, run_id)).finished
         except (StateError, OSError, ValueError):
             return False
+
+
+class _OfficeOpusDesk:
+    """The Orchestrator's OpusDesk: the office's own planner session."""
+
+    def __init__(self, office: Office) -> None:
+        self._office = office
+
+    def start(self, text: str, plan: Literal["quick", "project"]) -> str:
+        try:
+            self._office.start(description=text, route=plan)
+        except OfficeConflict as err:
+            raise HandoffRefused(str(err)) from None
+        session_id, _state = self._office.boss_status()
+        return session_id or ""
+
+    def message(self, text: str) -> None:
+        try:
+            self._office.message(text)
+        except OfficeConflict as err:
+            raise HandoffRefused(str(err)) from None
+
+    def live(self, session_id: str) -> bool:
+        current, state = self._office.boss_status()
+        return current == session_id and state in ("busy", "asking", "ready", "staging")
+
+    def waiting(self, session_id: str) -> bool:
+        current, state = self._office.boss_status()
+        return current == session_id and state in ("asking", "ready")
