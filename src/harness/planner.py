@@ -24,7 +24,7 @@ from claude_agent_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from harness.config import MODEL_IDS
+from harness.config import MODEL_IDS, Tier
 from harness.models import Usage
 from harness.plan import PlanError, load_plan
 from harness.worker import (
@@ -136,6 +136,43 @@ def parse_triage(text: str) -> Triage | None:
         return None
     try:
         return Triage.model_validate_json(blocks[-1])
+    except ValueError:
+        return None
+
+
+ORCHESTRATOR_PROMPT = (
+    "Route this message in the harness office; never answer it or edit a file. "
+    "Target repo: {repo}\n"
+    "Pick who takes the work by difficulty: haiku for a mechanical edit, sonnet for an "
+    "ordinary change in a short chat, opus for hard, multi-file or multi-stage work. Opus "
+    "plans it: plan quick for one stage of work orders, project for several stages or open "
+    "questions. Read only what you need.\n"
+    "Holder: {holder}. A follow-up stays with the holder unless it is clearly beyond the "
+    "holder; never pick a lower tier than the holder.\n"
+    'End with a ```json block: {{"to": "haiku" | "sonnet" | "opus", '
+    '"plan": "quick" | "project", "reason": "<one line>"}}.\n\n'
+    "Conversation so far:\n{tail}\n\nMessage:\n\n{text}"
+)
+
+
+class Routing(BaseModel):
+    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    to: Tier
+    plan: Literal["quick", "project"] = "project"
+    reason: str = ""
+
+
+def parse_routing(text: str) -> Routing | None:
+    """The last ```json block of `text` as a Routing; None if there is no block or it is not
+    valid JSON or not a valid Routing."""
+    blocks = _JSON_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    try:
+        return Routing.model_validate_json(blocks[-1])
     except ValueError:
         return None
 

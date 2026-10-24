@@ -190,6 +190,8 @@ def demo_stage_plan(stage: int) -> dict[str, Any]:
 class DemoPlannerSession:
     """A PlannerSession with scripted behaviour chosen by the message:
 
+    - the Orchestrator prompt: a JSON routing block: to = the message's first word when it
+      is haiku, sonnet or opus, else sonnet; plan quick when "quick" is one of its words.
     - the triage prompt: a JSON route block: direct or quick when the request starts with
       that word, else project; tier haiku.
     - the quick prompt: a quick plan (demo_stage_plan(1), stage "quick") in the directory
@@ -228,6 +230,8 @@ class DemoPlannerSession:
     async def send(self, text: str) -> PlannerTurn:
         self.sent.append(text)
         plan = self.repo / PROJECT_PLAN_FILE
+        if text.startswith("Route this message in the harness office;"):
+            return await self._route(text)
         if text.startswith("Decide how much planning this request needs."):
             return await self._triage(text)
         if "plan-stage skill in quick mode" in text:
@@ -265,6 +269,17 @@ class DemoPlannerSession:
         await self._step("Read", "README.md")
         block = json.dumps({"route": route, "tier": "haiku", "reason": f"demo triage: {route}"})
         return self._turn(f"Routing this as {route}.\n\n```json\n{block}\n```")
+
+    async def _route(self, text: str) -> PlannerTurn:
+        """Route by the message's first word: haiku, sonnet or opus, else sonnet; plan quick
+        when "quick" is one of its words, else project."""
+        message = text.rsplit("Message:\n\n", 1)[-1]
+        words = message.lower().split()
+        to = words[0] if words and words[0] in ("haiku", "sonnet", "opus") else "sonnet"
+        plan = "quick" if "quick" in words else "project"
+        await self._step("Read", "README.md")
+        block = json.dumps({"to": to, "plan": plan, "reason": f"demo routing: {to}"})
+        return self._turn(f"Routing to {to}.\n\n```json\n{block}\n```")
 
     async def _write_quick(self, text: str) -> PlannerTurn:
         """Write demo_stage_plan(1), stage "quick", plus a plan.md into the prompt's dir."""
