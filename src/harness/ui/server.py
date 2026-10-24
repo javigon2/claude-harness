@@ -1,9 +1,10 @@
 """The office's HTTP server: loopback only, stdlib only.
 
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
-POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}) and the run
-POST endpoint (POST /api/run/resume), each behind the Host, Origin and token checks, a JSON-only
-body of at most 64 KB, and a strict per-route body schema."""
+POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), the run
+POST endpoint (POST /api/run/resume) and the Orchestrator POST endpoints
+(POST /api/orchestrator/{message,new}), each behind the Host, Origin and token checks, a
+JSON-only body of at most 64 KB, and a strict per-route body schema."""
 
 import json
 import os
@@ -26,6 +27,7 @@ from harness.ui.office import (
     office_view_from_log,
     status_of,
 )
+from harness.ui.orchestrator import OrchestratorConflict
 from harness.ui.view import build_view, list_runs
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
@@ -42,6 +44,7 @@ _MODE_META = '<meta name="harness-mode" content="read-only">'
 POST_ROUTES = ("start", "message", "implement", "next-stage")
 CHAT_ROUTES = ("start", "message", "close")
 RUN_ROUTES = ("resume",)
+ORCH_ROUTES = ("message", "new")
 ROUTE_CHOICES = ("auto", "quick", "project")
 
 
@@ -130,6 +133,21 @@ def _check_chat_body(route: str, body: object) -> dict:
     return body
 
 
+def _check_orch_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
+    keys: message {text}; new {}."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route == "message":
+        if keys != {"text"}:
+            raise _BadBody("send exactly: text")
+        _text_field(body, "text")
+    elif keys:
+        raise _BadBody("this endpoint takes no fields")
+    return body
+
+
 class _Server(ThreadingHTTPServer):
     """ThreadingHTTPServer with daemon request threads and a `stopping` event that
     shutdown() sets first, so open SSE streams end."""
@@ -176,9 +194,10 @@ def make_handler(
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
     `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
     `office` every other method answers 405 (read-only). With one, POST
-    `/api/planner/{start,message,implement,next-stage}`, POST `/api/chat/{start,message,close}`
-    and POST `/api/run/resume` are served (`token` guards them; one is made if not given)
-    and every other method still answers 405. Request logging is silenced."""
+    `/api/planner/{start,message,implement,next-stage}`, POST `/api/chat/{start,message,close}`,
+    POST `/api/run/resume` and POST `/api/orchestrator/{message,new}` are served (`token`
+    guards them; one is made if not given) and every other method still answers 405. Request
+    logging is silenced."""
     interactive = office is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
@@ -274,6 +293,9 @@ def make_handler(
             elif path.startswith("/api/run/"):
                 kind, route = "run", path[len("/api/run/") :]
                 known = route in RUN_ROUTES
+            elif path.startswith("/api/orchestrator/"):
+                kind, route = "orchestrator", path[len("/api/orchestrator/") :]
+                known = route in ORCH_ROUTES
             else:
                 known = False
             if not known:
@@ -309,6 +331,8 @@ def make_handler(
                 parsed = json.loads(raw.decode("utf-8"))
                 if kind == "chat":
                     body = _check_chat_body(route, parsed)
+                elif kind == "orchestrator":
+                    body = _check_orch_body(route, parsed)
                 else:
                     body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
@@ -329,6 +353,11 @@ def make_handler(
                         office.chats.close_chat(body["chat_id"])
                 elif kind == "run":
                     office.resume_run()
+                elif kind == "orchestrator":
+                    if route == "message":
+                        office.orchestrator.message(body["text"])
+                    else:
+                        office.orchestrator.new_thread()
                 elif route == "start":
                     office.start(
                         description=body.get("description"),
@@ -341,7 +370,7 @@ def make_handler(
                     office.implement()
                 else:
                     office.next_stage()
-            except (OfficeConflict, ChatConflict) as err:
+            except (OfficeConflict, ChatConflict, OrchestratorConflict) as err:
                 self._json(409, {"error": str(err)})
                 return
             self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
