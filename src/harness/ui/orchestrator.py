@@ -451,7 +451,18 @@ class Orchestrator:
 
     def new_thread(self) -> None:
         """Start over ("New request")."""
-        raise NotImplementedError("s1-orch-lifecycle")
+        with self._lock:
+            if self._state == "routing":
+                raise OrchestratorConflict(ROUTING_BUSY)
+            if self._log is not None:
+                self._emit("orchestrator_closed", {"reason": "new request"})
+            self._thread_id = None
+            self._log = None
+            self._target = None
+            self._pid_logged = False
+            self._state = "idle"
+            self._error = None
+            self._progress = []
 
     def view(self) -> OrchestratorView:
         """The log view with state, error, progress and holder from memory."""
@@ -471,7 +482,31 @@ class Orchestrator:
 
     def restore(self) -> None:
         """After a restart: close an interrupted turn in the log once, then load the thread."""
-        raise NotImplementedError("s1-orch-lifecycle")
+        events = [e for e in read_planner_events(self.repo) if e.run_id.startswith("orch-")]
+        started: Event | None = None
+        for e in events:
+            if e.type == "orchestrator_started":
+                started = e
+        if started is not None:
+            thread = [e for e in events if e.run_id == started.run_id]
+            if thread[-1].type == "orchestrator_user" and not _pid_alive(
+                started.payload.get("pid")
+            ):
+                PlannerLog(self.repo, started.run_id).emit(
+                    "orchestrator_failed",
+                    {"reason": "interrupted: server restarted", "cost_usd": 0.0},
+                )
+        v = orchestrator_view_from_log(self.repo)
+        with self._lock:
+            self._thread_id = v.thread_id
+            self._log = PlannerLog(self.repo, v.thread_id) if v.thread_id else None
+            self._pid_logged = False
+            self._state = "failed" if v.state == "failed" else "idle"
+            self._error = v.error if v.state == "failed" else None
+            if v.holder and v.holder_id:
+                self._target = (v.holder, "opus" if v.holder == "opus" else "chat", v.holder_id)
+            else:
+                self._target = None
 
     def close(self) -> None:
         """Server shutdown: interrupt a turn in progress, join the routing thread."""
