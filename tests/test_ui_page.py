@@ -538,7 +538,7 @@ renderOffice();
 out.push([nodes.teacher.children.length, bossNode === boss, boss.className,
   boss.children[0].className, boss.children[0].text, boss.attrs.role]);
 boss.on.click();
-out.push(focused);
+out.push([focused, hidden.convo, hidden['orch-view']]);
 office = {state: 'idle', can_click: false};
 renderOffice();
 out.push([boss.className, boss.children[0].className, 'role' in boss.attrs]);
@@ -556,8 +556,9 @@ def test_classroom_keeps_desk_nodes(tmp_path):
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null, focused = 0;\n"
         + "var deskNodes = {}, bossNode = null, selectedTask = null, chatTier = null;\n"
-        + "var chatDesks = {};\n"
+        + "var chatDesks = {}, tlTask = null, hidden = {};\n"
         + "function focusComposer() { focused++; }\n"
+        + "function setHidden(id, hide) { hidden[id] = hide; }\n"
         + _chat_section(text)
         + section
         + CLASSROOM_SCENARIO
@@ -577,7 +578,7 @@ def test_classroom_keeps_desk_nodes(tmp_path):
         [0, "row row-opus hidden", "row row-sonnet hidden", "row row-haiku hidden"],
         [1, True, "desk desk-boss boss-asking clickable", "bubble bubble-boss",
          "has a question", "button"],
-        1,
+        [1, False, True],
         ["desk desk-boss boss-idle", "bubble bubble-boss hidden", False],
     ]  # fmt: skip
 
@@ -589,7 +590,7 @@ def test_timeline_markup():
     assert '<div id="timeline-view" class="hidden">' in text
     assert text.index('id="convo"') < text.index('id="timeline-view"') < text.index('id="right"')
     for word in [
-        "Back to Opus",
+        "Back to Orchestrator",
         "'No steps yet'",
         "step-attempt",
         "renderTimeline();",
@@ -885,7 +886,8 @@ def test_chat_panel_renders_in_place(tmp_path):
     out = json.loads(_run_node(tmp_path, script)[-1])
     agent = "msg msg-agent|haiku"
     assert out == [
-        [{"convo": True, "timeline-view": True, "chat-view": False, "btn-chat-close": True},
+        [{"orch-view": True, "convo": True, "timeline-view": True, "chat-view": False,
+          "btn-chat-close": True},
          None, "haiku", None, 1, "haiku · new chat", [], True, ""],
         ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False, ""],
         ["haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
@@ -1049,3 +1051,174 @@ def test_worker_chat_tier_seed_and_button(tmp_path):
         ["", "Chat with sonnet"],
         ["hidden", "Chat with haiku"],
     ]  # fmt: skip
+
+
+# ---------------------------------------------------------------- the Orchestrator panel
+
+
+def test_orchestrator_panel_markup():
+    text = _text()
+    ids = ["left", "orch-view", "orch-cost", "orch-transcript", "orch-line", "convo",
+           "btn-convo-back", "office-title", "timeline-view", "chat-view", "right"]  # fmt: skip
+    places = [text.index(f'id="{id_}"') for id_ in ids]
+    assert places == sorted(places)
+    assert '<div id="orch-view">' in text
+    assert '<div id="convo" class="hidden">' in text
+    assert '<button id="btn-convo-back" type="button">Back to Orchestrator</button>' in text
+    assert text.count(">Back to Orchestrator</button>") == 3
+    assert "Back to Opus" not in text
+    assert text.index('id="tiers"') < text.index('id="office-total"') < text.index("</header>")
+    assert re.search(r"#orch-line:empty \{ display: none; \}", text)
+    assert re.search(r"\.msg-orch \{", text)
+    for word in [
+        "['orch-view', 'convo', 'timeline-view', 'chat-view']",
+        "showPanel(selectedTask === null ? 'orch-view' : 'timeline-view')",
+        "renderOrch(o.orchestrator);",
+        "byId('office-total').textContent = totalText(o);",
+        "(empty && !interactive) ? 'hidden' : ''",
+    ]:
+        assert word in text, word
+
+
+def test_orchestrator_texts(tmp_path):
+    text = _text()
+    money = re.search(r"  function money\(x\).*", text)
+    string = re.search(r"  function str\(x\).*", text)
+    assert money and string
+    views = [
+        {"cost_usd": 0.0123, "holder": "haiku", "holder_id": "chat-1"},
+        {"cost_usd": 0, "holder": None, "holder_id": None},
+        {"holder": "opus"},
+    ]
+    offices = [{"total_cost_usd": 0.5}, {"total_cost_usd": 0}, {}]
+    script = (
+        money.group(0) + "\n" + string.group(0) + "\n"
+        + _functions(text, "orchCostText", "totalText", "orchLine")
+        + "var V = " + json.dumps(views) + ", O = " + json.dumps(offices) + ";\n"
+        + "console.log(JSON.stringify([V.map(orchCostText), O.map(totalText),"
+        + " V.map(orchLine), orchCostText(null), totalText(null), orchLine(null)]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        ["orchestrator $0.0123", "", ""],
+        ["office $0.5000", "", ""],
+        ["With haiku (chat-1)", "", "With opus (?)"],
+        "", "", "",
+    ]  # fmt: skip
+
+
+def test_orchestrator_message_nodes(tmp_path):
+    routed = {"role": "orchestrator", "who": "Orchestrator", "text": "Sent to haiku: x",
+              "blocks": parse_markdown("Sent to haiku: x")}  # fmt: skip
+    reply = {"role": "agent", "who": "haiku", "text": "Done", "blocks": parse_markdown("Done")}
+    script = (
+        _transcript_script()
+        + f"console.log(JSON.stringify(ser(msgNode({json.dumps(routed)}))));\n"
+        + f"console.log(JSON.stringify(ser(msgNode({json.dumps(reply)}, 'haiku'))));\n"
+    )
+    lines = _run_node(tmp_path, script)
+    assert json.loads(lines[0]) == (
+        '<li class="msg msg-orch"><div class="msg-who">Orchestrator</div>'
+        '<div class="md"><p>Sent to haiku: x</p></div></li>'
+    )
+    assert json.loads(lines[1]) == (
+        '<li class="msg msg-agent"><div class="msg-who">haiku</div>'
+        '<div class="md"><p>Done</p></div></li>'
+    )
+
+
+ORCH_SCENARIO = """
+function byId(id) { return document.getElementById(id); }
+var left = byId('left');
+left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 370;
+function items() {
+  return byId('orch-transcript').children.map(function (li) {
+    return li.className + '|' + li.children[0].text;
+  });
+}
+var U = {role: 'user', who: 'You', ts: 't1', text: 'haiku fix it', blocks: []};
+var R = {role: 'orchestrator', who: 'Orchestrator', ts: 't2', text: 'Sent to haiku: small',
+  blocks: [{type: 'paragraph', inline: [{t: 'text', text: 'Sent to haiku: small'}]}]};
+var A = {role: 'agent', who: 'haiku', ts: 't3', text: 'Done',
+  blocks: [{type: 'paragraph', inline: [{t: 'text', text: 'Done'}]}]};
+var out = [];
+renderOrch(null);
+out.push([items(), byId('orch-cost').text, byId('orch-line').text]);
+renderOrch({thread_id: 'orch-1', transcript: [U, R], holder: null, cost_usd: 0.01});
+var first = byId('orch-transcript').children[0];
+out.push([items(), byId('orch-cost').text, byId('orch-line').text, left.scrollTop]);
+left.scrollTop = 0;
+renderOrch({thread_id: 'orch-1', transcript: [U, R, A], holder: 'haiku', holder_id: 'c1',
+  cost_usd: 0.01});
+out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-line').text,
+  left.scrollTop]);
+renderOrch({thread_id: 'orch-2', transcript: [U], holder: null, cost_usd: 0.02});
+out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-cost').text]);
+renderOrch({thread_id: null, transcript: [], cost_usd: 0.02});
+out.push([items(), byId('orch-line').text]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_orchestrator_thread_renders_in_place(tmp_path):
+    text = _text()
+    money = re.search(r"  function money\(x\).*", text)
+    msg = re.search(r"  function msgNode\(.*?\n  \}", text, re.S)
+    assert money and msg
+    start = text.index("  // ---- markdown block tree")
+    end = text.index("  function fill(")
+    orch_start = text.index("  // ---- the Orchestrator's thread")
+    orch_end = text.index("  // ---- a worker's timeline")
+    script = (
+        _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
+        + "var orchShown = null, orchCount = 0;\n"
+        + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
+        + text[orch_start:orch_end] + ORCH_SCENARIO
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    you, routed = "msg msg-user|You", "msg msg-orch|Orchestrator"
+    assert out == [
+        [[], "", ""],
+        [[you, routed], "orchestrator $0.0100", "", 500],
+        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0],
+        [[you], False, "orchestrator $0.0200"],
+        [[], ""],
+    ]  # fmt: skip
+
+
+def test_back_buttons_and_opus_desk_lead_to_the_right_panel(tmp_path):
+    text = _text()
+    script = (
+        _page_helpers(text)
+        + "var office = {can_click: true}, selectedTask = 'a', chatTier = 'haiku';\n"
+        + "var tlTask = 'a', hidden = {}, focused = 0, rendered = 0, timeline = 0;\n"
+        + "function setHidden(id, hide) { hidden[id] = hide; }\n"
+        + "function renderOffice() { rendered++; }\n"
+        + "function renderTimeline() { timeline++; }\n"
+        + "function focusComposer() { focused++; }\n"
+        + _functions(text, "selectTask")
+        + _chat_section(text)
+        + "var out = [];\n"
+        + "showOpus();\n"
+        + "out.push([JSON.parse(JSON.stringify(hidden)), selectedTask, chatTier, tlTask,"
+        + " focused]);\n"
+        + "selectTask('b');\n"
+        + "out.push([hidden['timeline-view'], hidden['orch-view']]);\n"
+        + "selectTask(null);\n"
+        + "out.push([JSON.parse(JSON.stringify(hidden)), selectedTask]);\n"
+        + "office = {can_click: false};\n"
+        + "showOpus();\n"
+        + "out.push([hidden.convo, focused]);\n"
+        + "console.log(JSON.stringify(out));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    shown = {"orch-view": False, "convo": True, "timeline-view": True, "chat-view": True}
+    assert out == [
+        [{"orch-view": True, "convo": False, "timeline-view": True, "chat-view": True},
+         None, None, None, 1],
+        [False, True],
+        [shown, None],
+        [False, 1],
+    ]  # fmt: skip
+    back = "byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });"
+    assert back in text

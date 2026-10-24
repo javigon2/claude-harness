@@ -149,6 +149,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #chat-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #chat-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #chat-view button:disabled { cursor: default; opacity: 0.55; }
+#orch-transcript { list-style: none; padding: 0; margin: 0; }
+.msg-orch { background: #f9fafb; border-color: #d1d5db; }
+#orch-line { margin: 0 0 8px; }
+#orch-line:empty { display: none; }
+#office-total { font-weight: 600; }
+#btn-convo-back { font: inherit; padding: 2px 10px; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -162,12 +168,22 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="wave"></span>
   <span id="cost"></span>
   <span id="tiers"></span>
+  <span id="office-total"></span>
 </header>
 <div id="banner"></div>
 <main id="layout">
   <section id="left">
-    <div id="convo">
+    <div id="orch-view">
       <div class="convo-head">
+        <strong>Orchestrator</strong>
+        <span id="orch-cost" class="muted"></span>
+      </div>
+      <ol id="orch-transcript"></ol>
+      <p id="orch-line" class="muted"></p>
+    </div>
+    <div id="convo" class="hidden">
+      <div class="convo-head">
+        <button id="btn-convo-back" type="button">Back to Orchestrator</button>
         <strong id="office-title">Opus</strong>
         <span id="office-cost" class="muted"></span>
       </div>
@@ -215,7 +231,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
     <div id="timeline-view" class="hidden">
       <div class="convo-head">
-        <button id="btn-back-opus" type="button">Back to Opus</button>
+        <button id="btn-back-opus" type="button">Back to Orchestrator</button>
         <strong id="tl-title"></strong>
         <button id="btn-tl-chat" type="button" class="hidden">Chat</button>
       </div>
@@ -224,7 +240,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
     <div id="chat-view" class="hidden">
       <div class="convo-head">
-        <button id="btn-chat-back" type="button">Back to Opus</button>
+        <button id="btn-chat-back" type="button">Back to Orchestrator</button>
         <strong id="chat-title"></strong>
         <span id="chat-cost" class="muted"></span>
       </div>
@@ -278,6 +294,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
+  var orchShown = null, orchCount = 0;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -349,9 +366,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function bossClick() {
-    // back from a worker's timeline first; otherwise talk to Opus
-    if (selectedTask !== null || chatTier !== null) selectTask(null);
-    else if (interactive && office && office.can_click) focusComposer();
+    showOpus();
   }
 
   function bossDesk() {
@@ -490,11 +505,11 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function selectTask(id) {
-    // a task id shows its timeline in the left panel; null shows the conversation
+    // a task id shows its timeline in the left panel; null shows the Orchestrator
     selectedTask = (id === undefined) ? null : id;
     chatTier = null;
     tlTask = null;
-    showPanel(selectedTask === null ? 'convo' : 'timeline-view');
+    showPanel(selectedTask === null ? 'orch-view' : 'timeline-view');
     renderTimeline();
     renderOffice();
   }
@@ -582,10 +597,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 
   // ---- the conversation with Opus, appended in place
   function msgNode(entry, who) {
-    // `who` names a chat agent; without it the other side is Opus
-    var user = entry.role === 'user';
-    var li = el('li', 'msg ' + (user ? 'msg-user' : who ? 'msg-agent' : 'msg-opus'));
-    li.appendChild(el('div', 'msg-who', user ? 'You' : who || 'Opus'));
+    // `who` names a chat agent; without it the other side is Opus or the Orchestrator
+    var user = entry.role === 'user', orch = entry.role === 'orchestrator';
+    var li = el('li', 'msg ' + (user ? 'msg-user' : orch ? 'msg-orch' : who ? 'msg-agent' : 'msg-opus'));
+    li.appendChild(el('div', 'msg-who', user ? 'You' : orch ? 'Orchestrator' : who || 'Opus'));
     if (user) {
       li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
     } else {
@@ -610,6 +625,43 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
     for (var i = shownCount; i < entries.length; i++) list.appendChild(msgNode(entries[i]));
     shownCount = entries.length;
+    if (atBottom) left.scrollTop = left.scrollHeight;
+  }
+
+  // ---- the Orchestrator's thread, appended in place
+  function orchCostText(v) {
+    return v && v.cost_usd > 0 ? 'orchestrator ' + money(v.cost_usd) : '';
+  }
+
+  function totalText(o) {
+    return o && o.total_cost_usd > 0 ? 'office ' + money(o.total_cost_usd) : '';
+  }
+
+  function orchLine(v) {
+    // the agent that holds the work, if any
+    return v && v.holder ? 'With ' + v.holder + ' (' + str(v.holder_id) + ')' : '';
+  }
+
+  function renderOrch(v) {
+    var o = v || {};
+    byId('orch-cost').textContent = orchCostText(o);
+    byId('orch-line').textContent = orchLine(o);
+    var list = byId('orch-transcript');
+    var entries = Array.isArray(o.transcript) ? o.transcript : [];
+    var tid = o.thread_id || null;
+    if (tid !== orchShown || entries.length < orchCount) {
+      list.replaceChildren();
+      orchShown = tid;
+      orchCount = 0;
+    }
+    if (entries.length === orchCount) return;
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    for (var i = orchCount; i < entries.length; i++) {
+      var e = entries[i];
+      list.appendChild(msgNode(e, e.role === 'agent' ? str(e.who) : null));
+    }
+    orchCount = entries.length;
     if (atBottom) left.scrollTop = left.scrollHeight;
   }
 
@@ -858,8 +910,18 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 
   // ---- an agent chat in the left panel, appended in place
   function showPanel(name) {
-    // the left panel shows exactly one of the conversation, a timeline and a chat
-    ['convo', 'timeline-view', 'chat-view'].forEach(function (id) { setHidden(id, id !== name); });
+    // the left panel shows exactly one of the Orchestrator, Opus, a timeline and a chat
+    ['orch-view', 'convo', 'timeline-view', 'chat-view'].forEach(function (id) { setHidden(id, id !== name); });
+  }
+
+  function showOpus() {
+    // the Opus desk: the conversation with Opus in the left panel
+    selectedTask = null;
+    chatTier = null;
+    tlTask = null;
+    showPanel('convo');
+    renderOffice();
+    if (office && office.can_click) focusComposer();
   }
 
   function openChat(chats, tier) {
@@ -987,6 +1049,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     followHandoff();
     renderOffice();
     renderTranscript(o);
+    renderOrch(o.orchestrator);
+    byId('office-total').textContent = totalText(o);
     renderComposer();
     renderChat();
   }
@@ -1093,7 +1157,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     var empty = runs.length === 0;
     document.getElementById('empty').className = empty ? '' : 'hidden';
     document.getElementById('content').className = empty ? 'hidden' : '';
-    document.querySelector('header').className = empty ? 'hidden' : '';
+    document.querySelector('header').className = (empty && !interactive) ? 'hidden' : '';
     var opts = runs.map(function (r) { return el('option', null, r); });
     picker.replaceChildren.apply(picker, opts);
     opts.forEach(function (o) { o.value = o.textContent; });
@@ -1116,6 +1180,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   wireComposer();
   wireChat();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
+  byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
   poll();
   setInterval(poll, 2000);
   pollOffice();
