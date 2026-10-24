@@ -5,6 +5,9 @@ answers or edits anything itself. Follow-ups stay with the current holder or mov
 Every turn is written to the planner event log (`run_id` = the thread id, `orch-<stamp>`), so
 a restart or a read-only page rebuilds the thread with `orchestrator_view_from_log`."""
 
+import asyncio
+import os
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -14,10 +17,25 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from harness.config import TIER_LADDER, Tier
 from harness.models import Event
-from harness.planner import PlannerSession
-from harness.planner_log import last_session, read_planner_events
+from harness.planner import (
+    ORCHESTRATOR_PROMPT,
+    PlannerSession,
+    PlannerTurn,
+    Routing,
+    SdkTriageSession,
+    parse_routing,
+)
+from harness.planner_log import PlannerLog, last_session, read_planner_events
 from harness.state import new_run_id
-from harness.ui.chat import _pid_alive, chats_from_log, read_chat_events
+from harness.ui.chat import (
+    ChatConflict,
+    ChatManager,
+    _pid_alive,
+    _progress_line,
+    chats_from_log,
+    read_chat_events,
+)
+from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
 from harness.worker import ProgressFn
 
@@ -292,3 +310,295 @@ def orchestrator_view_from_log(repo: Path) -> OrchestratorView:
         cost_usd=cost,
         error=error,
     )
+
+
+Target = tuple[Tier, Literal["chat", "opus"], str]  # (tier, target kind, chat id or session id)
+
+
+class Orchestrator:
+    """Routes every office request through a one-turn session. Public calls: `message`,
+    `new_thread` (each raises OrchestratorConflict with a sentence), `view`, `restore`,
+    `close`. All state lives under one lock. Lock order: self._lock may be held while
+    calling chats.views(), opus.live/waiting/message; the Office never calls the
+    Orchestrator while holding its own lock, so this cannot deadlock."""
+
+    def __init__(
+        self,
+        repo: Path,
+        chats: ChatManager,
+        opus: OpusDesk,
+        *,
+        fake: bool = False,
+        fake_delay: float = 2.0,
+        session_factory: OrchSessionFactory | None = None,
+    ) -> None:
+        """Fields in the `decision: Orchestrator fields` context item."""
+        self.repo = Path(repo).resolve()
+        self.chats = chats
+        self.opus = opus
+        if session_factory is not None:
+            self._factory: OrchSessionFactory = session_factory
+        elif fake:
+
+            def fake_factory(repo: Path, progress: ProgressFn) -> PlannerSession:
+                return DemoPlannerSession(repo, progress=progress, delay_s=fake_delay)
+
+            self._factory = fake_factory
+        else:
+
+            def sdk_factory(repo: Path, progress: ProgressFn) -> PlannerSession:
+                return SdkTriageSession(repo, progress=progress)
+
+            self._factory = sdk_factory
+        self._lock = threading.Lock()
+        self._state: OrchState = "idle"
+        self._error: str | None = None
+        self._progress: list[str] = []
+        self._thread_id: str | None = None
+        self._log: PlannerLog | None = None
+        self._pid_logged = False
+        self._target: Target | None = None
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task[Any] | None = None
+        self._closed = False
+
+    # -- helpers (caller holds self._lock) ----------------------------------------------
+
+    def _live_holder(self) -> tuple[Target, str] | None:
+        """(target, chat state or "") of the live holder; clears a dead target."""
+        target = self._target
+        if target is None:
+            return None
+        tier, kind, target_id = target
+        if kind == "chat":
+            for view in self.chats.views():
+                if view.chat_id == target_id and view.state in ("working", "waiting"):
+                    return target, view.state
+        elif self.opus.live(target_id):
+            return target, ""
+        self._target = None
+        return None
+
+    def _emit(self, type: str, payload: dict[str, Any]) -> None:
+        if self._log is not None:
+            self._log.emit(type, payload)
+
+    # -- public calls -------------------------------------------------------------------
+
+    def message(self, text: str) -> None:
+        """Take one user message. Algorithm in the `decision: message` context item."""
+        stripped = text.strip()
+        if not stripped:
+            raise OrchestratorConflict("the message is empty")
+        if len(stripped) > MAX_TEXT_CHARS:
+            raise OrchestratorConflict("the message is too long")
+        with self._lock:
+            if self._state == "routing":
+                raise OrchestratorConflict(ROUTING_BUSY)
+            live = self._live_holder()
+            holder = live[0] if live else None
+            if live and holder is not None:
+                if holder[1] == "chat" and live[1] == "working":
+                    raise OrchestratorConflict(f"the {holder[0]} agent is still working")
+                if holder[1] == "opus" and not self.opus.waiting(holder[2]):
+                    raise OrchestratorConflict(OPUS_BUSY)
+            if self._thread_id is None:
+                self._thread_id = new_thread_id()
+                self._log = PlannerLog(self.repo, self._thread_id)
+                self._pid_logged = False
+            if not self._pid_logged:
+                self._emit("orchestrator_started", {"pid": os.getpid()})
+                self._pid_logged = True
+            entries = orchestrator_view_from_log(self.repo).transcript
+            self._emit("orchestrator_user", {"text": stripped})
+            if holder is not None and holder[1] == "opus":
+                try:
+                    self.opus.message(stripped)
+                except HandoffRefused as err:
+                    reason = f"could not hand to opus: {err}"
+                    self._emit("orchestrator_failed", {"reason": reason, "cost_usd": 0.0})
+                    self._state = "failed"
+                    self._error = reason
+                    raise OrchestratorConflict(str(err)) from None
+                self._emit(
+                    "orchestrator_turn",
+                    {
+                        "action": "forward",
+                        "to": "opus",
+                        "plan": "project",
+                        "reason": OPUS_HOLDS,
+                        "target_kind": "opus",
+                        "target_id": holder[2],
+                        "cost_usd": 0.0,
+                        "text": routing_line("forward", "opus", "project", OPUS_HOLDS),
+                    },
+                )
+                self._state = "idle"
+                self._error = None
+                return
+            self._state = "routing"
+            self._error = None
+            self._progress = []
+            assert self._log is not None
+            self._thread = threading.Thread(
+                target=self._thread_main,
+                args=(stripped, holder, entries, self._log),
+                name="harness-orchestrator",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def new_thread(self) -> None:
+        """Start over ("New request")."""
+        raise NotImplementedError("s1-orch-lifecycle")
+
+    def view(self) -> OrchestratorView:
+        """The log view with state, error, progress and holder from memory."""
+        logged = orchestrator_view_from_log(self.repo)
+        with self._lock:
+            live = self._live_holder()
+            holder = live[0] if live else None
+            return logged.model_copy(
+                update={
+                    "holder": holder[0] if holder else None,
+                    "holder_id": holder[2] if holder else None,
+                    "state": self._state,
+                    "error": self._error,
+                    "progress": list(self._progress) if self._state == "routing" else [],
+                }
+            )
+
+    def restore(self) -> None:
+        """After a restart: close an interrupted turn in the log once, then load the thread."""
+        raise NotImplementedError("s1-orch-lifecycle")
+
+    def close(self) -> None:
+        """Server shutdown: interrupt a turn in progress, join the routing thread."""
+        with self._lock:
+            self._closed = True
+            thread = self._thread
+            if self._state == "routing" and self._log is not None:
+                reason = "interrupted: server stopped"
+                self._emit("orchestrator_failed", {"reason": reason, "cost_usd": 0.0})
+                self._state = "failed"
+                self._error = reason
+                if self._loop is not None and self._task is not None:
+                    try:
+                        self._loop.call_soon_threadsafe(self._task.cancel)
+                    except RuntimeError:
+                        pass
+        if thread is not None:
+            thread.join(JOIN_TIMEOUT_S)
+
+    # -- the routing thread -------------------------------------------------------------
+
+    def _fail(self, log: PlannerLog, reason: str, cost: float) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            log.emit("orchestrator_failed", {"reason": reason, "cost_usd": cost})
+            self._state = "failed"
+            self._error = reason
+            self._progress = []
+
+    def _thread_main(
+        self, text: str, holder: Target | None, entries: list[OrchEntry], log: PlannerLog
+    ) -> None:
+        try:
+            asyncio.run(self._route(text, holder, entries, log))
+        except asyncio.CancelledError:
+            return
+        except Exception as err:
+            self._fail(log, f"unexpected error: {type(err).__name__}: {err}", 0.0)
+
+    def _start_target(self, to: Tier, plan: Literal["quick", "project"], text: str) -> Target:
+        if to == "opus":
+            return ("opus", "opus", self.opus.start(text, plan))
+        return (to, "chat", self.chats.start(to, text))
+
+    async def _route(
+        self, text: str, holder: Target | None, entries: list[OrchEntry], log: PlannerLog
+    ) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._task = asyncio.current_task()
+        prompt = ORCHESTRATOR_PROMPT.format(
+            repo=self.repo,
+            holder=holder[0] if holder else "nobody (new work)",
+            tail=tail_text(entries),
+            text=text,
+        )
+
+        async def progress_cb(info: dict[str, Any]) -> None:
+            with self._lock:
+                self._progress = [*self._progress, _progress_line(info)][-PROGRESS_LINES:]
+
+        session = self._factory(self.repo, progress_cb)
+        try:
+            try:
+                turn = await session.send(prompt)
+            except Exception as err:
+                turn = PlannerTurn(error=f"{type(err).__name__}: {err}")
+        finally:
+            try:
+                await session.close()
+            except Exception:
+                pass
+        cost = turn.usage.cost_usd
+        if turn.error:
+            self._fail(log, f"orchestrator session failed: {turn.error}", cost)
+            return
+        routing = parse_routing(turn.text)
+        with self._lock:
+            if self._closed:
+                return
+        action: OrchAction
+        to: Tier = "sonnet"
+        try:
+            if holder is None:
+                routing = routing or Routing(to="sonnet", reason=NO_ROUTING_NEW)
+                to = routing.to
+                action = "start"
+                target = self._start_target(to, routing.plan, text)
+            elif routing is None or rank(routing.to) <= rank(holder[0]):
+                action = "forward"
+                routing = Routing(
+                    to=holder[0],
+                    plan=routing.plan if routing else "project",
+                    reason=routing.reason if routing else NO_ROUTING_FOLLOW,
+                )
+                to = holder[0]
+                self.chats.message(holder[2], text)
+                target = holder
+            else:
+                action = "escalate"
+                to = routing.to
+                brief = handoff_brief(entries, text, holder[0])
+                try:
+                    self.chats.close_chat(holder[2])
+                except ChatConflict:
+                    pass
+                target = self._start_target(to, routing.plan, brief)
+        except (ChatConflict, HandoffRefused) as err:
+            self._fail(log, f"could not hand to {to}: {err}", cost)
+            return
+        with self._lock:
+            if self._closed:
+                return
+            log.emit(
+                "orchestrator_turn",
+                {
+                    "action": action,
+                    "to": target[0],
+                    "plan": routing.plan,
+                    "reason": routing.reason,
+                    "target_kind": target[1],
+                    "target_id": target[2],
+                    "cost_usd": cost,
+                    "text": routing_line(action, target[0], routing.plan, routing.reason),
+                },
+            )
+            self._target = target
+            self._state = "idle"
+            self._error = None
+            self._progress = []
