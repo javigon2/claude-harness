@@ -11,6 +11,7 @@ from ui_fixtures import append_event, write_blocked_run, write_happy_run, write_
 
 import harness.ui.server as server_mod
 from harness.state import STATE_FILE, run_dir
+from harness.titles import write_title
 from harness.ui.server import make_server
 from harness.ui.view import build_view
 
@@ -52,7 +53,11 @@ def test_runs_list(server, tmp_path):
     _, base = server
     code, _, body = _get(base + "/api/runs")
     assert code == 200
-    assert json.loads(body) == {"runs": ["running1", "happy1", "blocked1"], "latest": "running1"}
+    assert json.loads(body) == {
+        "runs": ["running1", "happy1", "blocked1"],
+        "latest": "running1",
+        "titles": {},
+    }
 
 
 def test_runs_empty(tmp_path):
@@ -60,11 +65,35 @@ def test_runs_empty(tmp_path):
     try:
         code, _, body = _get(base + "/api/runs")
         assert code == 200
-        assert json.loads(body) == {"runs": [], "latest": None}
+        assert json.loads(body) == {"runs": [], "latest": None, "titles": {}}
     finally:
         srv.shutdown()
         srv.server_close()
         t.join(5)
+
+
+def test_runs_list_carries_titles(server, tmp_path):
+    _, base = server
+    write_title(tmp_path, "happy1", "Fix the login redirect")
+    _, _, body = _get(base + "/api/runs")
+    assert json.loads(body)["titles"] == {"happy1": "Fix the login redirect"}
+
+
+def test_dashboard(server, tmp_path):
+    _, base = server
+    code, headers, body = _get(base + "/api/dashboard/happy1")
+    assert code == 200
+    assert headers["Cache-Control"] == "no-store"
+    d = json.loads(body)
+    assert d["run_id"] == "happy1"
+    assert {m["key"] for m in d["metrics"]} >= {"cost_usd", "wall_s", "active_s", "avg_latency_s"}
+    assert d["baseline_runs"] >= 0
+
+
+def test_dashboard_unknown_run(server):
+    _, base = server
+    code, _, _ = _get(base + "/api/dashboard/nope")
+    assert code == 404
 
 
 @pytest.mark.parametrize("run_id", ["happy1", "blocked1", "running1"])

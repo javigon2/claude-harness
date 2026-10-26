@@ -49,6 +49,7 @@ from harness.planner_log import (
     read_planner_events,
 )
 from harness.state import STATE_FILE, StateError, latest_run, load_state, new_run_id, run_dir
+from harness.titles import ensure_title
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
@@ -474,6 +475,7 @@ class Office:
         clock: Callable[[], float] = time.time,
         auto_advance: bool = True,
         orchestrator_session_factory: SessionFactory | None = None,
+        titler: Callable[[Path, str], object] | None = None,
     ) -> None:
         self.auto_advance = auto_advance
         self._resume_stamp: int | None = None
@@ -487,6 +489,10 @@ class Office:
         self.idle_timeout_s = idle_timeout_s
         self._launcher = launcher
         self._clock = clock
+        # names a launched run from its request; off when a test injects the launcher
+        self._titler = (
+            titler if titler is not None else (None if launcher else self._default_titler)
+        )
         if session_factory is not None:
             self._factory: SessionFactory = session_factory
         elif fake:
@@ -550,6 +556,19 @@ class Office:
             fake_delay=fake_delay,
             session_factory=orchestrator_session_factory,
         )
+        if self._titler is not None:
+            threading.Thread(target=self._backfill_titles, daemon=True, name="titles").start()
+
+    def _backfill_titles(self) -> None:
+        """Name the runs launched before titles existed. A run with no logged request is
+        skipped without a model call."""
+        try:
+            runs = list_runs(self.repo)
+        except (StateError, OSError, ValueError):
+            return
+        for run_id in runs:
+            if self._titler is not None:
+                self._titler(self.repo, run_id)
 
     def _chat_block(self) -> str | None:
         """busy_fn for the chats: a sentence while chats must not edit the repo, else None.
@@ -1157,6 +1176,9 @@ class Office:
             argv += ["--max-cost", str(options.max_cost)]
         return argv
 
+    def _default_titler(self, repo: Path, run_id: str) -> None:
+        ensure_title(repo, run_id, use_model=not self.fake)
+
     def _launch(self, rel_plan: str, *, run_id: str | None = None, resume: bool = False) -> None:
         """Validate the stage plan again, then start `harness run` as a detached process
         (own session, so Ctrl-C on the UI leaves it running; output to
@@ -1198,6 +1220,10 @@ class Office:
                     "resume": resume,
                 },
             )
+        if self._titler is not None and not resume:
+            threading.Thread(
+                target=self._titler, args=(self.repo, rid), daemon=True, name=f"title-{rid}"
+            ).start()
 
     def _refresh_supervising(self) -> None:
         """supervising -> idle once the run's state.json says finished or the process has

@@ -162,7 +162,6 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .msg-orch { background: #f9fafb; border-color: #d1d5db; }
 #orch-line { margin: 0 0 8px; }
 #orch-line:empty { display: none; }
-#office-total { font-weight: 600; }
 #btn-convo-back { font: inherit; padding: 2px 10px; cursor: pointer; }
 #orch-msg { color: #b91c1c; font-weight: 600; }
 #orch-msg:empty { display: none; }
@@ -288,7 +287,29 @@ tbody tr:last-child td { border-bottom: 0; }
 .status-blocked { background: #f8caca; color: #8f1d1d; }
 .status-paused { background: #fff0cc; color: #9a6400; }
 #feed li { border-bottom-color: #e3e8ec; }
+header #brandbox { display: flex; flex-direction: column; gap: 4px; }
+header .run-pick { display: flex; align-items: center; gap: 6px; }
+header #brandbox .brand { margin-right: 0; }
+#run-progress-box { display: flex; flex-direction: column; gap: 3px; flex: 1 1 220px; min-width: 180px; max-width: 420px; }
+#run-progress { height: 8px; border-radius: 4px; background: rgba(255,255,255,0.18); overflow: hidden; }
+#run-progress-fill { height: 100%; width: 0; background: var(--sn-green); border-radius: 4px; transition: width .4s ease; }
+#run-progress.active #run-progress-fill { background-image: linear-gradient(135deg, rgba(255,255,255,.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.28) 50%, rgba(255,255,255,.28) 75%, transparent 75%); background-size: 16px 16px; animation: barmove 1s linear infinite; }
+@keyframes barmove { from { background-position: 0 0; } to { background-position: 16px 0; } }
+#run-progress-text { font-size: 12px; color: #cfe3ee; }
 header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: #9fb6c3; }
+details.plain-fold { margin-top: 16px; }
+details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--sn-blue); }
+#dashboard-view, #report-view { padding: 12px 16px; max-width: 1000px; }
+#dashboard-view h3, #report-view h3 { margin: 18px 0 6px; font-size: 14px; color: var(--sn-slate); text-transform: uppercase; letter-spacing: .6px; }
+#dash-cards, #report-cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.dash-card { flex: 1 1 170px; background: var(--sn-navy); color: #fff; border-radius: 8px; padding: 12px 14px; border-left: 4px solid var(--sn-green); }
+.dash-card .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #9fb6c3; }
+.dash-card .v { font-size: 24px; font-weight: 700; margin-top: 2px; }
+.dash-card .a { font-size: 12px; color: #9fb6c3; margin-top: 2px; }
+#dashboard-view td.num, #dashboard-view th.num, #report-view td.num, #report-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.delta-good { color: var(--sn-green-dark); font-weight: 600; }
+.delta-bad { color: #c23030; font-weight: 600; }
+#dashboard-view button, #report-view button { background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font: inherit; font-weight: 600; padding: 4px 12px; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -296,20 +317,19 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
 </head>
 <body>
 <header>
-  <span class="brand"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path fill-rule="evenodd" d="M24 86C8 72 6 56 6 46A44 44 0 0 1 94 46C94 56 92 72 76 86C72 89 67 87 63 83C57 77 43 77 37 83C33 87 28 89 24 86ZM50 26A20 20 0 1 0 50 66A20 20 0 1 0 50 26Z"/></svg>agent harness</span>
-  <label class="run-label" for="run-picker">Run</label>
-  <select id="run-picker" aria-label="Run"></select>
-  <span id="stage"></span>
+  <div id="brandbox"><span class="brand"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path fill-rule="evenodd" d="M24 86C8 72 6 56 6 46A44 44 0 0 1 94 46C94 56 92 72 76 86C72 89 67 87 63 83C57 77 43 77 37 83C33 87 28 89 24 86ZM50 26A20 20 0 1 0 50 66A20 20 0 1 0 50 26Z"/></svg>agent harness</span>
+  <div class="run-pick"><label class="run-label" for="run-picker">Run</label><select id="run-picker" aria-label="Run"></select></div></div>
   <span id="phase" class="phase"></span>
-  <span id="wave"></span>
-  <span id="cost"></span>
-  <span id="tiers"></span>
-  <span id="office-total"></span>
+  <div id="run-progress-box" class="hidden">
+    <div id="run-progress" role="progressbar" aria-label="Run progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="run-progress-fill"></div></div>
+    <span id="run-progress-text"></span>
+  </div>
   <span id="project-name" class="chip hidden"></span>
   <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
   <button id="btn-restart" type="button" class="hidden">Restart server</button>
   <button id="btn-plans" type="button" class="hidden">Plans</button>
   <button id="btn-report" type="button" class="hidden">Report</button>
+  <button id="btn-dashboard" type="button" class="hidden">Dashboard</button>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
 </header>
 <div id="banner"></div>
@@ -318,7 +338,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     <div id="orch-view">
       <div class="convo-head">
         <strong>Orchestrator</strong>
-        <span id="orch-cost" class="muted"></span>
       </div>
       <ol id="orch-transcript"></ol>
       <p id="orch-line" class="muted"></p>
@@ -338,7 +357,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       <div class="convo-head">
         <button id="btn-convo-back" type="button">Back to Orchestrator</button>
         <strong id="office-title">Opus</strong>
-        <span id="office-cost" class="muted"></span>
       </div>
       <ol id="transcript"></ol>
       <p id="triage-line" class="muted"></p>
@@ -394,7 +412,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       <div class="convo-head">
         <button id="btn-chat-back" type="button">Back to Orchestrator</button>
         <strong id="chat-title"></strong>
-        <span id="chat-cost" class="muted"></span>
       </div>
       <ol id="chat-transcript"></ol>
       <ul id="chat-progress"></ul>
@@ -427,7 +444,7 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       <details class="fold">
         <summary>Tasks</summary>
         <table id="tasks">
-          <thead><tr><th>Task</th><th>Status</th><th>Tier</th><th>Attempt</th><th>Tokens</th><th>Cost</th><th>Note</th></tr></thead>
+          <thead><tr><th>Task</th><th>Status</th><th>Tier</th><th>Attempt</th><th>Tokens</th><th>Note</th></tr></thead>
           <tbody></tbody>
         </table>
       </details>
@@ -463,16 +480,36 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
   <ul id="plans-unstaged"></ul>
   <p id="plans-msg" role="alert"></p>
 </section>
+<section id="dashboard-view" class="hidden">
+  <button id="btn-dashboard-back" type="button">Back</button>
+  <h2 id="dash-title">Dashboard</h2>
+  <p id="dash-sub" class="muted"></p>
+  <div id="dash-cards"></div>
+  <h3>Totals against the average of other runs</h3>
+  <table id="dash-metrics"></table>
+  <h3>By tier</h3>
+  <table id="dash-tiers"></table>
+  <h3>By task</h3>
+  <table id="dash-tasks"></table>
+</section>
 <section id="report-view" class="hidden">
   <button id="btn-report-back" type="button">Back</button>
-  <h2>Report</h2>
-  <pre id="report-status"></pre>
-  <pre id="report-text"></pre>
+  <h2 id="report-title">Report</h2>
+  <p id="report-sub" class="muted"></p>
+  <div id="report-cards"></div>
+  <h3>Per task</h3>
+  <table id="report-tasks"></table>
+  <h3>Per tier</h3>
+  <table id="report-tiers"></table>
+  <details class="plain-fold"><summary>Plain text (as `harness report` prints it)</summary>
+    <pre id="report-status"></pre>
+    <pre id="report-text"></pre>
+  </details>
 </section>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
-  var runs = [], latest = null, current = null, source = null;
+  var runs = [], titles = {}, latest = null, current = null, source = null;
   var conn = false, problem = null, stopped = null, idle = null;
   var tokenMeta = document.querySelector('meta[name="harness-token"]');
   var modeMeta = document.querySelector('meta[name="harness-mode"]');
@@ -861,14 +898,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
   }
 
   // ---- the Orchestrator's thread, appended in place
-  function orchCostText(v) {
-    return v && v.cost_usd > 0 ? 'orchestrator ' + money(v.cost_usd) : '';
-  }
-
-  function totalText(o) {
-    return o && o.total_cost_usd > 0 ? 'office ' + money(o.total_cost_usd) : '';
-  }
-
   function orchLine(v) {
     // the agent that holds the work, if any
     return v && v.holder ? 'With ' + v.holder + ' (' + str(v.holder_id) + ')' : '';
@@ -903,7 +932,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     var o = v || {};
     setHidden('orch-composer', !interactive);
     setHidden('orch-route', !!o.holder);
-    byId('orch-cost').textContent = orchCostText(o);
     byId('orch-line').textContent = orchLine(o);
     var list = byId('orch-transcript');
     var entries = Array.isArray(o.transcript) ? o.transcript : [];
@@ -1033,7 +1061,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       setHidden('sec-' + name, name !== which);
     });
     byId('office-title').textContent = 'Opus \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
-    byId('office-cost').textContent = o.cost_usd > 0 ? 'planner cost ' + money(o.cost_usd) : '';
     byId('office-note').textContent = o.error ? String(o.error) : '';
     byId('triage-line').textContent = triageText(o);
     var resume = resumeLabel(o);
@@ -1236,7 +1263,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     var chat = currentChat();
     var ended = !!chat && (chat.state === 'closed' || chat.state === 'failed');
     byId('chat-title').textContent = chatTier + ' · ' + (chat ? chat.state : 'new chat') + (chat && chat.task_id ? ' · task ' + chat.task_id : '');
-    byId('chat-cost').textContent = chat && chat.cost_usd > 0 ? money(chat.cost_usd) : '';
     var list = byId('chat-transcript');
     var entries = chat && Array.isArray(chat.transcript) ? chat.transcript : [];
     var cid = chat ? chat.chat_id : null;
@@ -1337,6 +1363,7 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     setHidden('run-options', !interactive);
     setHidden('btn-plans', !interactive);
     setHidden('btn-report', !interactive);
+    setHidden('btn-dashboard', !interactive);
     var opts = o.run_options || {};
     var active = document.activeElement;
     function put(id, set) { if (force || active !== byId(id)) set(byId(id)); }
@@ -1425,6 +1452,31 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     }).catch(function () { /* the next refresh retries */ });
   }
 
+  function renderReport(d) {
+    var data = d.data || {};
+    var tasks = Array.isArray(data.tasks) ? data.tasks : [], tiers = Array.isArray(data.tiers) ? data.tiers : [];
+    var counts = data.counts || {}, total = data.total || {};
+    byId('report-title').textContent = 'Report \u00b7 ' + (d.title || d.run_id);
+    var parts = Object.keys(counts).map(function (k) { return counts[k] + ' ' + k; });
+    var esc = Array.isArray(data.escalated) ? data.escalated : [];
+    byId('report-sub').textContent = 'Run ' + str(d.run_id) + ' \u00b7 ' + (parts.join(', ') || 'no tasks') + (esc.length ? ' \u00b7 escalated: ' + esc.join(', ') : '');
+    var cardData = [['Total cost', fmtValue(total.cost_usd, 'usd')], ['Input tokens', fmtValue(total.input_tokens, 'count')], ['Output tokens', fmtValue(total.output_tokens, 'count')], ['Cache-read tokens', fmtValue(total.cache_read_tokens, 'count')]];
+    var cards = cardData.map(function (c) {
+      var card = el('div', 'dash-card');
+      card.appendChild(el('div', 'k', c[0]));
+      card.appendChild(el('div', 'v', c[1]));
+      return card;
+    });
+    byId('report-cards').replaceChildren.apply(byId('report-cards'), cards);
+    fillTable('report-tasks', ['Task', 'Status', 'Tier', 'Attempts', 'Input', 'Output', 'Cache read', 'Cache write', 'Cost'], tasks.map(function (t) {
+      var st = el('td'); st.appendChild(el('span', 'status status-' + str(t.status), str(t.status)));
+      return [t.task_id, st, t.tier || '-', String(t.attempts), fmtValue(t.input_tokens, 'count'), fmtValue(t.output_tokens, 'count'), fmtValue(t.cache_read_tokens, 'count'), fmtValue(t.cache_creation_tokens, 'count'), fmtValue(t.cost_usd, 'usd')];
+    }));
+    fillTable('report-tiers', ['Tier', 'Attempts', 'Reviews', 'Input', 'Output', 'Cache read', 'Cache write', 'Cost'], tiers.map(function (t) {
+      return [t.tier, String(t.attempts), String(t.reviews), fmtValue(t.input_tokens, 'count'), fmtValue(t.output_tokens, 'count'), fmtValue(t.cache_read_tokens, 'count'), fmtValue(t.cache_creation_tokens, 'count'), fmtValue(t.cost_usd, 'usd')];
+    }));
+  }
+
   function loadReport() {
     if (!current) {
       byId('report-status').textContent = 'No run yet.';
@@ -1435,10 +1487,90 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       if (d && typeof d.report === 'string') {
         byId('report-status').textContent = d.status;
         byId('report-text').textContent = d.report;
+        renderReport(d);
       } else {
         byId('report-status').textContent = (d && d.error) ? String(d.error) : 'No report.';
         byId('report-text').textContent = '';
       }
+    }).catch(function () { /* the next refresh retries */ });
+  }
+
+
+  // ---- the Dashboard: one run's cost, time and latency against the average of the others
+  function fmtDuration(sec) {
+    if (typeof sec !== 'number' || !isFinite(sec)) return '—';
+    if (sec < 10) return sec.toFixed(1) + 's';
+    var s = Math.round(sec), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    if (h) return h + 'h ' + m + 'm ' + r + 's';
+    if (m) return m + 'm ' + r + 's';
+    return r + 's';
+  }
+  function fmtValue(v, unit) {
+    if (typeof v !== 'number' || !isFinite(v)) return '—';
+    if (unit === 'usd') return '$' + v.toFixed(4);
+    if (unit === 's') return fmtDuration(v);
+    if (unit === 'pct') return v.toFixed(0) + '%';
+    if (unit === 'ratio') return v.toFixed(2);
+    return Math.round(v).toLocaleString('en-US');
+  }
+  function deltaCell(m) {
+    var td = el('td', 'num');
+    if (typeof m.value !== 'number' || typeof m.average !== 'number') { td.textContent = '—'; return td; }
+    if (m.average === 0) { td.textContent = m.value === 0 ? '0%' : 'new'; return td; }
+    var pct = (m.value - m.average) / Math.abs(m.average) * 100;
+    if (Math.abs(pct) < 1) { td.textContent = '±1%'; return td; }
+    var worse = m.lower_is_better ? pct > 0 : pct < 0;
+    td.className = 'num ' + (worse ? 'delta-bad' : 'delta-good');
+    td.textContent = (pct > 0 ? '+' : '') + pct.toFixed(0) + '%';
+    return td;
+  }
+  function fillTable(id, heads, rows) {
+    var table = byId(id);
+    var tr = el('tr');
+    heads.forEach(function (h, i) { tr.appendChild(el('th', i ? 'num' : null, h)); });
+    var thead = el('thead'); thead.appendChild(tr);
+    var tbody = el('tbody');
+    rows.forEach(function (cells) {
+      var row = el('tr');
+      cells.forEach(function (c, i) {
+        if (c && c.nodeType) row.appendChild(c);
+        else row.appendChild(el('td', i ? 'num' : null, String(c)));
+      });
+      tbody.appendChild(row);
+    });
+    table.replaceChildren(thead, tbody);
+  }
+  function renderDashboard(d) {
+    byId('dash-title').textContent = 'Dashboard · ' + (d.title || d.run_id);
+    var sub = 'Run ' + d.run_id + ' · ' + (d.finished ? 'finished' : 'in progress') + ' · ';
+    sub += d.baseline_runs ? 'averaged over ' + d.baseline_runs + ' other run' + (d.baseline_runs === 1 ? '' : 's') : 'no other real runs yet, so this one becomes the baseline';
+    if (d.fake) sub += ' · fake workers: these figures are not real and are left out of the averages';
+    byId('dash-sub').textContent = sub;
+    var byKey = {};
+    d.metrics.forEach(function (m) { byKey[m.key] = m; });
+    var cards = ['cost_usd', 'wall_s', 'active_s', 'avg_latency_s'].map(function (k) {
+      var m = byKey[k], c = el('div', 'dash-card');
+      c.appendChild(el('div', 'k', m.label));
+      c.appendChild(el('div', 'v', fmtValue(m.value, m.unit)));
+      c.appendChild(el('div', 'a', typeof m.average === 'number' ? 'avg ' + fmtValue(m.average, m.unit) : 'no average yet'));
+      return c;
+    });
+    byId('dash-cards').replaceChildren.apply(byId('dash-cards'), cards);
+    fillTable('dash-metrics', ['Metric', 'This run', 'Average', 'Change'], d.metrics.map(function (m) {
+      return [m.label, fmtValue(m.value, m.unit), fmtValue(m.average, m.unit), deltaCell(m)];
+    }));
+    fillTable('dash-tiers', ['Tier', 'Attempts', 'Cost', 'Tokens', 'Avg attempt', 'Avg latency', 'Avg verify'], d.tiers.map(function (t) {
+      return [t.tier, String(t.attempts), fmtValue(t.cost_usd, 'usd'), fmtValue(t.tokens, 'count'), fmtDuration(t.avg_attempt_s), fmtDuration(t.avg_latency_s), fmtDuration(t.avg_verify_s)];
+    }));
+    fillTable('dash-tasks', ['Task', 'Status', 'Tier', 'Attempts', 'Cost', 'Tokens', 'Worker time', 'Latency', 'Verify'], d.tasks.map(function (t) {
+      var st = el('td'); st.appendChild(el('span', 'status status-' + str(t.status), str(t.status)));
+      return [t.task_id, st, t.tier || '-', String(t.attempts), fmtValue(t.cost_usd, 'usd'), fmtValue(t.tokens, 'count'), fmtDuration(t.active_s), fmtDuration(t.latency_s), fmtDuration(t.verify_s)];
+    }));
+  }
+  function loadDashboard() {
+    if (!current) { byId('dash-sub').textContent = 'No run yet.'; return; }
+    fetch('/api/dashboard/' + encodeURIComponent(current)).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && Array.isArray(d.metrics)) renderDashboard(d);
     }).catch(function () { /* the next refresh retries */ });
   }
 
@@ -1449,11 +1581,14 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       loadPlans();
     });
     byId('btn-report').addEventListener('click', function () { showMain('report-view'); loadReport(); });
+    byId('btn-dashboard').addEventListener('click', function () { showMain('dashboard-view'); loadDashboard(); });
+    byId('btn-dashboard-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
     byId('btn-plans-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
     byId('btn-report-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
     setInterval(function () {
       if (!byId('plans-view').classList.contains('hidden')) loadPlans();
       if (!byId('report-view').classList.contains('hidden')) loadReport();
+      if (!byId('dashboard-view').classList.contains('hidden')) loadDashboard();
     }, 2000);
   }
 
@@ -1471,7 +1606,7 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     return str(p.name) + ' \u00b7 ' + str(p.path) + ' \u00b7 ' + bits.join(', ');
   }
 
-  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view'];
+  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view', 'dashboard-view'];
   function showMain(name) {
     // the page shows exactly one of the two panels and the launcher's views
     MAIN_VIEWS.forEach(function (id) { setHidden(id, id !== name); });
@@ -1660,7 +1795,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     renderOffice();
     renderTranscript(o);
     renderOrch(o.orchestrator);
-    byId('office-total').textContent = totalText(o);
     renderComposer();
     renderChat();
     renderOptions(o, false);
@@ -1673,22 +1807,49 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     }).catch(function () { /* next poll retries */ });
   }
 
+  function fmtEta(ms) {
+    var min = Math.round(ms / 60000);
+    if (min < 1) return 'under a minute';
+    if (min < 60) return 'about ' + min + ' min';
+    return 'about ' + Math.floor(min / 60) + 'h ' + (min % 60) + 'm';
+  }
+  function progressInfo(v) {
+    // done / total tasks, and a rough time left from the pace so far (needs one finished task)
+    var tasks = Array.isArray(v.tasks) ? v.tasks : [];
+    var total = tasks.length, done = 0, active = 0;
+    tasks.forEach(function (t) {
+      if (t.status === 'done') done++;
+      else if (t.status === 'running' || t.status === 'verifying') active++;
+    });
+    var info = {total: total, done: done, active: active, pct: total ? Math.round(done * 100 / total) : 0, eta: null};
+    var events = Array.isArray(v.events) ? v.events : [];
+    if (v.phase === 'running' && done > 0 && done < total && events.length) {
+      var first = Date.parse(events[0].ts);
+      if (isFinite(first)) info.eta = (Date.now() - first) / done * (total - done);
+    }
+    return info;
+  }
+  function renderProgress(v) {
+    var info = progressInfo(v);
+    setHidden('run-progress-box', info.total === 0);
+    var bar = byId('run-progress');
+    byId('run-progress-fill').style.width = info.pct + '%';
+    bar.setAttribute('aria-valuenow', String(info.pct));
+    bar.className = (v.phase === 'running' && info.active > 0) ? 'active' : '';
+    var text = info.done + ' of ' + info.total + ' tasks';
+    if (v.phase === 'finished') text += ' \u00b7 finished';
+    else if (v.phase === 'stopped') text += ' \u00b7 stopped';
+    else if (info.eta !== null) text += ' \u00b7 ' + fmtEta(info.eta) + ' left';
+    byId('run-progress-text').textContent = text;
+  }
+
   function render(v) {
     stopped = v.stopped_reason || null;
     idle = (typeof v.idle_minutes === 'number') ? v.idle_minutes : null;
-    document.getElementById('stage').textContent = str(v.stage);
     var ph = document.getElementById('phase');
     ph.className = 'phase phase-' + str(v.phase);
     ph.textContent = str(v.phase);
-    document.getElementById('wave').textContent = 'wave ' + num(v.wave) + '/' + num(v.waves_total);
-    document.getElementById('cost').textContent = money(v.cost_usd);
-    var tiers = document.getElementById('tiers');
-    var chips = [];
-    (v.tiers || []).forEach(function (t) {
-      var n = t.attempts;
-      chips.push(el('span', 'chip', str(t.tier) + ' ' + num(n) + (n === 1 ? ' attempt ' : ' attempts ') + money(t.cost_usd)));
-    });
-    tiers.replaceChildren.apply(tiers, chips);
+    renderProgress(v);
 
     var rows = [];
     (v.tasks || []).forEach(function (t) {
@@ -1704,7 +1865,6 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
       var max = (t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
       tr.appendChild(el('td', null, num(t.attempt) + '/' + max));
       tr.appendChild(el('td', null, num(t.input_tokens) + ' in / ' + num(t.output_tokens) + ' out'));
-      tr.appendChild(el('td', null, money(t.cost_usd)));
       tr.appendChild(noteCell(t));
       rows.push(tr);
     });
@@ -1770,9 +1930,8 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     document.getElementById('empty').className = empty ? '' : 'hidden';
     document.getElementById('content').className = empty ? 'hidden' : '';
     document.querySelector('header').className = (empty && !interactive) ? 'hidden' : '';
-    var opts = runs.map(function (r) { return el('option', null, r); });
+    var opts = runs.map(function (r) { var o = el('option', null, titles[r] || r); o.value = r; o.title = r; return o; });
     picker.replaceChildren.apply(picker, opts);
-    opts.forEach(function (o) { o.value = o.textContent; });
   }
 
   function poll() {
@@ -1780,6 +1939,7 @@ header .run-label { font-size: 12px; text-transform: uppercase; letter-spacing: 
     fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
+      titles = (d.titles && typeof d.titles === 'object') ? d.titles : {};
       renderRuns();
       followLaunchedRun();
       choose();

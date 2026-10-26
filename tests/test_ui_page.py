@@ -107,8 +107,11 @@ def test_two_panel_layout():
 
 def test_keys_contract(server):
     text = _text()
+    # the API still sends these; the header no longer shows them (progress bar instead)
+    unused_by_page = {"wave", "waves_total", "tiers"}
     for key in RUN_KEYS + TASK_KEYS + TIER_KEYS + EVENT_KEYS:
-        assert re.search(rf"\b{key}\b", text), key
+        if key not in unused_by_page:
+            assert re.search(rf"\b{key}\b", text), key
     with urllib.request.urlopen(server + "/api/run/paused1", timeout=5) as resp:
         import json
 
@@ -172,7 +175,7 @@ OFFICE_IDS = [
 ]  # fmt: skip
 SECTION_IDS = [
     "sec-prompt", "sec-status", "sec-reply", "sec-plan", "sec-failed", "sec-next", "office-note",
-    "office-title", "office-cost", "status-line", "failed-line", "next-line",
+    "office-title", "status-line", "failed-line", "next-line",
 ]  # fmt: skip
 REMOVED_IDS = [
     "office-modal", "office-close", "reply-body", "plan-reply", "draft-body", "btn-view-plan",
@@ -781,7 +784,7 @@ def test_triage_text_can_implement_and_resume_label(tmp_path):
 def test_chat_view_markup():
     text = _text()
     assert '<div id="chat-view" class="hidden">' in text
-    ids = ["timeline-view", "chat-view", "btn-chat-back", "chat-title", "chat-cost",
+    ids = ["timeline-view", "chat-view", "btn-chat-back", "chat-title",
            "chat-transcript", "chat-progress", "chat-commits", "chat-note", "chat-msg",
            "chat-text", "btn-chat-send", "btn-chat-close", "right"]  # fmt: skip
     places = [text.index(f'id="{id_}"') for id_ in ids]
@@ -851,14 +854,14 @@ office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'working', transcript: [
 renderChat();
 var first = byId('chat-transcript').children[0];
 out.push([chatId, byId('chat-title').text, items(), texts('chat-progress'),
-  hidden['btn-chat-close'], byId('chat-cost').text]);
+  hidden['btn-chat-close']]);
 office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'waiting', transcript: [U, A],
   progress: [], commits: ['abc1234 chat haiku: add a flag'], cost_usd: 0.002, error: null,
   task_id: 'demo-a'}]};
 left.scrollTop = 370;
 renderChat();
 out.push([byId('chat-title').text, items(), byId('chat-transcript').children[0] === first,
-  texts('chat-progress'), texts('chat-commits'), byId('chat-cost').text, left.scrollTop]);
+  texts('chat-progress'), texts('chat-commits'), left.scrollTop]);
 office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'failed', transcript: [U, A],
   progress: [], commits: [], cost_usd: 0.002, error: 'the agent failed', task_id: null}]};
 renderChat();
@@ -900,9 +903,9 @@ def test_chat_panel_renders_in_place(tmp_path):
         [{"orch-view": True, "convo": True, "timeline-view": True, "chat-view": False,
           "btn-chat-close": True},
          None, "haiku", None, 1, "haiku · new chat", [], True, ""],
-        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False, ""],
+        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False],
         ["haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
-         ["committed abc1234 chat haiku: add a flag"], "$0.0020", 500],
+         ["committed abc1234 chat haiku: add a flag"], 500],
         ["c1", "haiku · failed", "the agent failed", True],
         "This chat has ended; sending starts a new one.",
         ["c4", 1, False],
@@ -1069,7 +1072,7 @@ def test_worker_chat_tier_seed_and_button(tmp_path):
 
 def test_orchestrator_panel_markup():
     text = _text()
-    ids = ["left", "orch-view", "orch-cost", "orch-transcript", "orch-line", "convo",
+    ids = ["left", "orch-view", "orch-transcript", "orch-line", "convo",
            "btn-convo-back", "office-title", "timeline-view", "chat-view", "right"]  # fmt: skip
     places = [text.index(f'id="{id_}"') for id_ in ids]
     assert places == sorted(places)
@@ -1078,14 +1081,17 @@ def test_orchestrator_panel_markup():
     assert '<button id="btn-convo-back" type="button">Back to Orchestrator</button>' in text
     assert text.count(">Back to Orchestrator</button>") == 3
     assert "Back to Opus" not in text
-    assert text.index('id="tiers"') < text.index('id="office-total"') < text.index("</header>")
+    assert text.index('id="run-progress-box"') < text.index("</header>")
+    for gone in ('id="stage"', 'id="wave"', 'id="tiers"'):
+        assert gone not in text, gone
+    for gone in ("orch-cost", "office-cost", "chat-cost", "office-total", 'id="cost"'):
+        assert gone not in text, gone
     assert re.search(r"#orch-line:empty \{ display: none; \}", text)
     assert re.search(r"\.msg-orch \{", text)
     for word in [
         "['orch-view', 'convo', 'timeline-view', 'chat-view']",
         "showPanel(selectedTask === null ? 'orch-view' : 'timeline-view')",
         "renderOrch(o.orchestrator);",
-        "byId('office-total').textContent = totalText(o);",
         "(empty && !interactive) ? 'hidden' : ''",
     ]:
         assert word in text, word
@@ -1101,21 +1107,14 @@ def test_orchestrator_texts(tmp_path):
         {"cost_usd": 0, "holder": None, "holder_id": None},
         {"holder": "opus"},
     ]
-    offices = [{"total_cost_usd": 0.5}, {"total_cost_usd": 0}, {}]
     script = (
         money.group(0) + "\n" + string.group(0) + "\n"
-        + _functions(text, "orchCostText", "totalText", "orchLine")
-        + "var V = " + json.dumps(views) + ", O = " + json.dumps(offices) + ";\n"
-        + "console.log(JSON.stringify([V.map(orchCostText), O.map(totalText),"
-        + " V.map(orchLine), orchCostText(null), totalText(null), orchLine(null)]));\n"
+        + _functions(text, "orchLine")
+        + "var V = " + json.dumps(views) + ";\n"
+        + "console.log(JSON.stringify([V.map(orchLine), orchLine(null)]));\n"
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
-    assert out == [
-        ["orchestrator $0.0123", "", ""],
-        ["office $0.5000", "", ""],
-        ["With haiku (chat-1)", "", "With opus (?)"],
-        "", "", "",
-    ]  # fmt: skip
+    assert out == [["With haiku (chat-1)", "", "With opus (?)"], ""]
 
 
 def test_orchestrator_message_nodes(tmp_path):
@@ -1154,17 +1153,17 @@ var A = {role: 'agent', who: 'haiku', ts: 't3', text: 'Done',
   blocks: [{type: 'paragraph', inline: [{t: 'text', text: 'Done'}]}]};
 var out = [];
 renderOrch(null);
-out.push([items(), byId('orch-cost').text, byId('orch-line').text]);
+out.push([items(), byId('orch-line').text]);
 renderOrch({thread_id: 'orch-1', transcript: [U, R], holder: null, cost_usd: 0.01});
 var first = byId('orch-transcript').children[0];
-out.push([items(), byId('orch-cost').text, byId('orch-line').text, left.scrollTop]);
+out.push([items(), byId('orch-line').text, left.scrollTop]);
 left.scrollTop = 0;
 renderOrch({thread_id: 'orch-1', transcript: [U, R, A], holder: 'haiku', holder_id: 'c1',
   cost_usd: 0.01});
 out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-line').text,
   left.scrollTop, hidden['orch-route']]);
 renderOrch({thread_id: 'orch-2', transcript: [U], holder: null, cost_usd: 0.02});
-out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-cost').text]);
+out.push([items(), byId('orch-transcript').children[0] === first]);
 out.push([hidden['orch-composer'], hidden['orch-route']]);
 renderOrch({thread_id: null, transcript: [], cost_usd: 0.02});
 out.push([items(), byId('orch-line').text, hidden['orch-route']]);
@@ -1194,10 +1193,10 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     out = json.loads(_run_node(tmp_path, script)[-1])
     you, routed = "msg msg-user|You", "msg msg-orch|Orchestrator"
     assert out == [
-        [[], "", ""],
-        [[you, routed], "orchestrator $0.0100", "", 500],
+        [[], ""],
+        [[you, routed], "", 500],
         [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0, True],
-        [[you], False, "orchestrator $0.0200"],
+        [[you], False],
         [False, False],
         [[], "", False],
         True,
@@ -1785,3 +1784,34 @@ def test_restart_polls_until_the_start_time_changes(tmp_path):
         "reload", True, True, False,
         "The server did not come back; start agent-orchestrator again.",
     ]  # fmt: skip
+
+
+def test_progress_info_and_eta(tmp_path):
+    text = _text()
+    script = (
+        _functions(text, "fmtEta", "progressInfo")
+        + """
+var NOW = Date.parse('2026-10-26T12:10:00Z');
+Date.now = function () { return NOW; };
+function run(phase, statuses) {
+  return {phase: phase, tasks: statuses.map(function (s) { return {status: s}; }),
+    events: [{ts: '2026-10-26T12:00:00Z'}]};
+}
+var out = [
+  progressInfo(run('running', ['done', 'running', 'pending', 'pending'])),
+  progressInfo(run('running', ['pending', 'pending'])),
+  progressInfo(run('finished', ['done', 'done'])),
+  progressInfo({phase: 'running', tasks: [], events: []}),
+  [fmtEta(20000), fmtEta(5 * 60000), fmtEta(125 * 60000)],
+];
+console.log(JSON.stringify(out));
+"""
+    )
+    got = json.loads(_run_node(tmp_path, script)[-1])
+    one_of_four = {"total": 4, "done": 1, "active": 1, "pct": 25}
+    assert {k: got[0][k] for k in one_of_four} == one_of_four
+    assert got[0]["eta"] == 10 * 60000 / 1 * 3  # 10 min for the first task, 3 left
+    assert got[1]["eta"] is None and got[1]["pct"] == 0  # no finished task yet
+    assert got[2]["eta"] is None and got[2]["pct"] == 100
+    assert got[3]["total"] == 0 and got[3]["pct"] == 0
+    assert got[4] == ["under a minute", "about 5 min", "about 2h 5m"]

@@ -159,3 +159,45 @@ def report_text(state: RunState) -> str:
         sections.append("Needs attention\n" + "\n".join(attention))
 
     return "\n\n".join(sections)
+
+
+def report_data(state: RunState) -> dict[str, object]:
+    """The numbers behind `report_text`, as JSON-ready values: per-task and per-tier usage,
+    the task counts and the escalated tasks. The page draws its tables from this."""
+
+    def usage(u: Usage) -> dict[str, float | int]:
+        return {
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cache_read_tokens": u.cache_read_tokens,
+            "cache_creation_tokens": u.cache_creation_tokens,
+            "cost_usd": u.cost_usd,
+        }
+
+    tasks = [
+        {
+            "task_id": tid,
+            "status": ts.status,
+            "attempts": ts.attempts,
+            "tier": ts.tier_used,
+            **usage(ts.usage),
+        }
+        for tid, ts in state.tasks.items()
+    ]
+    tiers = [
+        {"tier": tier, "attempts": attempts, "reviews": reviews, **usage(u)}
+        for tier, (attempts, reviews, u) in tier_totals(state).items()
+    ]
+    counts: dict[str, int] = {}
+    for ts in state.tasks.values():
+        counts[ts.status] = counts.get(ts.status, 0) + 1
+    total = Usage()
+    for ts in state.tasks.values():
+        total = total.plus(ts.usage)
+    return {
+        "tasks": tasks,
+        "tiers": tiers,
+        "counts": counts,
+        "total": usage(total),
+        "escalated": escalated_tasks(state),
+    }

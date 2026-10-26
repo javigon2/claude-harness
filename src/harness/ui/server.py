@@ -24,12 +24,14 @@ from pydantic import ValidationError
 
 from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
-from harness.report import report_text, status_text
+from harness.report import report_data, report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
+from harness.titles import read_title, read_titles
 from harness.ui.chat import CHAT_TIERS, ChatConflict
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
 from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
+from harness.ui.metrics import build_dashboard
 from harness.ui.office import (
     MAX_TEXT_CHARS,
     Office,
@@ -600,13 +602,23 @@ def make_handler(
             if path.startswith("/api/report/"):
                 self._report(unquote(path[len("/api/report/") :]))
                 return
+            if path.startswith("/api/dashboard/"):
+                self._dashboard(unquote(path[len("/api/dashboard/") :]))
+                return
             if path == "/api/runs":
                 try:
                     runs = list_runs(repo)
                 except (StateError, OSError, ValueError) as err:
                     self._json(500, {"error": str(err)})
                     return
-                self._json(200, {"runs": runs, "latest": runs[0] if runs else None})
+                self._json(
+                    200,
+                    {
+                        "runs": runs,
+                        "latest": runs[0] if runs else None,
+                        "titles": read_titles(repo, runs),
+                    },
+                )
                 return
             for prefix, stream in (("/api/run/", False), ("/api/stream/", True)):
                 if path.startswith(prefix):
@@ -682,8 +694,26 @@ def make_handler(
                 return
             self._json(
                 200,
-                {"run_id": run_id, "status": status_text(state), "report": report_text(state)},
+                {
+                    "run_id": run_id,
+                    "status": status_text(state),
+                    "report": report_text(state),
+                    "data": report_data(state),
+                    "title": read_title(repo, run_id),
+                },
             )
+
+        def _dashboard(self, run_id: str) -> None:
+            """The cost, time and latency numbers of a run next to the average of the others."""
+            try:
+                body = build_dashboard(self._repo, run_id).model_dump_json().encode()
+            except FileNotFoundError:
+                self._json(404, {"error": "unknown run"})
+                return
+            except (StateError, OSError, ValueError) as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._send(200, body)
 
         def _run(self, run_id: str) -> None:
             try:

@@ -3,6 +3,7 @@ from harness.report import (
     escalated_tasks,
     format_table,
     money,
+    report_data,
     report_text,
     status_text,
     tier_totals,
@@ -264,3 +265,13 @@ def test_report_text_paused_task():
     assert out.endswith(
         "Needs attention\n- p (paused): rate limited; resets at 2025-10-09T08:53:20+00:00"
     )
+
+
+def test_report_data_matches_the_text_report():
+    state = _three_task_run()
+    data = report_data(state)
+    assert [t["task_id"] for t in data["tasks"]] == list(state.tasks)
+    assert data["total"]["cost_usd"] == sum(t.usage.cost_usd for t in state.tasks.values())
+    assert [t["tier"] for t in data["tiers"]] == list(tier_totals(state))
+    assert data["escalated"] == escalated_tasks(state)
+    assert sum(data["counts"].values()) == len(state.tasks)
