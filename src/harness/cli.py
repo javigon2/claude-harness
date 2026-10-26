@@ -3,6 +3,7 @@
 import asyncio
 import os
 import secrets
+import signal
 from pathlib import Path
 from typing import Annotated, NoReturn, cast
 
@@ -114,6 +115,17 @@ def _load_run_or_exit(repo: Path, run_id: str | None) -> RunState:
         _fail(str(err))
 
 
+async def _run_until_stopped(scheduler: Scheduler, resume: bool) -> RunState:
+    """scheduler.run(resume), with SIGTERM asking the scheduler to stop (running tasks are
+    paused, the run ends as after a cost stop)."""
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, scheduler.request_stop)
+    except (NotImplementedError, RuntimeError):  # no signal handlers on this platform
+        pass
+    return await scheduler.run(resume=resume)
+
+
 @app.command()
 def run(
     plan: Path,
@@ -177,7 +189,7 @@ def run(
         max_cost_usd=max_cost,
     )
     try:
-        state = asyncio.run(scheduler.run(resume=resume))
+        state = asyncio.run(_run_until_stopped(scheduler, resume))
     except (SchedulerError, StateError) as err:
         _fail(str(err))
     typer.echo("")

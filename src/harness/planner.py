@@ -1,6 +1,8 @@
 """Planner behind `harness plan`: one interactive Opus session that runs the plan-project
 skill until the user approves PROJECT_PLAN.md, then plan-stage on stage N until it writes a
-plan.json that load_plan accepts. Every file goes under <repo>/.harness/plans/."""
+plan.json that load_plan accepts. Every file goes under <repo>/.harness/plans/. run_planner can
+also triage a request (direct, quick or project) in a separate one-turn Sonnet session with
+read-only tools, and write a quick one-stage plan under .harness/plans/quick-<stamp>/."""
 
 import asyncio
 import hashlib
@@ -9,7 +11,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -22,7 +24,7 @@ from claude_agent_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from harness.config import MODEL_IDS
+from harness.config import MODEL_IDS, Tier
 from harness.models import Usage
 from harness.plan import PlanError, load_plan
 from harness.worker import (
@@ -40,6 +42,10 @@ PLANNER_SKILLS: tuple[str, ...] = ("plan-project", "plan-stage")
 PLANNER_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
 
 PLANNER_MAX_TURNS = 80
+
+TRIAGE_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+
+TRIAGE_MAX_TURNS = 20
 
 PLANS_DIR = Path(".harness") / "plans"
 
@@ -77,6 +83,98 @@ FIX_PROMPT = (
 )
 
 PLANNER_INIT_FILE = Path(".harness") / "planner" / "session_init.json"
+
+Route = Literal["direct", "quick", "project"]
+
+RouteChoice = Literal["auto", "quick", "project"]
+
+APPROVE_QUICK = "\x00approve-quick"
+
+TRIAGE_PROMPT = (
+    "Decide how much planning this request needs. Target repo: {repo}\n"
+    "Read only what you need and write no file. End with a ```json block: "
+    '{{"route": "direct" | "quick" | "project", "tier": "haiku" | "sonnet", '
+    '"reason": "<one line>"}}.\n'
+    "direct: one agent in a short chat (1-3 files); haiku if mechanical, else sonnet. "
+    "quick: one stage of 2-8 work orders, no open question. "
+    "project: several stages or user choices.\n\nRequest:\n\n{description}"
+)
+
+QUICK_PROMPT = (
+    "Use the plan-stage skill in quick mode on the request below. Target repo: {repo}\n"
+    "Write plan.json and plan.md to {stage_dir}/ (exactly this directory) and run the "
+    "skill's validation snippet.\n\nRequest:\n\n{description}"
+)
+
+WRITE_PLAN_FIRST = "Write the plan first."
+
+NO_ROUTE_REASON = "triage gave no route; planning in full"
+
+_JSON_BLOCK_RE = re.compile(r"```json[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def quick_plan_dir(now: float) -> Path:
+    """PLANS_DIR / f"quick-{UTC %Y%m%d-%H%M%S of now}", relative to the target repo."""
+    return PLANS_DIR / f"quick-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(now))}"
+
+
+class Triage(BaseModel):
+    """Sonnet's routing of a request (the triage session): how much planning it needs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    route: Route
+    tier: Literal["haiku", "sonnet"] = "sonnet"
+    reason: str = ""
+
+
+def parse_triage(text: str) -> Triage | None:
+    """The last ```json block of `text` as a Triage; None if there is no block or it is not
+    valid JSON or not a valid Triage."""
+    blocks = _JSON_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    try:
+        return Triage.model_validate_json(blocks[-1])
+    except ValueError:
+        return None
+
+
+ORCHESTRATOR_PROMPT = (
+    "Route this message in the harness office; never answer it or edit a file. "
+    "Target repo: {repo}\n"
+    "Pick who takes the work by difficulty: haiku for a mechanical edit, sonnet for an "
+    "ordinary change in a short chat, opus for hard, multi-file or multi-stage work. Opus "
+    "plans it: plan quick for one stage of work orders, project for several stages or open "
+    "questions. Read only what you need.\n"
+    "Holder: {holder}. A follow-up stays with the holder unless it is clearly beyond the "
+    "holder; never pick a lower tier than the holder.\n"
+    'End with a ```json block: {{"to": "haiku" | "sonnet" | "opus", '
+    '"plan": "quick" | "project", "reason": "<one line>"}}.\n\n'
+    "Conversation so far:\n{tail}\n\nMessage:\n\n{text}"
+)
+
+
+class Routing(BaseModel):
+    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    to: Tier
+    plan: Literal["quick", "project"] = "project"
+    reason: str = ""
+
+
+def parse_routing(text: str) -> Routing | None:
+    """The last ```json block of `text` as a Routing; None if there is no block or it is not
+    valid JSON or not a valid Routing."""
+    blocks = _JSON_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    try:
+        return Routing.model_validate_json(blocks[-1])
+    except ValueError:
+        return None
 
 
 def stage_plan_dir(stage: int) -> Path:
@@ -133,15 +231,19 @@ class PlannerTurn(BaseModel):
 
 
 class PlanResult(BaseModel):
-    """What run_planner produced."""
+    """What run_planner produced. `plan_path` is None for the direct route (no plan is
+    written); `triage` is the Sonnet triage's routing when the route was chosen by triage.
+    `usage` includes the triage turn."""
 
     model_config = ConfigDict(extra="forbid")
 
     project_plan: Path
-    plan_path: Path
+    plan_path: Path | None
     usage: Usage = Field(default_factory=Usage)
     rounds: int = 0
     session_init: dict[str, Any] | None = None
+    route: Route = "project"
+    triage: Triage | None = None
 
 
 @runtime_checkable
@@ -314,6 +416,25 @@ class SdkPlannerSession:
             self._client = None
 
 
+class SdkTriageSession(SdkPlannerSession):
+    """The one-turn triage session: Sonnet with read-only tools, no skills, no settings."""
+
+    def options(self) -> ClaudeAgentOptions:
+        return ClaudeAgentOptions(
+            model=MODEL_IDS["sonnet"],
+            system_prompt={"type": "preset", "preset": "claude_code", "append": PLANNER_APPEND},
+            tools=list(TRIAGE_TOOLS),
+            allowed_tools=list(TRIAGE_TOOLS),
+            skills=[],
+            setting_sources=[],
+            permission_mode="default",
+            cwd=str(self.repo),
+            max_turns=TRIAGE_MAX_TURNS,
+            strict_mcp_config=True,
+            env=dict(WORKER_ENV),
+        )
+
+
 class FakePlannerSession:
     """A scripted PlannerSession for tests. Each send() takes the next step: a PlannerTurn
     (returned as a deep copy) or a callable (text) -> PlannerTurn, which may write files
@@ -350,16 +471,31 @@ async def run_planner(
     *,
     stage: int = 1,
     max_rounds: int = MAX_ROUNDS,
+    route: RouteChoice = "project",
+    on_triage: Callable[[Triage], None] | None = None,
+    quick_dir: Path | None = None,
+    triage_session: PlannerSession | None = None,
+    staging_only: bool = False,
 ) -> PlanResult:
-    """Drive both phases; algorithm in the `decision: planner flow` context item. Always
-    closes the session (finally). Raises PlannerError when it stops without a valid plan."""
+    """Drive the planner for one request. Always closes both sessions (finally). Raises
+    PlannerError when it stops without a valid plan.
+
+    With `staging_only` the project-planning turn is skipped for any stage, stage 1 too: the
+    approved PROJECT_PLAN.md on disk is the input (project route only).
+
+    The "auto" route needs `triage_session`: it gets the one TRIAGE_PROMPT turn, and
+    `session` (Opus) gets no message unless the route is quick or project. A triage turn
+    that fails or gives no valid route falls back to planning in full (NO_ROUTE_REASON)."""
     repo = Path(repo).resolve()
     project_plan = repo / PROJECT_PLAN_FILE
     rounds = 0
     usage = Usage()
+    triage_usage = Usage()
     session_init: dict[str, Any] | None = None
+    plan_fp: str | None = None
+    fixes = 0
 
-    async def turn(msg: str) -> None:
+    async def turn(msg: str) -> PlannerTurn:
         nonlocal rounds, usage, session_init
         rounds += 1
         if rounds > max_rounds:
@@ -379,6 +515,20 @@ async def run_planner(
             say(t.text)
         if t.error:
             raise PlannerError(f"planner session failed: {t.error}")
+        return t
+
+    async def triage_turn(sonnet: PlannerSession, msg: str) -> Triage:
+        nonlocal rounds, triage_usage
+        rounds += 1
+        try:
+            t = await sonnet.send(msg)
+        finally:
+            await sonnet.close()
+        triage_usage = t.usage
+        if t.text.strip():
+            say(t.text)
+        parsed = parse_triage(t.text) if not t.error else None
+        return parsed or Triage(route="project", reason=NO_ROUTE_REASON)
 
     async def answer() -> str:
         a = await asyncio.to_thread(ask, "> ")
@@ -388,13 +538,85 @@ async def run_planner(
             raise PlannerError("aborted by the user")
         return a
 
+    async def plan_turn(msg: str, plan_path: Path) -> bool:
+        nonlocal plan_fp, fixes
+        while True:
+            await turn(msg)
+            fp = _fingerprint(plan_path)
+            if fp is None or fp == plan_fp:
+                return False
+            plan_fp = fp
+            try:
+                load_plan(plan_path)
+            except (PlanError, ValueError, OSError) as err:
+                fixes += 1
+                if fixes > MAX_FIX_ROUNDS:
+                    raise PlannerError(
+                        f"{plan_path} is still invalid after {MAX_FIX_ROUNDS} fixes: {err}"
+                    ) from err
+                msg = FIX_PROMPT.format(plan_path=plan_path, error=err)
+                continue
+            return True
+
+    def result(plan_path: Path | None, route: Route, triage: Triage | None) -> PlanResult:
+        return PlanResult(
+            project_plan=project_plan,
+            plan_path=plan_path,
+            usage=triage_usage.plus(usage),
+            rounds=rounds,
+            session_init=session_init,
+            route=route,
+            triage=triage,
+        )
+
     try:
         if stage < 1:
             raise PlannerError("stage must be at least 1")
+        if route != "project" and stage != 1:
+            raise PlannerError(f"the {route} route needs stage 1")
+        if staging_only and route != "project":
+            raise PlannerError("staging only needs the project route")
+
+        triage: Triage | None = None
+        effective: Route
+        if route == "auto":
+            if triage_session is None:
+                raise PlannerError("the auto route needs a triage session")
+            triage = await triage_turn(
+                triage_session, TRIAGE_PROMPT.format(repo=repo, description=description.strip())
+            )
+            if on_triage is not None:
+                on_triage(triage)
+            effective = triage.route
+            if effective == "direct":
+                return result(None, "direct", triage)
+        else:
+            effective = route
+
+        if effective == "quick":
+            qdir = repo / (quick_dir if quick_dir is not None else quick_plan_dir(time.time()))
+            plan_path = qdir / "plan.json"
+            plan_fp = _fingerprint(plan_path)
+            await plan_turn(
+                QUICK_PROMPT.format(repo=repo, stage_dir=qdir, description=description.strip()),
+                plan_path,
+            )
+            while True:
+                a = await answer()
+                if a != APPROVE_QUICK:
+                    await plan_turn(a, plan_path)
+                    continue
+                try:
+                    load_plan(plan_path)
+                except (PlanError, ValueError, OSError):
+                    await plan_turn(WRITE_PLAN_FIRST, plan_path)
+                    continue
+                return result(plan_path, "quick", triage)
+
         stage_dir = repo / stage_plan_dir(stage)
         plan_path = stage_dir / "plan.json"
 
-        if stage == 1:
+        if stage == 1 and not staging_only:
             start_fp = _fingerprint(project_plan)
             msg = PROJECT_PROMPT.format(
                 repo=repo, project_plan=project_plan, description=description.strip()
@@ -414,30 +636,11 @@ async def run_planner(
             )
 
         plan_fp = _fingerprint(plan_path)
-        fixes = 0
         msg = STAGE_PROMPT.format(project_plan=project_plan, stage=stage, stage_dir=stage_dir)
-        while True:
-            await turn(msg)
-            fp = _fingerprint(plan_path)
-            if fp is not None and fp != plan_fp:
-                plan_fp = fp
-                try:
-                    load_plan(plan_path)
-                except (PlanError, ValueError, OSError) as err:
-                    fixes += 1
-                    if fixes > MAX_FIX_ROUNDS:
-                        raise PlannerError(
-                            f"{plan_path} is still invalid after {MAX_FIX_ROUNDS} fixes: {err}"
-                        ) from err
-                    msg = FIX_PROMPT.format(plan_path=plan_path, error=err)
-                    continue
-                return PlanResult(
-                    project_plan=project_plan,
-                    plan_path=plan_path,
-                    usage=usage,
-                    rounds=rounds,
-                    session_init=session_init,
-                )
+        while not await plan_turn(msg, plan_path):
             msg = await answer()
+        return result(plan_path, "project", triage)
     finally:
+        if triage_session is not None:
+            await triage_session.close()
         await session.close()

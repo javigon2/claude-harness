@@ -3,7 +3,8 @@
 DemoPlannerSession answers by what the message says, not by a fixed script, so "Continue
 conversation" can be pressed any number of times. It writes a real draft PROJECT_PLAN.md
 (shaped for the plan-project validator) and, on the stage prompt, a stage plan.json that
-`load_plan` accepts and the fake worker can pass."""
+`load_plan` accepts and the fake worker can pass. DemoChatSession is the scripted chat agent
+behind `harness ui --fake`."""
 
 import asyncio
 import json
@@ -21,6 +22,10 @@ from harness.worker import ProgressFn
 TURN_COST_USD = 0.01
 
 _STAGE_RE = re.compile(r"plan-stage skill on stage (\d+)")
+
+_ROUTE_WORD_RE = re.compile(r"\s*(direct|quick)\b", re.IGNORECASE)
+
+_QUICK_DIR_RE = re.compile(r"to (.+?)/ \(exactly")
 
 QUESTIONS = """Two questions before I write the plan:
 
@@ -185,6 +190,12 @@ def demo_stage_plan(stage: int) -> dict[str, Any]:
 class DemoPlannerSession:
     """A PlannerSession with scripted behaviour chosen by the message:
 
+    - the Orchestrator prompt: a JSON routing block: to = the message's first word when it
+      is haiku, sonnet or opus, else sonnet; plan quick when "quick" is one of its words.
+    - the triage prompt: a JSON route block: direct or quick when the request starts with
+      that word, else project; tier haiku.
+    - the quick prompt: a quick plan (demo_stage_plan(1), stage "quick") in the directory
+      the prompt names.
     - the plan-project prompt, or "earlier planning session was interrupted": three progress
       steps, then a Markdown question. No file is written.
     - "Now use the plan-stage skill on stage K": progress, then stage-K/plan.json + plan.md.
@@ -219,6 +230,12 @@ class DemoPlannerSession:
     async def send(self, text: str) -> PlannerTurn:
         self.sent.append(text)
         plan = self.repo / PROJECT_PLAN_FILE
+        if text.startswith("Route this message in the harness office;"):
+            return await self._route(text)
+        if text.startswith("Decide how much planning this request needs."):
+            return await self._triage(text)
+        if "plan-stage skill in quick mode" in text:
+            return await self._write_quick(text)
         if (
             "Use the plan-project skill" in text
             or "earlier planning session was interrupted" in text
@@ -244,6 +261,48 @@ class DemoPlannerSession:
         plan.write_text(f"{body.rstrip()}\n\n## Revision {n}\n\n> {echo}\n", encoding="utf-8")
         return self._turn(DRAFT_REPLY)
 
+    async def _triage(self, text: str) -> PlannerTurn:
+        """Route by the request's first word: direct, quick, else project; tier haiku."""
+        request = text.split("Request:\n\n", 1)[-1]
+        m = _ROUTE_WORD_RE.match(request)
+        route = m.group(1).lower() if m else "project"
+        await self._step("Read", "README.md")
+        block = json.dumps({"route": route, "tier": "haiku", "reason": f"demo triage: {route}"})
+        return self._turn(f"Routing this as {route}.\n\n```json\n{block}\n```")
+
+    async def _route(self, text: str) -> PlannerTurn:
+        """Route by the message's first word: haiku, sonnet or opus, else sonnet; plan quick
+        when "quick" is one of its words, else project."""
+        message = text.rsplit("Message:\n\n", 1)[-1]
+        words = message.lower().split()
+        to = words[0] if words and words[0] in ("haiku", "sonnet", "opus") else "sonnet"
+        plan = "quick" if "quick" in words else "project"
+        await self._step("Read", "README.md")
+        block = json.dumps({"to": to, "plan": plan, "reason": f"demo routing: {to}"})
+        return self._turn(f"Routing to {to}.\n\n```json\n{block}\n```")
+
+    async def _write_quick(self, text: str) -> PlannerTurn:
+        """Write demo_stage_plan(1), stage "quick", plus a plan.md into the prompt's dir."""
+        m = _QUICK_DIR_RE.search(text)
+        if m is None:
+            return self._turn("No plan directory given.")
+        directory = self.repo / m.group(1)
+        await self._step("Read", "README.md")
+        await self._step("Write", f"{m.group(1)}/plan.json")
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "plan.json"
+        data = {**demo_stage_plan(1), "stage": "quick"}
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        (directory / "plan.md").write_text(
+            "# Quick plan (demo)\n\nWritten by the scripted demo planner.\n", encoding="utf-8"
+        )
+        plan = load_plan(path)
+        waves = validate_plan(plan)
+        return self._turn(
+            f"Quick plan: {len(plan.orders)} orders in {len(waves)} waves, validated. "
+            "Press Start to run it."
+        )
+
     async def _write_stage(self, stage: int) -> PlannerTurn:
         await self._step("Read", PROJECT_PLAN_FILE.as_posix())
         directory = self.repo / stage_plan_dir(stage)
@@ -261,4 +320,57 @@ class DemoPlannerSession:
         )
 
     async def close(self) -> None:
+        self.closed = True
+
+
+CHAT_TURN_COST_USD = 0.002
+
+
+class DemoChatSession:
+    """A scripted chat agent for `harness ui --fake`: no model, no network. Every send()
+    reports a Read of README.md and an Edit of notes.md, appends one line to
+    <repo>/notes.md and answers in one line. `usage.cost_usd` grows by 0.002 a turn."""
+
+    def __init__(
+        self, repo: Path, tier: str, progress: ProgressFn | None = None, delay_s: float = 1.0
+    ) -> None:
+        """self.repo = Path(repo).resolve(); self.tier = tier; self.sent: list[str] = [];
+        self.closed = False; keep progress and delay_s; the running cost starts at 0.0."""
+        self.repo = Path(repo).resolve()
+        self.tier = tier
+        self.sent: list[str] = []
+        self.closed = False
+        self._progress = progress
+        self._delay = delay_s
+        self._cost = 0.0
+
+    async def _step(self, tool: str, detail: str) -> None:
+        if self._progress is not None:
+            try:
+                await self._progress({"tool": tool, "detail": detail})
+            except Exception:
+                pass
+        await asyncio.sleep(self._delay)
+
+    async def send(self, text: str) -> PlannerTurn:
+        """Append text to self.sent; report ("Read", "README.md") then ("Edit", "notes.md")
+        like DemoPlannerSession._step (a broken callback is ignored; sleep delay_s after
+        each); append f"- {line}\\n" to <repo>/notes.md (created if missing, UTF-8), where
+        line is the first non-blank line of text, stripped, or "note" if there is none;
+        add CHAT_TURN_COST_USD to the cost and return PlannerTurn(text=f"Done ({self.tier}
+        demo): noted it in notes.md.", usage=Usage(cost_usd=round(cost, 4)))."""
+        self.sent.append(text)
+        await self._step("Read", "README.md")
+        await self._step("Edit", "notes.md")
+        line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "note")
+        with (self.repo / "notes.md").open("a", encoding="utf-8") as fh:
+            fh.write(f"- {line}\n")
+        self._cost += CHAT_TURN_COST_USD
+        return PlannerTurn(
+            text=f"Done ({self.tier} demo): noted it in notes.md.",
+            usage=Usage(cost_usd=round(self._cost, 4)),
+        )
+
+    async def close(self) -> None:
+        """self.closed = True."""
         self.closed = True

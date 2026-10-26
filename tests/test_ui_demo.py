@@ -3,6 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from git_helpers import init_repo
 from typer.testing import CliRunner
 
@@ -10,14 +11,19 @@ from harness.cli import app
 from harness.models import Plan
 from harness.plan import load_plan, validate_plan
 from harness.planner import (
+    APPROVE_QUICK,
     PROJECT_PLAN_FILE,
+    QUICK_PROMPT,
+    TRIAGE_PROMPT,
+    PlannerError,
     PlanResult,
     is_approved,
+    parse_triage,
     run_planner,
     stage_plan_dir,
 )
 from harness.state import latest_run, load_state
-from harness.ui.demo import DemoPlannerSession, demo_stage_plan
+from harness.ui.demo import DemoChatSession, DemoPlannerSession, demo_stage_plan
 from harness.ui.markdown import parse_markdown
 from harness.worktree import ensure_excluded
 
@@ -161,3 +167,132 @@ def test_harness_run_passes_the_demo_stage_plan_with_fake_worker(tmp_path):
     assert state.finished
     assert {t.status for t in state.tasks.values()} == {"done"}
     assert set(state.tasks) == {"demo-a", "demo-b", "demo-c"}
+
+
+async def test_demo_chat_session_edits_notes(tmp_path):
+    seen: list[dict] = []
+
+    async def rec(info: dict) -> None:
+        seen.append(info)
+
+    s = DemoChatSession(tmp_path, "haiku", progress=rec, delay_s=0)
+    t1 = await s.send("\n  add a line  \nmore")
+    assert [p["tool"] for p in seen] == ["Read", "Edit"]
+    assert [p["detail"] for p in seen] == ["README.md", "notes.md"]
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "- add a line\n"
+    assert t1.text == "Done (haiku demo): noted it in notes.md."
+    assert t1.usage.cost_usd == 0.002
+    t2 = await s.send("   ")
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "- add a line\n- note\n"
+    assert t2.usage.cost_usd == 0.004
+    assert s.sent == ["\n  add a line  \nmore", "   "]
+
+
+async def test_demo_chat_session_close(tmp_path):
+    s = DemoChatSession(tmp_path, "sonnet", delay_s=0)
+    assert not s.closed
+    turn = await s.send("hello")
+    assert turn.text == "Done (sonnet demo): noted it in notes.md."
+    await s.close()
+    assert s.closed
+
+
+async def test_triage_routes_by_first_word(tmp_path):
+    cases = [
+        ("direct fix the typo", "direct"),
+        ("Quick: add a flag", "quick"),
+        ("quickly build an app", "project"),
+        ("a todo app", "project"),
+    ]
+    for description, route in cases:
+        s = DemoPlannerSession(tmp_path, delay_s=0)
+        turn = await s.send(TRIAGE_PROMPT.format(repo=tmp_path, description=description))
+        triage = parse_triage(turn.text)
+        assert triage is not None
+        assert triage.route == route
+        assert triage.tier == "haiku"
+        assert triage.reason == f"demo triage: {route}"
+    assert not any(tmp_path.iterdir())
+
+
+async def test_quick_prompt_writes_a_quick_plan(tmp_path):
+    seen: list[dict] = []
+
+    async def progress(info: dict) -> None:
+        seen.append(info)
+
+    s = DemoPlannerSession(tmp_path, progress=progress, delay_s=0)
+    turn = await s.send(
+        QUICK_PROMPT.format(
+            repo=tmp_path,
+            stage_dir=tmp_path / ".harness/plans/quick-1",
+            description="add a flag",
+        )
+    )
+    assert [p["tool"] for p in seen] == ["Read", "Write"]
+    plan_path = tmp_path / ".harness/plans/quick-1" / "plan.json"
+    plan = load_plan(plan_path)
+    assert plan.stage == "quick"
+    assert [o.id for o in plan.orders] == ["demo-a", "demo-b", "demo-c"]
+    assert (tmp_path / ".harness/plans/quick-1" / "plan.md").is_file()
+    assert turn.text == "Quick plan: 3 orders in 2 waves, validated. Press Start to run it."
+
+
+async def test_run_planner_quick_lane_with_the_demo(tmp_path):
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return APPROVE_QUICK
+
+    said: list[str] = []
+    result = await run_planner(
+        "quick add a flag",
+        tmp_path,
+        DemoPlannerSession(tmp_path, delay_s=0),
+        ask,
+        said.append,
+        route="auto",
+        quick_dir=Path(".harness/plans/quick-1"),
+        triage_session=DemoPlannerSession(tmp_path, delay_s=0),
+    )
+    assert result.route == "quick"
+    assert result.plan_path == tmp_path.resolve() / ".harness/plans/quick-1/plan.json"
+
+
+async def test_run_planner_direct_lane_with_the_demo(tmp_path):
+    def ask(prompt: str) -> str:
+        raise AssertionError("the direct route asks nothing")
+
+    result = await run_planner(
+        "direct note this",
+        tmp_path,
+        DemoPlannerSession(tmp_path, delay_s=0),
+        ask,
+        lambda text: None,
+        route="auto",
+        triage_session=DemoPlannerSession(tmp_path, delay_s=0),
+    )
+    assert result.route == "direct"
+    assert result.plan_path is None
+    assert result.triage is not None
+    assert result.triage.tier == "haiku"
+
+
+async def test_auto_project_lane_still_asks(tmp_path):
+    session = DemoPlannerSession(tmp_path, delay_s=0)
+
+    def ask(prompt: str) -> None:
+        return None
+
+    with pytest.raises(PlannerError, match=re.escape("aborted: no answer (end of input)")):
+        await run_planner(
+            "a todo app",
+            tmp_path,
+            session,
+            ask,
+            lambda text: None,
+            route="auto",
+            triage_session=DemoPlannerSession(tmp_path, delay_s=0),
+        )
+    assert session.sent[0].startswith("Use the plan-project skill")

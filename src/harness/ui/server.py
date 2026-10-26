@@ -1,8 +1,15 @@
 """The office's HTTP server: loopback only, stdlib only.
 
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
-POST endpoints, each behind the Host, Origin and token checks, a JSON-only body of at most
-64 KB, and a strict per-route body schema."""
+POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), the run
+POST endpoints (POST /api/run/{resume,stop,launch,options}) and the Orchestrator POST endpoints
+(POST /api/orchestrator/{message,new}), each behind the Host, Origin and token checks, a
+JSON-only body of at most 64 KB, and a strict per-route body schema.
+
+Given a `Host` instead (the launcher) the project is not fixed: each request works on the
+Host's current project and Office, answers 409 `NO_PROJECT` when none is open, and the
+project endpoints (GET /api/project, POST /api/project/{browse,open,init-preview,init,
+pull-origin}, POST /api/server/restart) are served. Without a Host nothing changes."""
 
 import json
 import os
@@ -10,20 +17,31 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
+
+from pydantic import ValidationError
 
 from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
-from harness.state import STATE_FILE, StateError, run_dir
+from harness.report import report_text, status_text
+from harness.state import STATE_FILE, StateError, load_state, run_dir
+from harness.ui.chat import CHAT_TIERS, ChatConflict
+from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
+from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
 from harness.ui.office import (
     MAX_TEXT_CHARS,
     Office,
     OfficeConflict,
+    live_run,
     office_view_from_log,
+    plan_status,
     status_of,
 )
+from harness.ui.orchestrator import OrchestratorConflict
+from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
+from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.view import build_view, list_runs
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
@@ -37,7 +55,14 @@ _VIEW_ERRORS = (FileNotFoundError, StateError, OSError, ValueError)
 _TOKEN_META = '<meta name="harness-token" content="">'
 _MODE_META = '<meta name="harness-mode" content="read-only">'
 
-POST_ROUTES = ("start", "message", "implement", "next-stage")
+POST_ROUTES = ("start", "message", "implement", "next-stage", "stage")
+CHAT_ROUTES = ("start", "message", "close")
+RUN_ROUTES = ("resume", "stop", "launch", "options")
+MAX_PLAN_PATH_CHARS = 500
+ORCH_ROUTES = ("message", "new")
+PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
+MAX_PATH_CHARS = 4096
+ROUTE_CHOICES = ("auto", "quick", "project")
 
 
 def render_page(token: str, mode: str) -> bytes:
@@ -63,13 +88,19 @@ def _text_field(body: dict, key: str) -> str:
 
 
 def _check_body(route: str, body: object) -> dict:
-    """The body of a POST to /api/planner/<route>, or _BadBody. Exactly the allowed keys:
-    start {description} or {from_draft: true}; message {text}; implement and next-stage {}."""
+    """The body of a POST to /api/planner/<route> or /api/run/<route>, or _BadBody. Exactly
+    the allowed keys: start {description}, {description, route} or {from_draft: true};
+    message {text}; stage {stage} (an int of at least 1); launch {plan_path}; options
+    {review, max_parallel, max_cost, fake}; implement, next-stage, resume and stop {}."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
     if route == "start":
-        if keys == {"description"}:
+        if keys == {"description", "route"}:
+            _text_field(body, "description")
+            if not isinstance(body["route"], str) or body["route"] not in ROUTE_CHOICES:
+                raise _BadBody("route must be auto, quick or project")
+        elif keys == {"description"}:
             _text_field(body, "description")
         elif keys == {"from_draft"}:
             if body["from_draft"] is not True:
@@ -80,6 +111,105 @@ def _check_body(route: str, body: object) -> dict:
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
+    elif route == "stage":
+        if keys != {"stage"}:
+            raise _BadBody("send exactly: stage")
+        stage = body["stage"]
+        if isinstance(stage, bool) or not isinstance(stage, int) or stage < 1:
+            raise _BadBody("stage must be an integer of at least 1")
+    elif route == "launch":
+        if keys != {"plan_path"}:
+            raise _BadBody("send exactly: plan_path")
+        value = body["plan_path"]
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_PLAN_PATH_CHARS:
+            raise _BadBody(
+                f"plan_path must be a non-empty string of at most {MAX_PLAN_PATH_CHARS} characters"
+            )
+    elif route == "options":
+        if keys != {"review", "max_parallel", "max_cost", "fake"}:
+            raise _BadBody("send exactly: review, max_parallel, max_cost, fake")
+        try:
+            RunOptions.model_validate(body, strict=True)
+        except ValidationError as err:
+            first = err.errors()[0]
+            where = ".".join(str(x) for x in first["loc"])
+            raise _BadBody(f"bad run options: {where}: {first['msg']}") from None
+    elif keys:
+        raise _BadBody("this endpoint takes no fields")
+    return body
+
+
+def _id_field(body: dict, key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip() or len(value) > 200:
+        raise _BadBody(f"{key} must be a non-empty string")
+    return value
+
+
+def _check_chat_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/chat/<route>, or _BadBody. Exactly the allowed keys:
+    start {tier, text} or {tier, text, run_id, task_id}; message {chat_id, text};
+    close {chat_id}."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route == "start":
+        if keys not in ({"tier", "text"}, {"tier", "text", "run_id", "task_id"}):
+            raise _BadBody("send exactly: tier, text (and optionally run_id, task_id)")
+        if not isinstance(body["tier"], str) or body["tier"] not in CHAT_TIERS:
+            raise _BadBody("tier must be haiku or sonnet")
+        _text_field(body, "text")
+        for key in ("run_id", "task_id"):
+            if key in body:
+                _id_field(body, key)
+    elif route == "message":
+        if keys != {"chat_id", "text"}:
+            raise _BadBody("send exactly: chat_id, text")
+        _id_field(body, "chat_id")
+        _text_field(body, "text")
+    elif route == "close":
+        if keys != {"chat_id"}:
+            raise _BadBody("send exactly: chat_id")
+        _id_field(body, "chat_id")
+    return body
+
+
+def _check_orch_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
+    keys: message {text}; new {}."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route == "message":
+        if keys != {"text"}:
+            raise _BadBody("send exactly: text")
+        _text_field(body, "text")
+    elif keys:
+        raise _BadBody("this endpoint takes no fields")
+    return body
+
+
+def _check_project_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/project/<route> or /api/server/restart, or _BadBody.
+    Exactly the allowed keys: browse {path, hidden}; open {path}; init-preview, init,
+    pull-origin and restart {}. `path` is at most MAX_PATH_CHARS characters and, after `~`
+    is expanded, absolute."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route in ("browse", "open"):
+        want = {"path", "hidden"} if route == "browse" else {"path"}
+        if keys != want:
+            raise _BadBody(f"send exactly: {', '.join(sorted(want, reverse=True))}")
+        value = body["path"]
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_PATH_CHARS:
+            raise _BadBody(
+                f"path must be a non-empty string of at most {MAX_PATH_CHARS} characters"
+            )
+        if "\0" in value or not Path(value).expanduser().is_absolute():
+            raise _BadBody("path must be an absolute folder path")
+        if route == "browse" and not isinstance(body["hidden"], bool):
+            raise _BadBody("hidden must be true or false")
     elif keys:
         raise _BadBody("this endpoint takes no fields")
     return body
@@ -127,18 +257,35 @@ def make_handler(
     heartbeat_s: float = HEARTBEAT_S,
     office: Office | None = None,
     token: str | None = None,
+    host: Host | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
-    `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
-    `office` every other method answers 405 (read-only). With one, POST
-    `/api/planner/{start,message,implement,next-stage}` is served (`token` guards it; one is
-    made if not given) and every other method still answers 405. Request logging is
-    silenced."""
-    interactive = office is not None
+    `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`, `/api/plans`,
+    `/api/report/<run_id>`. Without an `office` every other method answers 405 (read-only).
+    With one, POST `/api/planner/{start,message,implement,next-stage,stage}`, POST
+    `/api/chat/{start,message,close}`, POST `/api/run/{resume,stop,launch,options}` and POST
+    `/api/orchestrator/{message,new}` are served (`token` guards them; one is made if not
+    given) and every other method still answers 405. Request logging is silenced."""
+    fixed_repo, fixed_office = repo, office
+    interactive = office is not None or host is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
 
     class Handler(BaseHTTPRequestHandler):
+        _repo: Path
+        _office: Office | None
+        _no_project: bool = False
+
+        def _bind(self) -> None:
+            """Pick the project this request works on: the fixed one, or the Host's current
+            one (`_no_project` when none is open)."""
+            if host is None:
+                self._repo, self._office, self._no_project = fixed_repo, fixed_office, False
+                return
+            project, current = host.current()
+            self._repo, self._office = (project or host.cwd), current
+            self._no_project = project is None
+
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             return
 
@@ -177,11 +324,12 @@ def make_handler(
         do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _not_get
 
         def do_POST(self) -> None:
-            if office is None:
+            if not interactive:
                 self._not_get()
                 return
+            self._bind()
             try:
-                self._post(office)
+                self._post()
             except _CLIENT_GONE:
                 return
 
@@ -213,15 +361,33 @@ def make_handler(
             sent = self.headers.get("X-Harness-Token") or ""
             return secrets.compare_digest(sent.encode("utf-8"), secret.encode("utf-8"))
 
-        def _post(self, office: Office) -> None:
+        def _post(self) -> None:
             """Every safety rule in order; a request failing any of them changes nothing."""
             if not self._host_ok():
                 self._reject(403, "bad host")
                 return
             path = urlsplit(self.path).path.rstrip("/")
-            prefix = "/api/planner/"
-            route = path[len(prefix) :] if path.startswith(prefix) else ""
-            if route not in POST_ROUTES:
+            kind, route = "", ""
+            if path.startswith("/api/planner/"):
+                kind, route = "planner", path[len("/api/planner/") :]
+                known = route in POST_ROUTES
+            elif path.startswith("/api/chat/"):
+                kind, route = "chat", path[len("/api/chat/") :]
+                known = route in CHAT_ROUTES
+            elif path.startswith("/api/run/"):
+                kind, route = "run", path[len("/api/run/") :]
+                known = route in RUN_ROUTES
+            elif path.startswith("/api/orchestrator/"):
+                kind, route = "orchestrator", path[len("/api/orchestrator/") :]
+                known = route in ORCH_ROUTES
+            elif host is not None and path.startswith("/api/project/"):
+                kind, route = "project", path[len("/api/project/") :]
+                known = route in PROJECT_ROUTES
+            elif host is not None and path == "/api/server/restart":
+                kind, route, known = "server", "restart", True
+            else:
+                known = False
+            if not known:
                 self._reject(404, "not found")
                 return
             if not self._origin_ok():
@@ -251,31 +417,145 @@ def make_handler(
             self.connection.settimeout(10)
             raw = self.rfile.read(length)
             try:
-                body = _check_body(route, json.loads(raw.decode("utf-8")))
+                parsed = json.loads(raw.decode("utf-8"))
+                if kind == "chat":
+                    body = _check_chat_body(route, parsed)
+                elif kind == "orchestrator":
+                    body = _check_orch_body(route, parsed)
+                elif kind in ("project", "server"):
+                    body = _check_project_body(route, parsed)
+                else:
+                    body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
                 self._json(400, {"error": str(err) if isinstance(err, _BadBody) else "bad JSON"})
                 return
+            if kind in ("project", "server"):
+                assert host is not None
+                self._project_post(host, route, body)
+                return
+            office = self._office
+            if office is None:
+                self._json(409, {"error": NO_PROJECT})
+                return
             try:
-                if route == "start":
+                if kind == "chat":
+                    if route == "start":
+                        office.chats.start(
+                            body["tier"],
+                            body["text"],
+                            run_id=body.get("run_id"),
+                            task_id=body.get("task_id"),
+                        )
+                    elif route == "message":
+                        office.chats.message(body["chat_id"], body["text"])
+                    else:
+                        office.chats.close_chat(body["chat_id"])
+                elif kind == "run":
+                    if route == "resume":
+                        office.resume_run()
+                    elif route == "stop":
+                        office.stop_run()
+                    elif route == "launch":
+                        office.launch_plan(body["plan_path"])
+                    else:
+                        office.set_run_options(RunOptions.model_validate(body, strict=True))
+                elif kind == "orchestrator":
+                    if route == "message":
+                        office.orchestrator.message(body["text"])
+                    else:
+                        office.orchestrator.new_thread()
+                elif route == "start":
                     office.start(
                         description=body.get("description"),
                         from_draft=body.get("from_draft") is True,
+                        route=body.get("route", "project"),
                     )
                 elif route == "message":
                     office.message(body["text"])
                 elif route == "implement":
                     office.implement()
+                elif route == "stage":
+                    office.plan_stage(body["stage"])
                 else:
                     office.next_stage()
-            except OfficeConflict as err:
+            except (OfficeConflict, ChatConflict, OrchestratorConflict) as err:
                 self._json(409, {"error": str(err)})
                 return
             self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
+
+        def _project_post(self, host: Host, route: str, body: dict) -> None:
+            """The /api/project/* and /api/server/restart routes. ProjectError answers 400;
+            HostConflict and GitOpError answer 409."""
+            try:
+                if route == "browse":
+                    listing = list_dir(Path(body["path"]).expanduser(), body["hidden"])
+                    self._json(200, listing.model_dump(mode="json"))
+                elif route == "open":
+                    host.open_project(Path(body["path"]).expanduser())
+                    project, _ = host.current()
+                    self._json(
+                        200,
+                        {"ok": True, "project": repo_info(project).model_dump(mode="json")}
+                        if project is not None
+                        else {"ok": True, "project": None},
+                    )
+                elif route == "restart":
+                    host.request_restart()
+                    self._json(200, {"ok": True})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                else:
+                    self._project_git(host, route)
+            except ProjectError as err:
+                self._json(400, {"error": str(err)})
+            except (HostConflict, GitOpError) as err:
+                self._json(409, {"error": str(err)})
+
+        def _project_git(self, host: Host, route: str) -> None:
+            """init-preview, init and pull-origin act on the open project."""
+            project, office = host.current()
+            if project is None or office is None:
+                raise HostConflict(NO_PROJECT)
+            if route == "init-preview":
+                files, truncated = init_preview(project)
+                self._json(200, {"files": files, "truncated": truncated})
+                return
+            if route == "init":
+                reason = host.busy() or (
+                    f"a run is active ({live}); wait for it to finish"
+                    if (live := live_run(project)) is not None
+                    else None
+                )
+                if reason is not None:
+                    raise HostConflict(reason)
+                sha = init_project(project)
+                self._json(
+                    200,
+                    {"ok": True, "sha": sha, "project": repo_info(project).model_dump(mode="json")},
+                )
+                return
+            self._json(200, {"ok": True, "output": pull_into_origin(project)})
+
+        def _project_info(self) -> None:
+            """GET /api/project: the open project and what the browser needs around it."""
+            assert host is not None
+            project, _ = host.current()
+            self._json(
+                200,
+                {
+                    "project": repo_info(project).model_dump(mode="json") if project else None,
+                    "recent": load_recent(host.recent_path),
+                    "cwd": str(host.cwd),
+                    "home": str(Path.home()),
+                    "started": host.started,
+                    "busy": host.busy(),
+                },
+            )
 
         def do_GET(self) -> None:
             if not self._host_ok():
                 self._json(403, {"error": "bad host"})
                 return
+            self._bind()
             try:
                 self._route()
             except _CLIENT_GONE:
@@ -293,12 +573,32 @@ def make_handler(
                     return
                 self._send(200, body, ctype="text/html; charset=utf-8")
                 return
+            if host is not None and path == "/api/project":
+                self._project_info()
+                return
+            if self._no_project:
+                self._json(409, {"error": NO_PROJECT})
+                return
+            repo, office = self._repo, self._office
             if path == "/api/office":
                 view = office.view() if office is not None else office_view_from_log(repo)
                 self._json(200, view.model_dump(mode="json"))
                 return
             if path == "/api/plan":
                 self._plan()
+                return
+            if path == "/api/plans":
+                self._json(
+                    200,
+                    {
+                        "plans": [e.model_dump(mode="json") for e in list_plans(repo)],
+                        "unstaged": unstaged_stages(repo),
+                        "plan_status": plan_status(repo),
+                    },
+                )
+                return
+            if path.startswith("/api/report/"):
+                self._report(unquote(path[len("/api/report/") :]))
                 return
             if path == "/api/runs":
                 try:
@@ -327,21 +627,67 @@ def make_handler(
             self._json(404, {"error": "not found"})
 
         def _plan(self) -> None:
+            """The quick plan's plan.md while the office has one (kind "quick"), else
+            PROJECT_PLAN_FILE (kind "project"). Answers 500 on any other OSError."""
+            repo, office = self._repo, self._office
+            quick_plan = office.view().quick_plan if office is not None else None
+            if quick_plan is not None:
+                self._quick_plan(quick_plan)
+                return
             try:
                 text = (repo / PROJECT_PLAN_FILE).read_text(encoding="utf-8", errors="replace")
             except FileNotFoundError:
-                self._json(200, {"exists": False, "status": None, "blocks": []})
+                self._json(200, {"exists": False, "status": None, "blocks": [], "kind": "project"})
                 return
             except OSError as err:
                 self._json(500, {"error": str(err)})
                 return
             self._json(
-                200, {"exists": True, "status": status_of(text), "blocks": parse_markdown(text)}
+                200,
+                {
+                    "exists": True,
+                    "status": status_of(text),
+                    "blocks": parse_markdown(text),
+                    "kind": "project",
+                },
+            )
+
+        def _quick_plan(self, quick_plan: str) -> None:
+            """plan.md beside the quick plan.json at the repo-relative `quick_plan`."""
+            path = self._repo / PurePosixPath(quick_plan).parent / "plan.md"
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                self._json(200, {"exists": False, "status": None, "blocks": [], "kind": "quick"})
+                return
+            except OSError as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(
+                200,
+                {"exists": True, "status": None, "blocks": parse_markdown(text), "kind": "quick"},
+            )
+
+        def _report(self, run_id: str) -> None:
+            """The status and cost report texts of a run, as `harness status` and
+            `harness report` print them."""
+            repo = self._repo
+            try:
+                if run_id not in list_runs(repo):
+                    self._json(404, {"error": "unknown run"})
+                    return
+                state = load_state(run_dir(repo, run_id))
+            except (StateError, OSError, ValueError) as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(
+                200,
+                {"run_id": run_id, "status": status_text(state), "report": report_text(state)},
             )
 
         def _run(self, run_id: str) -> None:
             try:
-                body = build_view(repo, run_id).model_dump_json().encode()
+                body = build_view(self._repo, run_id).model_dump_json().encode()
             except FileNotFoundError:
                 self._json(404, {"error": "unknown run"})
                 return
@@ -352,7 +698,9 @@ def make_handler(
 
         def _snapshot(self, run_id: str, sig: tuple[int, int]) -> bytes:
             try:
-                return b"data: " + build_view(repo, run_id).model_dump_json().encode() + b"\n\n"
+                return (
+                    b"data: " + build_view(self._repo, run_id).model_dump_json().encode() + b"\n\n"
+                )
             except _VIEW_ERRORS as err:
                 return (
                     b"event: problem\ndata: " + json.dumps({"error": str(err)}).encode() + b"\n\n"
@@ -368,6 +716,7 @@ def make_handler(
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             stopping = getattr(self.server, "stopping", None)
+            repo = self._repo
             sig = _signature(repo, run_id)
             self._write(self._snapshot(run_id, sig))
             last_write = time.monotonic()
@@ -403,10 +752,11 @@ def make_server(
     heartbeat_s: float = HEARTBEAT_S,
     office: Office | None = None,
     token: str | None = None,
+    host: Host | None = None,
 ) -> ThreadingHTTPServer:
     """A server bound to ("127.0.0.1", port); port 0 picks a free port. An OSError from the
     bind propagates. With an `office` the POST endpoints are on (see make_handler). The caller
     runs serve_forever() and later shutdown() + server_close()."""
     return _Server(
-        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token)
+        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token, host)
     )

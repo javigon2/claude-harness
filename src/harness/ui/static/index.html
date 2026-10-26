@@ -39,16 +39,28 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 #feed .time { color: #6b7280; margin-right: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 #feed .tid { margin-right: 6px; }
 .hidden { display: none; }
-#office { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; padding: 8px 0 14px; }
+#office { padding: 8px 0 14px; }
+.teacher { display: flex; justify-content: center; padding-bottom: 12px; margin-bottom: 6px; border-bottom: 2px solid #e5e7eb; }
+.row { display: flex; gap: 12px; align-items: flex-end; margin-top: 10px; }
+.row.hidden { display: none; }
+.row-label { flex: none; width: 56px; padding-bottom: 8px; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; }
+.row-desks { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; }
 .desk { position: relative; width: 132px; padding-top: 74px; text-align: center; }
 .desk-label { font-size: 12px; margin-top: 6px; color: #374151; word-break: break-all; }
+.desk[data-task] { cursor: pointer; }
+.desk.selected .desk-top { box-shadow: 0 0 0 3px #f59e0b; }
 .desk-top { height: 30px; border-radius: 4px; border: 2px solid #9ca3af; background: #e5e7eb; position: relative; }
 .desk-top::before { content: ""; position: absolute; left: 50%; top: -14px; width: 26px; height: 12px; margin-left: -13px; border: 2px solid #9ca3af; border-radius: 2px; background: #f9fafb; }
 .worker { position: absolute; left: 50%; top: 34px; width: 28px; margin-left: -14px; height: 40px; display: none; }
 .worker::before { content: ""; position: absolute; left: 7px; top: 0; width: 14px; height: 14px; border-radius: 50%; background: #6b7280; }
 .worker::after { content: ""; position: absolute; left: 2px; top: 16px; width: 24px; height: 20px; border-radius: 10px 10px 0 0; background: #6b7280; }
 .desk-running .worker, .desk-verifying .worker, .desk-paused .worker, .desk-done .worker, .desk-failed .worker, .desk-blocked .worker, .desk-boss .worker { display: block; }
-.desk-done .worker, .desk-failed .worker, .desk-blocked .worker { opacity: 0.45; }
+.desk-done .worker, .desk-failed .worker, .desk-blocked .worker { opacity: 0; animation: walk-out 0.8s ease-in forwards; }
+.desk-running .worker, .desk-verifying .worker { animation: walk-in 0.8s ease-out, type 0.7s ease-in-out 0.8s infinite; }
+.settled .worker { animation: none; }
+@keyframes walk-in { from { transform: translateX(-80px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes walk-out { from { transform: none; opacity: 1; } to { transform: translateX(80px); opacity: 0; } }
+@keyframes type { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(2px); } }
 .desk-pending .desk-top { border-style: dashed; background: #f3f4f6; border-color: #d1d5db; }
 .desk-running .desk-top { border-color: #2563eb; background: #dbeafe; }
 .desk-verifying .desk-top { border-color: #7c3aed; background: #ede9fe; }
@@ -74,6 +86,29 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 .boss-interrupted .desk-top { border-color: #d97706; background: #fed7aa; }
 .boss-terminal .desk-top { border-color: #7c3aed; background: #ede9fe; }
 .bubble-boss { border-color: #374151; }
+.desk-orch { cursor: pointer; }
+.desk-orch .worker { display: block; }
+.desk-orch .worker::before, .desk-orch .worker::after { background: #1f2937; }
+.orch-idle .desk-top { border-color: #374151; background: #d1d5db; }
+.orch-routing .desk-top { border-color: #2563eb; background: #dbeafe; }
+.orch-failed .desk-top { border-color: #dc2626; background: #fecaca; }
+.orch-routing .mark::before { content: "\2022\2022\2022"; color: #2563eb; animation: think 1.2s ease-in-out infinite; }
+.bubble-orch { border-color: #374151; }
+.desk-chat { cursor: pointer; }
+.chat-working .worker, .chat-waiting .worker { display: block; }
+.chat-working .worker { animation: type 0.7s ease-in-out infinite; }
+.chat-free .desk-top { border-style: dashed; background: #f3f4f6; border-color: #d1d5db; }
+.chat-working .desk-top { border-color: #2563eb; background: #dbeafe; }
+.chat-waiting .desk-top { border-color: #059669; background: #d1fae5; }
+.bubble-chat { border-color: #059669; }
+.mark { position: absolute; left: 50%; top: 24px; margin-left: 16px; font-size: 16px; font-weight: 700; line-height: 16px; color: #d97706; }
+.mark::before { display: inline-block; }
+.boss-busy .mark::before, .boss-staging .mark::before { content: "\2022\2022\2022"; color: #2563eb; animation: think 1.2s ease-in-out infinite; }
+.boss-asking .mark::before { content: "?"; animation: ask 0.9s ease-in-out infinite; }
+.boss-supervising .worker::before { animation: watch 3s ease-in-out infinite; }
+@keyframes think { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+@keyframes ask { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes watch { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 .boss-ready .bubble-boss, .boss-asking .bubble-boss { border-color: #d97706; font-weight: 600; }
 .muted { color: #6b7280; }
 .convo-head { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
@@ -81,6 +116,8 @@ pre { white-space: pre-wrap; margin: 4px 0 0; }
 #office-msg:empty { display: none; }
 #office-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
 #office-note:empty { display: none; }
+#triage-line { margin: 0 0 8px; }
+#triage-line:empty { display: none; }
 #composer textarea { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #composer button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #composer button:disabled { cursor: default; opacity: 0.55; }
@@ -104,6 +141,68 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .msg-user { background: #eff6ff; border-color: #bfdbfe; }
 .msg-who { font-size: 12px; font-weight: 600; color: #6b7280; margin-bottom: 2px; }
 .msg-text { white-space: pre-wrap; font-size: 14px; }
+#btn-back-opus { font: inherit; padding: 2px 10px; cursor: pointer; }
+#timeline { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+#timeline li { padding: 3px 0; border-bottom: 1px solid #eee; }
+#timeline .time { color: #6b7280; margin-right: 8px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+#timeline .step-attempt { font-weight: 600; color: #374151; padding-top: 8px; }
+#timeline .step.current { font-weight: 600; color: #1d4ed8; }
+#chat-transcript { list-style: none; padding: 0; margin: 0; }
+.msg-agent { background: #f0fdf4; border-color: #bbf7d0; }
+#chat-progress, #chat-commits { list-style: none; padding: 0; margin: 6px 0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: #4b5563; }
+#chat-note { color: #78350f; background: #fff3cd; padding: 4px 8px; border-radius: 4px; }
+#chat-note:empty { display: none; }
+#chat-msg { color: #b91c1c; font-weight: 600; }
+#chat-msg:empty { display: none; }
+#chat-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+#chat-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#chat-view button:disabled { cursor: default; opacity: 0.55; }
+#orch-transcript { list-style: none; padding: 0; margin: 0; }
+.msg-orch { background: #f9fafb; border-color: #d1d5db; }
+#orch-line { margin: 0 0 8px; }
+#orch-line:empty { display: none; }
+#office-total { font-weight: 600; }
+#btn-convo-back { font: inherit; padding: 2px 10px; cursor: pointer; }
+#orch-msg { color: #b91c1c; font-weight: 600; }
+#orch-msg:empty { display: none; }
+#orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
+#orch-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#orch-view button:disabled { cursor: default; opacity: 0.55; }
+#project-view { padding: 12px 16px; max-width: 900px; }
+#project-view h2 { margin: 4px 0 8px; font-size: 18px; }
+#project-view h3 { margin: 14px 0 4px; font-size: 14px; }
+#fs-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#fs-path { flex: 1 1 300px; min-width: 0; font: inherit; padding: 3px 6px; }
+#fs-list, #recent-list { list-style: none; padding: 0; margin: 8px 0; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; }
+#fs-list { max-height: 45vh; overflow: auto; }
+#fs-list li, #recent-list li { padding: 5px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+#fs-list li[role="button"], #recent-list li[role="button"] { cursor: pointer; }
+#fs-list li[role="button"]:hover, #recent-list li[role="button"]:hover { background: #f3f4f6; }
+#recent-list:empty { display: none; }
+.fs-git { color: #047857; font-size: 12px; margin-left: 8px; }
+#project-info { margin: 8px 0; font-size: 14px; }
+#project-msg { color: #b91c1c; font-weight: 600; }
+#project-msg:empty { display: none; }
+#project-msg.ok { color: #047857; }
+#project-view button, header button { font: inherit; padding: 4px 12px; cursor: pointer; }
+#project-view button:disabled, header button:disabled { cursor: default; opacity: 0.55; }
+#run-options { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 6px 0 10px; font-size: 13px; border-bottom: 1px solid #e5e7eb; }
+#run-options input[type="number"] { width: 4em; font: inherit; }
+#run-options input[type="text"] { width: 5em; font: inherit; }
+#opt-msg { color: #b91c1c; font-weight: 600; }
+#opt-msg:empty { display: none; }
+#btn-stop-run { background: #fee2e2; border: 1px solid #dc2626; border-radius: 4px; color: #7f1d1d; }
+#plans-view, #report-view { padding: 12px 16px; max-width: 900px; }
+#plans-list, #plans-unstaged { list-style: none; padding: 0; margin: 8px 0; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; }
+#plans-list:empty, #plans-unstaged:empty { display: none; }
+#plans-list li, #plans-unstaged li { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+.plan-error { color: #b91c1c; }
+#plans-msg { color: #b91c1c; font-weight: 600; }
+#plans-msg:empty { display: none; }
+#plans-view button, #report-view button { font: inherit; padding: 4px 12px; cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>
 </head>
 <body>
@@ -114,22 +213,55 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="wave"></span>
   <span id="cost"></span>
   <span id="tiers"></span>
+  <span id="office-total"></span>
+  <span id="project-name" class="chip hidden"></span>
+  <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
+  <button id="btn-restart" type="button" class="hidden">Restart server</button>
+  <button id="btn-plans" type="button" class="hidden">Plans</button>
+  <button id="btn-report" type="button" class="hidden">Report</button>
+  <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
 </header>
 <div id="banner"></div>
 <main id="layout">
   <section id="left">
-    <div id="convo">
+    <div id="orch-view">
       <div class="convo-head">
+        <strong>Orchestrator</strong>
+        <span id="orch-cost" class="muted"></span>
+      </div>
+      <ol id="orch-transcript"></ol>
+      <p id="orch-line" class="muted"></p>
+      <div id="orch-composer" class="hidden">
+        <p id="orch-msg" role="alert"></p>
+        <textarea id="orch-text" rows="4" placeholder="Ask the office for anything"></textarea>
+        <select id="orch-route" aria-label="Who takes it">
+          <option value="orchestrator">Orchestrator decides</option>
+          <option value="quick">Opus: quick plan</option>
+          <option value="project">Opus: project plan</option>
+        </select>
+        <button id="btn-orch-send" type="button">Send</button>
+        <button id="btn-orch-new" type="button">New request</button>
+      </div>
+    </div>
+    <div id="convo" class="hidden">
+      <div class="convo-head">
+        <button id="btn-convo-back" type="button">Back to Orchestrator</button>
         <strong id="office-title">Opus</strong>
         <span id="office-cost" class="muted"></span>
       </div>
       <ol id="transcript"></ol>
+      <p id="triage-line" class="muted"></p>
       <div id="composer" class="hidden">
         <p id="office-note"></p>
         <p id="office-msg" role="alert"></p>
+        <button id="btn-resume-run" type="button" class="hidden">Resume run</button>
         <section id="sec-prompt" class="hidden">
           <label for="desc">What should Opus plan?</label>
           <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
+          <select id="route" aria-label="Route">
+            <option value="quick">Quick plan</option>
+            <option value="project">Full plan</option>
+          </select>
           <button id="btn-start" type="button">Start planning</button>
         </section>
         <section id="sec-status" class="hidden">
@@ -158,9 +290,47 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       </div>
       <details id="plan-fold" class="hidden"><summary>Plan</summary><div id="plan-body" class="md"></div></details>
     </div>
+    <div id="timeline-view" class="hidden">
+      <div class="convo-head">
+        <button id="btn-back-opus" type="button">Back to Orchestrator</button>
+        <strong id="tl-title"></strong>
+        <button id="btn-tl-chat" type="button" class="hidden">Chat</button>
+      </div>
+      <p id="tl-meta" class="muted"></p>
+      <ol id="timeline"></ol>
+    </div>
+    <div id="chat-view" class="hidden">
+      <div class="convo-head">
+        <button id="btn-chat-back" type="button">Back to Orchestrator</button>
+        <strong id="chat-title"></strong>
+        <span id="chat-cost" class="muted"></span>
+      </div>
+      <ol id="chat-transcript"></ol>
+      <ul id="chat-progress"></ul>
+      <ul id="chat-commits"></ul>
+      <p id="chat-note"></p>
+      <p id="chat-msg" role="alert"></p>
+      <textarea id="chat-text" rows="4" placeholder="Message the agent"></textarea>
+      <button id="btn-chat-send" type="button">Send</button>
+      <button id="btn-chat-close" type="button" class="hidden">Close chat</button>
+    </div>
   </section>
   <section id="right">
-    <div id="office" aria-label="Office"></div>
+    <div id="run-options" class="hidden">
+      <strong>Run options</strong>
+      <label><input id="opt-review" type="checkbox"> review</label>
+      <label>parallel <input id="opt-parallel" type="number" min="1" max="16" step="1"></label>
+      <label>cost cap $ <input id="opt-max-cost" type="text" inputmode="decimal" placeholder="none"></label>
+      <label><input id="opt-fake" type="checkbox"> fake workers</label>
+      <span id="opt-summary" class="muted"></span>
+      <span id="opt-msg" role="alert"></span>
+    </div>
+    <div id="office" aria-label="Office">
+      <div id="teacher" class="teacher"></div>
+      <div id="row-opus" class="row row-opus hidden"><div class="row-label">opus</div><div id="desks-opus" class="row-desks"></div></div>
+      <div id="row-sonnet" class="row row-sonnet hidden"><div class="row-label">sonnet</div><div id="desks-sonnet" class="row-desks"></div></div>
+      <div id="row-haiku" class="row row-haiku hidden"><div class="row-label">haiku</div><div id="desks-haiku" class="row-desks"></div></div>
+    </div>
     <p id="empty" class="hidden">No runs yet</p>
     <div id="content">
       <details class="fold">
@@ -177,6 +347,37 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
   </section>
 </main>
+<section id="project-view" class="hidden">
+  <h2>Open a project</h2>
+  <div id="fs-bar">
+    <button id="btn-fs-up" type="button">Up</button>
+    <input id="fs-path" type="text" aria-label="Folder path" spellcheck="false">
+    <button id="btn-fs-go" type="button">Go</button>
+    <label><input id="fs-hidden" type="checkbox"> Show hidden folders</label>
+  </div>
+  <ul id="fs-list"></ul>
+  <button id="btn-fs-open" type="button">Open this folder</button>
+  <button id="btn-project-back" type="button" class="hidden">Back</button>
+  <h3>Recent</h3>
+  <ul id="recent-list"></ul>
+  <p id="project-info"></p>
+  <button id="btn-init" type="button" class="hidden">Initialize git</button>
+  <button id="btn-pull-origin" type="button" class="hidden">Bring into origin</button>
+  <p id="project-msg" role="alert"></p>
+</section>
+<section id="plans-view" class="hidden">
+  <button id="btn-plans-back" type="button">Back</button>
+  <h2>Plans</h2>
+  <ul id="plans-list"></ul>
+  <ul id="plans-unstaged"></ul>
+  <p id="plans-msg" role="alert"></p>
+</section>
+<section id="report-view" class="hidden">
+  <button id="btn-report-back" type="button">Back</button>
+  <h2>Report</h2>
+  <pre id="report-status"></pre>
+  <pre id="report-text"></pre>
+</section>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
@@ -190,6 +391,13 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var lastAutoRun = null, autoInit = false;
   var shownSession = null, shownCount = 0;
   var forcePrompt = false, lastState = null;
+  var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;
+  var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
+  var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
+  var chatDesks = {}, lastHandoff = null, chatSeed = null;
+  var orchShown = null, orchCount = 0;
+  var fakeLocked = false, restarting = false;
+  var hostMode = false, project = null, recent = [], serverStarted = null, fsDir = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -214,9 +422,11 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function renderBanner() {
     var b = document.getElementById('banner');
     var msg = '';
-    if (conn) msg = 'Connection lost, retrying...';
+    if (restarting) msg = 'Restarting the server...';
+    else if (conn) msg = 'Connection lost, retrying...';
     else if (problem !== null) msg = 'Problem reading the run: ' + problem;
     else if (idle !== null) msg = 'No activity for ' + idle + ' min, the process may have crashed.';
+    else if (stopped && interactive) msg = 'Stopped early: ' + stopped + '.';
     else if (stopped) msg = 'Stopped early: ' + stopped + '. Resume from the terminal with `harness run <plan> --repo <repo> --resume`.';
     b.textContent = msg;
   }
@@ -237,18 +447,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return td;
   }
 
-  function desk(kind, label, status, activity) {
-    var d = el('div', 'desk desk-' + kind);
-    if (status === 'running' || status === 'verifying' || status === 'paused') {
-      var text = (status === 'paused') ? 'paused' : (activity ? activity : 'awaiting');
-      d.appendChild(el('div', 'bubble bubble-' + status, text));
-    }
-    d.appendChild(el('div', 'worker'));
-    d.appendChild(el('div', 'desk-top'));
-    d.appendChild(el('div', 'desk-label', label));
-    return d;
-  }
-
+  // ---- the classroom: the Orchestrator at the teacher's desk, the rest in rows by tier
   function bossText(o) {
     var st = o.state;
     if (st === 'busy') return (o.progress && o.progress.length) ? o.progress[o.progress.length - 1] : 'thinking\u2026';
@@ -262,35 +461,198 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return '';
   }
 
+  var FINISHED = {done: true, failed: true, blocked: true};
+
+  function setClass(node, cls) { if (node.className !== cls) node.className = cls; }
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
+  function onKey(fn) {
+    return function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fn(); } };
+  }
+
+  function bossClick() {
+    showOpus();
+  }
+
   function bossDesk() {
-    var o = office || {state: 'idle', can_click: false};
-    var clickable = interactive && !!o.can_click;
-    var d = el('div', 'desk desk-boss boss-' + str(o.state) + (clickable ? ' clickable' : ''));
+    // the Opus agent desk: built once, kept first in the opus row, then updated in place
+    if (!bossNode) {
+      bossNode = el('div', 'desk desk-boss');
+      bossNode.id = 'desk-opus';
+      bossNode.appendChild(el('div', 'bubble bubble-boss hidden'));
+      bossNode.appendChild(el('div', 'mark'));
+      bossNode.appendChild(el('div', 'worker'));
+      bossNode.appendChild(el('div', 'desk-top'));
+      bossNode.appendChild(el('div', 'desk-label', 'opus · agent'));
+      bossNode.setAttribute('role', 'button');
+      bossNode.setAttribute('title', 'Talk to Opus');
+      bossNode.tabIndex = 0;
+      bossNode.addEventListener('click', bossClick);
+      bossNode.addEventListener('keydown', onKey(bossClick));
+    }
+    var box = document.getElementById('desks-opus');
+    if (box.children[0] !== bossNode) box.insertBefore(bossNode, box.children[0] || null);
+    var o = office || {state: 'idle'};
+    setClass(bossNode, 'desk desk-boss boss-' + str(o.state) + ' clickable');
     var text = bossText(o);
-    if (text) d.appendChild(el('div', 'bubble bubble-boss', text));
+    setClass(bossNode.children[0], 'bubble bubble-boss' + (text ? '' : ' hidden'));
+    setText(bossNode.children[0], text);
+  }
+
+  function orchText(v) {
+    // the Orchestrator's bubble: its last step while routing, else who holds the work
+    if (!v) return '';
+    if (v.state === 'routing') {
+      var p = Array.isArray(v.progress) ? v.progress : [];
+      return p.length ? String(p[p.length - 1]) : 'routing\u2026';
+    }
+    if (v.state === 'failed') return 'failed';
+    return v.holder ? '\u2192 ' + v.holder : '';
+  }
+
+  function orchClick() {
+    // the Orchestrator desk: its thread in the left panel, ready to type
+    selectTask(null);
+    if (interactive) document.getElementById('orch-text').focus();
+  }
+
+  function orchDesk() {
+    // built once inside #teacher, then updated in place
+    if (!orchNode) {
+      orchNode = el('div', 'desk desk-orch');
+      orchNode.id = 'desk-orch';
+      orchNode.appendChild(el('div', 'bubble bubble-orch hidden'));
+      orchNode.appendChild(el('div', 'mark'));
+      orchNode.appendChild(el('div', 'worker'));
+      orchNode.appendChild(el('div', 'desk-top'));
+      orchNode.appendChild(el('div', 'desk-label', 'Orchestrator'));
+      orchNode.setAttribute('role', 'button');
+      orchNode.setAttribute('title', 'Talk to the Orchestrator');
+      orchNode.tabIndex = 0;
+      orchNode.addEventListener('click', orchClick);
+      orchNode.addEventListener('keydown', onKey(orchClick));
+      document.getElementById('teacher').appendChild(orchNode);
+    }
+    var v = office ? office.orchestrator : null;
+    setClass(orchNode, 'desk desk-orch orch-' + (v && v.state ? v.state : 'idle'));
+    var text = orchText(v);
+    setClass(orchNode.children[0], 'bubble bubble-orch' + (text ? '' : ' hidden'));
+    setText(orchNode.children[0], text);
+  }
+
+  function taskDesk(t) {
+    // a desk first seen finished is settled: its worker never walks out on screen
+    var id = t.task_id;
+    var d = el('div', FINISHED[t.status] ? 'settled' : '');
+    d.setAttribute('data-task', str(id));
+    d.setAttribute('role', 'button');
+    d.tabIndex = 0;
+    d.appendChild(el('div', 'bubble hidden'));
     d.appendChild(el('div', 'worker'));
     d.appendChild(el('div', 'desk-top'));
-    d.appendChild(el('div', 'desk-label', 'Opus'));
-    if (clickable) {
-      d.setAttribute('role', 'button');
-      d.setAttribute('title', 'Talk to Opus');
-      d.tabIndex = 0;
-      d.addEventListener('click', focusComposer);
-      d.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); focusComposer(); } });
-    }
+    d.appendChild(el('div', 'desk-label'));
+    d.addEventListener('click', function () { selectTask(id); });
+    d.addEventListener('keydown', onKey(function () { selectTask(id); }));
     return d;
   }
 
+  function bubbleText(t) {
+    if (t.status === 'paused') return 'paused';
+    var steps = Array.isArray(t.steps) ? t.steps : [];
+    var last = steps.length ? steps[steps.length - 1] : null;
+    if (last && last.text) return String(last.text);
+    return t.activity ? String(t.activity) : 'awaiting';
+  }
+
+  function updateDesk(d, t) {
+    var st = str(t.status);
+    var settled = !!FINISHED[st] && (' ' + d.className + ' ').indexOf(' settled ') >= 0;
+    setClass(d, 'desk desk-' + st + (settled ? ' settled' : '') + (selectedTask === t.task_id ? ' selected' : ''));
+    var talking = st === 'running' || st === 'verifying' || st === 'paused';
+    setClass(d.children[0], 'bubble bubble-' + st + (talking ? '' : ' hidden'));
+    if (talking) setText(d.children[0], bubbleText(t));
+    setText(d.children[3], (t.tier ? t.tier : '-') + ' · ' + str(t.task_id));
+    var box = document.getElementById('desks-' + rowOf(t));
+    if (d.parentNode !== box) box.appendChild(d);
+  }
+
+  function rowOf(t) {
+    // the row a task sits in: its tier, with a null or unknown tier in the sonnet row
+    var tier = t ? t.tier : null;
+    return (tier === 'opus' || tier === 'haiku') ? tier : 'sonnet';
+  }
+
+  function chatDesk(tier) {
+    // a free agent desk: click to chat with a haiku or sonnet agent
+    var d = el('div', 'desk desk-chat');
+    d.id = 'desk-chat-' + tier;
+    d.setAttribute('role', 'button');
+    d.setAttribute('title', 'Chat with ' + tier);
+    d.tabIndex = 0;
+    d.appendChild(el('div', 'bubble bubble-chat hidden'));
+    d.appendChild(el('div', 'worker'));
+    d.appendChild(el('div', 'desk-top'));
+    d.appendChild(el('div', 'desk-label', tier + ' · chat'));
+    d.addEventListener('click', function () { openChatPanel(tier); });
+    d.addEventListener('keydown', onKey(function () { openChatPanel(tier); }));
+    return d;
+  }
+
+  function chatBubble(chat) {
+    if (!chat) return '';
+    if (chat.state === 'waiting') return 'your turn';
+    var p = Array.isArray(chat.progress) ? chat.progress : [];
+    return p.length ? String(p[p.length - 1]) : 'working…';
+  }
+
+  function updateChatDesk(d, tier) {
+    var chat = openChat(office ? office.chats : [], tier);
+    var st = chat ? chat.state : 'free';
+    setClass(d, 'desk desk-chat chat-' + st + (chatTier === tier ? ' selected' : ''));
+    var text = chatBubble(chat);
+    setClass(d.children[0], 'bubble bubble-chat' + (text ? '' : ' hidden'));
+    setText(d.children[0], text);
+    var box = document.getElementById('desks-' + tier);
+    if (d.parentNode !== box) box.appendChild(d);
+  }
+
   function renderOffice() {
-    var desks = [bossDesk()];
-    if (runView) {
-      (runView.tasks || []).forEach(function (t) {
-        var st = str(t.status);
-        desks.push(desk(st, (t.tier ? t.tier : '-') + ' \u00b7 ' + str(t.task_id), st, t.activity));
+    // desks are keyed by task id and updated in place, so animations play once
+    orchDesk();
+    bossDesk();
+    var tasks = runView ? (runView.tasks || []) : [];
+    var seen = {};
+    tasks.forEach(function (t) {
+      var id = str(t.task_id);
+      seen[id] = true;
+      if (!deskNodes[id]) deskNodes[id] = taskDesk(t);
+      updateDesk(deskNodes[id], t);
+    });
+    Object.keys(deskNodes).forEach(function (id) {
+      if (seen[id]) return;
+      var d = deskNodes[id];
+      if (d.parentNode) d.parentNode.removeChild(d);
+      delete deskNodes[id];
+    });
+    if (interactive) {
+      ['sonnet', 'haiku'].forEach(function (tier) {
+        if (!chatDesks[tier]) chatDesks[tier] = chatDesk(tier);
+        updateChatDesk(chatDesks[tier], tier);
       });
     }
-    var officeEl = document.getElementById('office');
-    officeEl.replaceChildren.apply(officeEl, desks);
+    ['opus', 'sonnet', 'haiku'].forEach(function (r) {
+      var empty = document.getElementById('desks-' + r).children.length === 0;
+      setClass(document.getElementById('row-' + r), 'row row-' + r + (empty ? ' hidden' : ''));
+    });
+  }
+
+  function selectTask(id) {
+    // a task id shows its timeline in the left panel; null shows the Orchestrator
+    selectedTask = (id === undefined) ? null : id;
+    chatTier = null;
+    tlTask = null;
+    showPanel(selectedTask === null ? 'orch-view' : 'timeline-view');
+    renderTimeline();
+    renderOffice();
   }
 
   // ---- markdown block tree -> DOM (textContent only; links are never anchors)
@@ -375,10 +737,11 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   // ---- the conversation with Opus, appended in place
-  function msgNode(entry) {
-    var user = entry.role === 'user';
-    var li = el('li', 'msg ' + (user ? 'msg-user' : 'msg-opus'));
-    li.appendChild(el('div', 'msg-who', user ? 'You' : 'Opus'));
+  function msgNode(entry, who) {
+    // `who` names a chat agent; without it the other side is Opus or the Orchestrator
+    var user = entry.role === 'user', orch = entry.role === 'orchestrator';
+    var li = el('li', 'msg ' + (user ? 'msg-user' : orch ? 'msg-orch' : who ? 'msg-agent' : 'msg-opus'));
+    li.appendChild(el('div', 'msg-who', user ? 'You' : orch ? 'Orchestrator' : who || 'Opus'));
     if (user) {
       li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
     } else {
@@ -406,6 +769,132 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     if (atBottom) left.scrollTop = left.scrollHeight;
   }
 
+  // ---- the Orchestrator's thread, appended in place
+  function orchCostText(v) {
+    return v && v.cost_usd > 0 ? 'orchestrator ' + money(v.cost_usd) : '';
+  }
+
+  function totalText(o) {
+    return o && o.total_cost_usd > 0 ? 'office ' + money(o.total_cost_usd) : '';
+  }
+
+  function orchLine(v) {
+    // the agent that holds the work, if any
+    return v && v.holder ? 'With ' + v.holder + ' (' + str(v.holder_id) + ')' : '';
+  }
+
+  function orchSend(v, route, text) {
+    // a follow-up (someone holds the work) and "Orchestrator decides" go to the
+    // Orchestrator; "Opus: quick plan" and "Opus: project plan" start Opus directly
+    if ((v && v.holder) || (route !== 'quick' && route !== 'project')) {
+      return {path: '/api/orchestrator/message', body: {text: text}};
+    }
+    return {path: '/api/planner/start', body: {description: text, route: route}};
+  }
+
+  function wireOrch() {
+    byId('btn-orch-send').addEventListener('click', function () {
+      var text = textOf('orch-text');
+      if (!text) { byId('orch-msg').textContent = 'Write a message first.'; return; }
+      var req = orchSend(office ? office.orchestrator : null, byId('orch-route').value, text);
+      act(req.path, req.body, function () {
+        byId('orch-text').value = '';
+        byId('orch-route').value = 'orchestrator';
+        if (req.path === '/api/planner/start') showOpus();
+      }, 'orch-msg');
+    });
+    byId('btn-orch-new').addEventListener('click', function () {
+      act('/api/orchestrator/new', {}, null, 'orch-msg');
+    });
+  }
+
+  function renderOrch(v) {
+    var o = v || {};
+    setHidden('orch-composer', !interactive);
+    setHidden('orch-route', !!o.holder);
+    byId('orch-cost').textContent = orchCostText(o);
+    byId('orch-line').textContent = orchLine(o);
+    var list = byId('orch-transcript');
+    var entries = Array.isArray(o.transcript) ? o.transcript : [];
+    var tid = o.thread_id || null;
+    if (tid !== orchShown || entries.length < orchCount) {
+      list.replaceChildren();
+      orchShown = tid;
+      orchCount = 0;
+    }
+    if (entries.length === orchCount) return;
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    for (var i = orchCount; i < entries.length; i++) {
+      var e = entries[i];
+      list.appendChild(msgNode(e, e.role === 'agent' ? str(e.who) : null));
+    }
+    orchCount = entries.length;
+    if (atBottom) left.scrollTop = left.scrollHeight;
+  }
+
+  // ---- a worker's timeline, appended in place
+  function stepKey(s, i) { return s.ts + '|' + i; }
+
+  function findTask(id) {
+    var tasks = runView ? (runView.tasks || []) : [];
+    for (var i = 0; i < tasks.length; i++) {
+      if (tasks[i].task_id === id) return tasks[i];
+    }
+    return null;
+  }
+
+  function stepNode(s) {
+    var li = el('li', 'step');
+    li.appendChild(el('span', 'time', typeof s.ts === 'string' ? s.ts.slice(11, 19) : '?'));
+    li.appendChild(document.createTextNode(s.text === null || s.text === undefined ? '' : String(s.text)));
+    return li;
+  }
+
+  function chatTierOf(tier) {
+    // the chat agent that picks up a worker's task: haiku for haiku, else sonnet
+    return tier === 'haiku' ? 'haiku' : 'sonnet';
+  }
+
+  function renderTimeline() {
+    if (selectedTask === null) return;
+    var t = findTask(selectedTask) || {task_id: selectedTask, steps: []};
+    var chat = byId('btn-tl-chat');
+    chat.className = interactive ? '' : 'hidden';
+    chat.textContent = 'Chat with ' + chatTierOf(t.tier);
+    var max =(t.max_attempts === null || t.max_attempts === undefined) ? '?' : num(t.max_attempts);
+    byId('tl-title').textContent = str(t.task_id) + ' · ' + (t.title === null || t.title === undefined ? '' : String(t.title));
+    byId('tl-meta').textContent = (t.tier ? t.tier : '-') + ' · ' + str(t.status) + ' · attempt ' + num(t.attempt) + '/' + max;
+    var list = byId('timeline');
+    var steps = Array.isArray(t.steps) ? t.steps : [];
+    var first = steps.length ? stepKey(steps[0], 0) : null;
+    if (t.task_id !== tlTask || first !== tlFirst || steps.length < tlCount) {
+      list.replaceChildren();
+      tlTask = t.task_id;
+      tlFirst = first;
+      tlCount = 0;
+      tlAttempt = null;
+      tlLast = null;
+      if (!steps.length) list.appendChild(el('li', 'step-empty muted', 'No steps yet'));
+    }
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    var added = steps.length > tlCount;
+    for (var i = tlCount; i < steps.length; i++) {
+      var s = steps[i];
+      if (i === 0 || s.attempt !== tlAttempt) {
+        list.appendChild(el('li', 'step-attempt', 'attempt ' + num(s.attempt) + ' on ' + (s.tier ? s.tier : '-')));
+      }
+      tlAttempt = s.attempt;
+      if (tlLast) tlLast.className = 'step';
+      tlLast = stepNode(s);
+      list.appendChild(tlLast);
+    }
+    tlCount = steps.length;
+    if (tlLast) tlLast.className = t.status === 'running' ? 'step current' : 'step';
+    if (added && atBottom) left.scrollTop = left.scrollHeight;
+  }
+
   // ---- the composer and the plan, below the conversation
   function byId(id) { return document.getElementById(id); }
   function setHidden(id, hide) { byId(id).classList.toggle('hidden', hide); }
@@ -427,6 +916,22 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return str(o.state);
   }
 
+  function triageText(o) {
+    // set only when the triage picked the route (route "auto")
+    if (!o || typeof o.triage_reason !== 'string' || !o.route) return '';
+    return 'Triage routed this: ' + o.route + ' (' + o.triage_reason + ')';
+  }
+
+  function canImplement(o) {
+    // a quick plan starts once its plan.json is written; a project once its plan is a draft
+    if (o.plan_kind === 'quick') return typeof o.quick_plan === 'string';
+    return o.plan_status === 'draft';
+  }
+
+  function resumeLabel(o) {
+    return typeof o.resumable_run === 'string' ? 'Resume run ' + o.resumable_run : '';
+  }
+
   function renderComposer() {
     var o = office;
     if (!o) return;
@@ -439,6 +944,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('office-title').textContent = 'Opus \u00b7 ' + str(o.state) + (o.stage ? ' (stage ' + o.stage + ')' : '');
     byId('office-cost').textContent = o.cost_usd > 0 ? 'planner cost ' + money(o.cost_usd) : '';
     byId('office-note').textContent = o.error ? String(o.error) : '';
+    byId('triage-line').textContent = triageText(o);
+    var resume = resumeLabel(o);
+    setHidden('btn-resume-run', !resume);
+    if (resume) byId('btn-resume-run').textContent = resume;
     if (which === 'status') {
       byId('status-line').textContent = statusLine(o);
       var shown = (o.state === 'busy' || o.state === 'staging') ? (o.progress || []) : [];
@@ -446,7 +955,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
       var ul = byId('progress');
       ul.replaceChildren.apply(ul, items);
     }
-    if (which === 'plan') setHidden('btn-implement', o.plan_status !== 'draft');
+    if (which === 'plan') {
+      setHidden('btn-implement', !canImplement(o));
+      byId('btn-implement').textContent = o.plan_kind === 'quick' ? 'Start' : 'Start implementing';
+    }
     if (which === 'failed') {
       byId('failed-line').textContent = o.state === 'failed' ? 'The planner stopped.' : 'The planning session was closed.';
       setHidden('btn-resume', !o.plan_exists);
@@ -459,11 +971,13 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function renderPlanFold(o) {
-    setHidden('plan-fold', !o.plan_exists);
+    // GET /api/plan serves the quick plan's plan.md while quick_plan is set
+    var shown = !!o.plan_exists || typeof o.quick_plan === 'string';
+    setHidden('plan-fold', !shown);
     if (o.state === 'ready' && lastState !== 'ready') byId('plan-fold').open = true;
     lastState = o.state;
-    var key = [o.plan_status, o.state, o.cost_usd].join('|');
-    if (o.plan_exists && key !== planKey) {
+    var key = [o.plan_status, o.state, o.cost_usd, o.quick_plan].join('|');
+    if (shown && key !== planKey) {
       planKey = key;
       loadPlan();
     }
@@ -494,7 +1008,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function setBusy(on) {
-    var buttons = byId('composer').querySelectorAll('button');
+    var buttons = document.querySelectorAll('#composer button, #chat-view button, #orch-view button');
     for (var i = 0; i < buttons.length; i++) buttons[i].disabled = on;
   }
 
@@ -512,8 +1026,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
   }
 
-  function act(path, body, done) {
-    var msg = byId('office-msg');
+  function act(path, body, done, msgId) {
+    var msg = byId(msgId || 'office-msg');
     msg.textContent = '';
     setBusy(true);
     api(path, body).then(function (res) {
@@ -542,19 +1056,149 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-start').addEventListener('click', function () {
       var text = textOf('desc');
       if (!text) { byId('office-msg').textContent = 'Describe the project first.'; return; }
-      act('/api/planner/start', {description: text}, function () { byId('desc').value = ''; });
+      act('/api/planner/start', {description: text, route: byId('route').value}, function () { byId('desc').value = ''; });
     });
     byId('btn-send').addEventListener('click', function () { send('answer'); });
     byId('btn-continue').addEventListener('click', function () { send('continue'); });
     byId('btn-implement').addEventListener('click', function () {
-      var cost = office ? money(office.cost_usd) : '$?';
-      var ok = window.confirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.\n\nPlanner cost so far: ' + cost);
+      if (office && office.plan_kind === 'quick') {
+        if (window.confirm(launchConfirm('Start this quick plan?', office))) act('/api/planner/implement', {});
+        return;
+      }
+      var ok = window.confirm(launchConfirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.', office));
       if (ok) act('/api/planner/implement', {});
     });
     byId('btn-resume').addEventListener('click', function () { act('/api/planner/start', {from_draft: true}); });
     byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
     byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
-    byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
+    byId('btn-next').addEventListener('click', function () {
+      var n = office ? str(office.next_stage) : '?';
+      if (window.confirm(launchConfirm('Plan stage ' + n + '?\n\nThe planner writes its work orders, then `harness run` starts.', office))) act('/api/planner/next-stage', {});
+    });
+    byId('btn-resume-run').addEventListener('click', function () {
+      var id = office && typeof office.resumable_run === 'string' ? office.resumable_run : '?';
+      if (window.confirm(launchConfirm('Resume run ' + id + '?\n\nTasks already done are skipped.', office))) act('/api/run/resume', {});
+    });
+  }
+
+  // ---- an agent chat in the left panel, appended in place
+  function showPanel(name) {
+    // the left panel shows exactly one of the Orchestrator, Opus, a timeline and a chat
+    ['orch-view', 'convo', 'timeline-view', 'chat-view'].forEach(function (id) { setHidden(id, id !== name); });
+  }
+
+  function showOpus() {
+    // the Opus desk: the conversation with Opus in the left panel
+    selectedTask = null;
+    chatTier = null;
+    tlTask = null;
+    showPanel('convo');
+    renderOffice();
+    if (office && office.can_click) focusComposer();
+  }
+
+  function openChat(chats, tier) {
+    // the tier's open chat (one per tier), or null
+    var list = Array.isArray(chats) ? chats : [];
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i];
+      if (c.tier === tier && (c.state === 'working' || c.state === 'waiting')) return c;
+    }
+    return null;
+  }
+
+  function chatSend(chat, tier, text, seed) {
+    // an open chat gets a message; otherwise a new chat starts on the tier, seeded with a
+    // run's task when `seed` is {run_id, task_id}
+    if (chat && (chat.state === 'working' || chat.state === 'waiting')) {
+      return {path: '/api/chat/message', body: {chat_id: chat.chat_id, text: text}};
+    }
+    var body = {tier: tier, text: text};
+    if (seed) { body.run_id = seed.run_id; body.task_id = seed.task_id; }
+    return {path: '/api/chat/start', body: body};
+  }
+
+  function currentChat() {
+    var list = office && Array.isArray(office.chats) ? office.chats : [];
+    var open = openChat(list, chatTier);
+    if (open) chatId = open.chat_id;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].chat_id === chatId) return list[i];
+    }
+    return null;
+  }
+
+  function openChatPanel(tier, seed) {
+    selectedTask = null;
+    tlTask = null;
+    chatTier = tier;
+    chatId = null;
+    chatSeed = seed || null;
+    byId('chat-msg').textContent = '';
+    showPanel('chat-view');
+    renderChat();
+    renderOffice();
+  }
+
+  function renderChat() {
+    if (chatTier === null) return;
+    var chat = currentChat();
+    var ended = !!chat && (chat.state === 'closed' || chat.state === 'failed');
+    byId('chat-title').textContent = chatTier + ' · ' + (chat ? chat.state : 'new chat') + (chat && chat.task_id ? ' · task ' + chat.task_id : '');
+    byId('chat-cost').textContent = chat && chat.cost_usd > 0 ? money(chat.cost_usd) : '';
+    var list = byId('chat-transcript');
+    var entries = chat && Array.isArray(chat.transcript) ? chat.transcript : [];
+    var cid = chat ? chat.chat_id : null;
+    if (cid !== chatShown || entries.length < chatCount) {
+      list.replaceChildren();
+      chatShown = cid;
+      chatCount = 0;
+    }
+    var left = byId('left');
+    var atBottom = left.scrollHeight - left.scrollTop - left.clientHeight <= 40;
+    var added = entries.length > chatCount;
+    for (var i = chatCount; i < entries.length; i++) list.appendChild(msgNode(entries[i], chatTier));
+    chatCount = entries.length;
+    if (added && atBottom) left.scrollTop = left.scrollHeight;
+    var progress = chat && chat.state === 'working' && Array.isArray(chat.progress) ? chat.progress : [];
+    var ul = byId('chat-progress');
+    ul.replaceChildren.apply(ul, progress.map(function (line) { return el('li', null, line); }));
+    var commits = chat && Array.isArray(chat.commits) ? chat.commits : [];
+    var cl = byId('chat-commits');
+    cl.replaceChildren.apply(cl, commits.map(function (c) { return el('li', null, 'committed ' + c); }));
+    byId('chat-note').textContent = chat && chat.error ? String(chat.error) : ended ? 'This chat has ended; sending starts a new one.' : '';
+    setHidden('btn-chat-close', !chat || ended);
+  }
+
+  function followHandoff() {
+    // a request Opus handed to a chat agent opens that chat, once per hand-off
+    if (!interactive || !office || !office.handoff_chat || office.handoff_chat === lastHandoff) return;
+    var list = Array.isArray(office.chats) ? office.chats : [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].chat_id === office.handoff_chat) {
+        lastHandoff = office.handoff_chat;
+        openChatPanel(list[i].tier);
+        return;
+      }
+    }
+  }
+
+  function wireChat() {
+    byId('btn-chat-back').addEventListener('click', function () { selectTask(null); });
+    byId('btn-chat-send').addEventListener('click', function () {
+      var text = textOf('chat-text');
+      if (!text) { byId('chat-msg').textContent = 'Write a message first.'; return; }
+      var req = chatSend(currentChat(), chatTier, text, chatSeed);
+      act(req.path, req.body, function () { byId('chat-text').value = ''; }, 'chat-msg');
+    });
+    byId('btn-tl-chat').addEventListener('click', function () {
+      var t = findTask(selectedTask);
+      openChatPanel(chatTierOf(t ? t.tier : null), {run_id: current, task_id: selectedTask});
+    });
+    byId('btn-chat-close').addEventListener('click', function () {
+      var chat = currentChat();
+      if (chat) act('/api/chat/close', {chat_id: chat.chat_id}, null, 'chat-msg');
+    });
   }
 
   function followLaunchedRun() {
@@ -569,18 +1213,370 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     location.hash = '#' + encodeURIComponent(office.run_id);
   }
 
+  // ---- run options, the cost shown in every launch confirm, and Stop run
+  function optionsBody(review, parallel, cost, fake) {
+    // the POST /api/run/options body from the form fields, or {error: sentence}
+    var p = String(parallel).replace(/^\s+|\s+$/g, '');
+    var n = Number(p);
+    if (p === '' || n !== Math.floor(n) || n < 1 || n > 16) {
+      return {error: 'Parallel must be a whole number from 1 to 16.'};
+    }
+    var c = String(cost).replace(/^\s+|\s+$/g, '').replace(/^\$/, '');
+    var cap = null;
+    if (c !== '') {
+      cap = Number(c);
+      if (!isFinite(cap) || cap <= 0) return {error: 'The cost cap must be a number above 0, or empty for no cap.'};
+    }
+    return {body: {review: !!review, max_parallel: n, max_cost: cap, fake: !!fake}};
+  }
+
+  function launchConfirm(head, o) {
+    // every confirm that starts paid work: the options the run gets and what was spent so far
+    var v = o || {};
+    return head + '\n\nRun options: ' + (v.options_summary ? String(v.options_summary) : '?') +
+      '\nCost so far: ' + money(v.total_cost_usd);
+  }
+
+  function stopConfirm(id) {
+    return 'Stop run ' + str(id) + '? Running tasks are paused; Resume run continues them.';
+  }
+
+  function renderOptions(o, force) {
+    // the fields follow the server, except the one being edited
+    setHidden('run-options', !interactive);
+    setHidden('btn-plans', !interactive);
+    setHidden('btn-report', !interactive);
+    var opts = o.run_options || {};
+    var active = document.activeElement;
+    function put(id, set) { if (force || active !== byId(id)) set(byId(id)); }
+    put('opt-review', function (f) { f.checked = !!opts.review; });
+    put('opt-parallel', function (f) { f.value = (opts.max_parallel === undefined) ? '' : String(opts.max_parallel); });
+    put('opt-max-cost', function (f) { f.value = (opts.max_cost === null || opts.max_cost === undefined) ? '' : String(opts.max_cost); });
+    put('opt-fake', function (f) { f.checked = fakeLocked || !!opts.fake; });
+    byId('opt-fake').disabled = fakeLocked;
+    byId('opt-summary').textContent = o.options_summary ? String(o.options_summary) : '';
+    var stop = typeof o.stoppable_run === 'string' ? o.stoppable_run : null;
+    setHidden('btn-stop-run', !interactive || !stop);
+    byId('btn-stop-run').setAttribute('title', stop ? 'Stop run ' + stop : '');
+  }
+
+  function wireOptions() {
+    function changed() {
+      var r = optionsBody(byId('opt-review').checked, byId('opt-parallel').value, byId('opt-max-cost').value, byId('opt-fake').checked);
+      var msg = byId('opt-msg');
+      if (r.error) { msg.textContent = r.error; return; }
+      msg.textContent = '';
+      api('/api/run/options', r.body).then(function (res) {
+        if (res.ok) {
+          if (res.data && res.data.office) applyOffice(res.data.office);
+          return;
+        }
+        msg.textContent = errorOf(res);
+        if (res.status === 409 && /fake workers only/.test(msg.textContent)) fakeLocked = true;
+        if (office) renderOptions(office, true);
+      }).catch(function () { msg.textContent = 'Connection lost; try again.'; });
+    }
+    ['opt-review', 'opt-parallel', 'opt-max-cost', 'opt-fake'].forEach(function (id) {
+      byId(id).addEventListener('change', changed);
+    });
+    byId('btn-stop-run').addEventListener('click', function () {
+      var id = office && typeof office.stoppable_run === 'string' ? office.stoppable_run : null;
+      if (id && window.confirm(stopConfirm(id))) act('/api/run/stop', {}, null, 'opt-msg');
+    });
+  }
+
+  // ---- the Plans panel and the Report view
+  function planLine(p) {
+    // what a plan row says besides its path: the counts or why it cannot run, and its last run
+    var what = p.error ? 'invalid: ' + String(p.error) : num(p.orders) + ' orders \u00b7 ' + num(p.waves) + ' waves';
+    var last = p.last_run ? 'last run ' + String(p.last_run) + (p.last_status ? ' (' + String(p.last_status) + ')' : '') : 'never run';
+    return what + ' \u00b7 ' + last;
+  }
+
+  function renderPlans(d) {
+    var plans = Array.isArray(d.plans) ? d.plans : [];
+    var rows = plans.map(function (p) {
+      var li = el('li');
+      li.appendChild(el('strong', null, str(p.path)));
+      li.appendChild(el('span', p.error ? 'plan-error' : 'muted', planLine(p)));
+      var run = el('button', null, 'Run');
+      run.type = 'button';
+      run.disabled = !!p.error;
+      run.addEventListener('click', function () {
+        if (!window.confirm(launchConfirm('Run ' + str(p.path) + '?', office))) return;
+        act('/api/run/launch', {plan_path: p.path}, function () { showMain('layout'); selectTask(null); }, 'plans-msg');
+      });
+      li.appendChild(run);
+      return li;
+    });
+    if (!rows.length) rows.push(el('li', 'muted', 'No plans yet. Start one from the Orchestrator.'));
+    var ul = byId('plans-list');
+    ul.replaceChildren.apply(ul, rows);
+    var stages = (Array.isArray(d.unstaged) ? d.unstaged : []).map(function (n) {
+      var li = el('li');
+      var b = el('button', null, 'Write work orders for stage ' + n);
+      b.type = 'button';
+      b.addEventListener('click', function () {
+        var ask = launchConfirm('Write work orders for stage ' + n + '?\n\nA planner session turns the approved plan\'s stage ' + n + ' into work orders, then `harness run` starts.', office);
+        if (!window.confirm(ask)) return;
+        act('/api/planner/stage', {stage: n}, function () { showMain('layout'); showOpus(); }, 'plans-msg');
+      });
+      li.appendChild(b);
+      return li;
+    });
+    var us = byId('plans-unstaged');
+    us.replaceChildren.apply(us, stages);
+  }
+
+  function loadPlans() {
+    fetch('/api/plans').then(function (r) { return r.json(); }).then(function (d) {
+      if (d && Array.isArray(d.plans)) renderPlans(d);
+    }).catch(function () { /* the next refresh retries */ });
+  }
+
+  function loadReport() {
+    if (!current) {
+      byId('report-status').textContent = 'No run yet.';
+      byId('report-text').textContent = '';
+      return;
+    }
+    fetch('/api/report/' + encodeURIComponent(current)).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && typeof d.report === 'string') {
+        byId('report-status').textContent = d.status;
+        byId('report-text').textContent = d.report;
+      } else {
+        byId('report-status').textContent = (d && d.error) ? String(d.error) : 'No report.';
+        byId('report-text').textContent = '';
+      }
+    }).catch(function () { /* the next refresh retries */ });
+  }
+
+  function wirePlans() {
+    byId('btn-plans').addEventListener('click', function () {
+      byId('plans-msg').textContent = '';
+      showMain('plans-view');
+      loadPlans();
+    });
+    byId('btn-report').addEventListener('click', function () { showMain('report-view'); loadReport(); });
+    byId('btn-plans-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
+    byId('btn-report-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
+    setInterval(function () {
+      if (!byId('plans-view').classList.contains('hidden')) loadPlans();
+      if (!byId('report-view').classList.contains('hidden')) loadReport();
+    }, 2000);
+  }
+
+  // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
+  function projectSummary(p) {
+    // one line about the open folder, from GET /api/project
+    if (!p) return 'No project is open.';
+    var bits = [];
+    if (!p.is_git) bits.push('not a git repository');
+    else if (!p.has_commit) bits.push('git, no commit yet');
+    else bits.push(p.branch ? 'branch ' + p.branch : 'detached HEAD');
+    if (p.is_git && p.has_commit && !p.on_main) bits.push('not on main');
+    if (p.is_git && p.dirty) bits.push('uncommitted changes');
+    if (p.origin_path) bits.push('origin ' + p.origin_path);
+    return str(p.name) + ' \u00b7 ' + str(p.path) + ' \u00b7 ' + bits.join(', ');
+  }
+
+  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view'];
+  function showMain(name) {
+    // the page shows exactly one of the two panels and the launcher's views
+    MAIN_VIEWS.forEach(function (id) { setHidden(id, id !== name); });
+  }
+
+  function errorOf(res) {
+    return (res.data && res.data.error) ? String(res.data.error) : 'Request failed (HTTP ' + res.status + ')';
+  }
+  function projectMsg(text, ok) {
+    byId('project-msg').textContent = text;
+    byId('project-msg').className = ok ? 'ok' : '';
+  }
+
+  var INIT_FILES_SHOWN = 30;
+  function projectActions(p) {
+    // which of the two git buttons the open project needs
+    if (!p) return {init: false, pull: false};
+    return {init: !p.is_git || !p.has_commit || !p.on_main, pull: !!p.origin_path};
+  }
+
+  function initConfirm(path, files, truncated) {
+    var shown = files.slice(0, INIT_FILES_SHOWN);
+    var more = files.length - shown.length;
+    var lines = 'Initialize git in ' + str(path) + '?\n\nThe first commit holds ' + (truncated ? 'at least ' : '') + files.length + ' files (.harness/ is left out):\n' + shown.join('\n');
+    if (more > 0 || truncated) lines += '\n... and more';
+    if (!files.length) lines += '(none: an empty first commit)';
+    return lines;
+  }
+
+  function pullConfirm(origin) {
+    return 'Pull main from this clone into ' + str(origin) + ' (fast-forward only)?';
+  }
+
+  function waitForRestart(oldStarted, tries) {
+    // poll every 500 ms until the server answers with a new start time, then reload
+    var left = tries;
+    var timer = setInterval(function () {
+      left -= 1;
+      if (left < 0) {
+        clearInterval(timer);
+        restarting = false;
+        byId('banner').textContent = 'The server did not come back; start agent-orchestrator again.';
+        return;
+      }
+      fetch('/api/project').then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
+        if (p && typeof p === 'object' && p.started !== oldStarted) { clearInterval(timer); location.reload(); }
+      }).catch(function () { /* still down: the next tick retries */ });
+    }, 500);
+  }
+
+  function renderListing(l) {
+    fsDir = l.path;
+    byId('fs-path').value = l.path;
+    byId('btn-fs-up').disabled = !l.parent;
+    byId('btn-fs-up').setAttribute('data-parent', l.parent || '');
+    var items = (Array.isArray(l.entries) ? l.entries : []).map(function (e) {
+      var li = el('li', null, str(e.name));
+      if (e.is_git) li.appendChild(el('span', 'fs-git', 'git'));
+      li.setAttribute('role', 'button');
+      li.tabIndex = 0;
+      li.addEventListener('click', function () { browse(e.path); });
+      li.addEventListener('keydown', onKey(function () { browse(e.path); }));
+      return li;
+    });
+    if (!items.length) items.push(el('li', 'muted', 'No subfolders'));
+    if (l.truncated) items.push(el('li', 'muted', 'Only the first folders are shown; type a path to go further.'));
+    var ul = byId('fs-list');
+    ul.replaceChildren.apply(ul, items);
+  }
+
+  function browse(path) {
+    api('/api/project/browse', {path: path, hidden: byId('fs-hidden').checked}).then(function (res) {
+      if (!res.ok) { projectMsg(errorOf(res)); return; }
+      projectMsg('');
+      renderListing(res.data);
+    }).catch(function () { projectMsg('Connection lost; try again.'); });
+  }
+
+  function openFolder(path) {
+    api('/api/project/open', {path: path}).then(function (res) {
+      if (!res.ok) { projectMsg(errorOf(res)); return; }
+      location.reload();
+    }).catch(function () { projectMsg('Connection lost; try again.'); });
+  }
+
+  function renderRecent() {
+    var items = recent.map(function (path) {
+      var li = el('li', null, path);
+      li.setAttribute('role', 'button');
+      li.tabIndex = 0;
+      li.addEventListener('click', function () { openFolder(path); });
+      li.addEventListener('keydown', onKey(function () { openFolder(path); }));
+      return li;
+    });
+    var ul = byId('recent-list');
+    ul.replaceChildren.apply(ul, items);
+  }
+
+  function applyProject(p) {
+    hostMode = true;
+    project = p.project || null;
+    recent = Array.isArray(p.recent) ? p.recent : [];
+    serverStarted = p.started;
+    byId('project-name').textContent = project ? str(project.name) : 'no project';
+    byId('project-name').setAttribute('title', project ? str(project.path) : '');
+    setHidden('project-name', false);
+    setHidden('btn-switch-project', !project);
+    setHidden('btn-project-back', !project);
+    byId('project-info').textContent = projectSummary(project);
+    var acts = projectActions(project);
+    setHidden('btn-init', !acts.init);
+    setHidden('btn-pull-origin', !acts.pull);
+    setHidden('btn-restart', false);
+    renderRecent();
+    if (!project) {
+      showMain('project-view');
+      if (fsDir === null) browse(str(p.cwd));
+    }
+  }
+
+  function loadProject() {
+    // 404 means a plain `harness ui` server: the page stays as it was
+    fetch('/api/project').then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
+      if (p && typeof p === 'object' && 'project' in p) applyProject(p);
+    }).catch(function () { /* not a launcher server */ });
+  }
+
+  function wireProject() {
+    byId('btn-switch-project').addEventListener('click', function () {
+      projectMsg('');
+      showMain('project-view');
+      var path = project ? str(project.path) : fsDir;
+      var cut = path ? path.replace(/[\/\\][^\/\\]*$/, '') : '';
+      browse(fsDir === null ? (cut || path) : fsDir);
+    });
+    byId('btn-project-back').addEventListener('click', function () { showMain('layout'); });
+    byId('btn-fs-up').addEventListener('click', function () {
+      var up = byId('btn-fs-up').getAttribute('data-parent');
+      if (up) browse(up);
+    });
+    byId('btn-fs-go').addEventListener('click', function () { browse(byId('fs-path').value); });
+    byId('fs-path').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); browse(byId('fs-path').value); }
+    });
+    byId('fs-hidden').addEventListener('change', function () { if (fsDir) browse(fsDir); });
+    byId('btn-fs-open').addEventListener('click', function () { if (fsDir) openFolder(fsDir); });
+    byId('btn-init').addEventListener('click', function () {
+      projectMsg('');
+      api('/api/project/init-preview', {}).then(function (res) {
+        if (!res.ok) { projectMsg(errorOf(res)); return null; }
+        if (!window.confirm(initConfirm(project ? project.path : '?', res.data.files || [], !!res.data.truncated))) return null;
+        return api('/api/project/init', {}).then(function (done) {
+          if (!done.ok) { projectMsg(errorOf(done)); return; }
+          projectMsg('Initialized: commit ' + str(done.data.sha) + ' on main.', true);
+          loadProject();
+        });
+      }).catch(function () { projectMsg('Connection lost; try again.'); });
+    });
+    byId('btn-pull-origin').addEventListener('click', function () {
+      projectMsg('');
+      if (!project || !project.origin_path || !window.confirm(pullConfirm(project.origin_path))) return;
+      api('/api/project/pull-origin', {}).then(function (res) {
+        if (!res.ok) { projectMsg(errorOf(res)); return; }
+        projectMsg('Origin updated: ' + str(res.data.output), true);
+        loadProject();
+      }).catch(function () { projectMsg('Connection lost; try again.'); });
+    });
+    byId('btn-restart').addEventListener('click', function () {
+      if (!window.confirm('Restart the server? Running agents are not interrupted, but the page reloads.')) return;
+      api('/api/server/restart', {}).then(function (res) {
+        if (!res.ok) { byId('banner').textContent = errorOf(res); return; }
+        restarting = true;
+        renderBanner();
+        waitForRestart(serverStarted, 120);
+      }).catch(function () { byId('banner').textContent = 'Connection lost; try again.'; });
+    });
+  }
+
   function applyOffice(o) {
     var sig = JSON.stringify(o);
     if (sig === officeSig) return;
     officeSig = sig;
     office = o;
     followLaunchedRun();
+    followHandoff();
     renderOffice();
     renderTranscript(o);
+    renderOrch(o.orchestrator);
+    byId('office-total').textContent = totalText(o);
     renderComposer();
+    renderChat();
+    renderOptions(o, false);
   }
 
   function pollOffice() {
+    if (hostMode && !project) return;
     fetch('/api/office').then(function (r) { return r.json(); }).then(function (o) {
       if (o && typeof o.state === 'string') applyOffice(o);
     }).catch(function () { /* next poll retries */ });
@@ -637,6 +1633,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     feed.replaceChildren.apply(feed, items);
     runView = v;
     renderOffice();
+    renderTimeline();
     renderBanner();
   }
 
@@ -649,7 +1646,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     current = id;
     conn = false; problem = null; stopped = null; idle = null;
     runView = null;
-    renderOffice();
+    selectTask(null);
     renderBanner();
     if (!id) return;
     source = new EventSource('/api/stream/' + encodeURIComponent(id));
@@ -681,13 +1678,14 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     var empty = runs.length === 0;
     document.getElementById('empty').className = empty ? '' : 'hidden';
     document.getElementById('content').className = empty ? 'hidden' : '';
-    document.querySelector('header').className = empty ? 'hidden' : '';
+    document.querySelector('header').className = (empty && !interactive) ? 'hidden' : '';
     var opts = runs.map(function (r) { return el('option', null, r); });
     picker.replaceChildren.apply(picker, opts);
     opts.forEach(function (o) { o.value = o.textContent; });
   }
 
   function poll() {
+    if (hostMode && !project) return;
     fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
@@ -702,6 +1700,14 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   renderRuns();
   renderOffice();
   wireComposer();
+  wireChat();
+  wireOrch();
+  wireProject();
+  wireOptions();
+  wirePlans();
+  byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
+  byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
+  loadProject();
   poll();
   setInterval(poll, 2000);
   pollOffice();

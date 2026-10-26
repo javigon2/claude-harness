@@ -2,6 +2,7 @@
 worktree through the router, merging the ones that pass."""
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from harness.state import STATE_FILE, RunState, load_state, run_dir, save_state
 from harness.verify import DEFAULT_TIMEOUT_S
 from harness.worker import Worker
 from harness.worktree import WorktreeError, WorktreeManager
+
+STOPPED_BY_USER = "stopped by user"
 
 
 class SchedulerError(RuntimeError):
@@ -75,6 +78,8 @@ class Scheduler:
         self.state: RunState | None = None
         self._stop_reason: str | None = None
         self._budget_event: dict | None = None
+        self._running: dict[str, asyncio.Task] = {}
+        self._stop_requested: str | None = None
 
     async def _emit(self, type_: str, payload: dict, task_id: str | None = None) -> None:
         await self.events.emit(type_, task_id=task_id, payload=payload)
@@ -83,6 +88,16 @@ class Scheduler:
     def stop_reason(self) -> str | None:
         """Why the run stopped starting work (a rate limit, a cost cap), or None."""
         return self._stop_reason
+
+    def request_stop(self, reason: str = STOPPED_BY_USER) -> None:
+        """Set stop_reason if unset; cancel running tasks. A task cancelled this way becomes
+        `paused` with `reason` as its error; tasks that already passed verification (being
+        committed and merged) are left to finish. Call it from the event loop's thread."""
+        if self._stop_reason is None:
+            self._stop_reason = reason
+        self._stop_requested = reason
+        for task in list(self._running.values()):
+            task.cancel()
 
     def _should_stop(self) -> str | None:
         """Why no new attempt or task may start, or None. The first time the summed cost of
@@ -145,6 +160,7 @@ class Scheduler:
                     "finished": False,
                     "stage": self.plan.stage,
                     "plan_path": self.plan_path or old.plan_path,
+                    "pid": os.getpid(),
                 }
             )
             for tid, ts in tasks.items():
@@ -160,6 +176,7 @@ class Scheduler:
                 run_id=self.run_id,
                 plan_path=self.plan_path,
                 stage=self.plan.stage,
+                pid=os.getpid(),
                 tasks={o.id: TaskState(task_id=o.id) for o in self.plan.orders},
             )
 
@@ -236,6 +253,34 @@ class Scheduler:
         save_state(self.run_dir, self.state)
 
     async def _run_task(self, order: WorkOrder, sem: asyncio.Semaphore, lock: asyncio.Lock) -> None:
+        """One task, cancellable by request_stop until it has passed verification: a task
+        cancelled that way becomes `paused` (event `task_paused`) and the cancellation is
+        swallowed; any other cancellation propagates."""
+        assert self.state is not None
+        current = asyncio.current_task()
+        assert current is not None
+        self._running[order.id] = current
+        try:
+            await self._run_task_body(order, sem, lock)
+        except asyncio.CancelledError:
+            reason = self._stop_requested
+            if reason is None:
+                raise
+            ts = self.state.tasks[order.id]
+            ts.status = "paused"
+            ts.error = reason
+            await self._save()
+            await self._emit(
+                "task_paused",
+                {"attempt": ts.attempts, "tier": ts.tier_used, "reason": reason, "resets_at": None},
+                task_id=order.id,
+            )
+        finally:
+            self._running.pop(order.id, None)
+
+    async def _run_task_body(
+        self, order: WorkOrder, sem: asyncio.Semaphore, lock: asyncio.Lock
+    ) -> None:
         """One task: worktree, router, commit and merge. Algorithm in the
         `decision: task algorithm` context item. Never raises except CancelledError."""
         assert self.state is not None
@@ -280,6 +325,7 @@ class Scheduler:
                 should_stop=self._should_stop,
             )
             await router.route(order, path, ts, base=base)
+            self._running.pop(order.id, None)  # verified: a stop no longer cancels the merge
             await self._flush_budget_event()
             if ts.status == "paused" and self._stop_reason is None:
                 self._stop_reason = ts.error

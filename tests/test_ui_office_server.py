@@ -286,7 +286,12 @@ def test_two_servers_make_different_tokens(tmp_path):
 
 
 def test_plan_endpoint_renders_the_draft(site):
-    assert site.get_json("/api/plan") == {"exists": False, "status": None, "blocks": []}
+    assert site.get_json("/api/plan") == {
+        "exists": False,
+        "status": None,
+        "blocks": [],
+        "kind": "project",
+    }
     site.post(START, {"description": "a demo"})
     wait_for(lambda: state(site) == "asking")
     site.post("/api/planner/message", {"text": "answers"})
