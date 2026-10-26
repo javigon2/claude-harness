@@ -12,6 +12,7 @@ project endpoints (GET /api/project, POST /api/project/{browse,open,init-preview
 pull-origin}, POST /api/server/restart) are served. Without a Host nothing changes."""
 
 import json
+import math
 import os
 import secrets
 import threading
@@ -65,6 +66,28 @@ ORCH_ROUTES = ("message", "new")
 PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
 MAX_PATH_CHARS = 4096
 ROUTE_CHOICES = ("auto", "quick", "project")
+
+
+# the tab icon: a starburst in ServiceNow green
+# one ray every 30 degrees, from a small hub out to a length of 17-28 (viewBox 0 0 64 64)
+_RAY_LENGTHS = (27, 19, 25, 17, 28, 21, 24, 18, 27, 20, 26, 22)
+
+
+def _favicon_svg() -> str:
+    rays = []
+    for i, length in enumerate(_RAY_LENGTHS):
+        angle = math.radians(i * 30 - 90)
+        x1, y1 = 32 + 6 * math.cos(angle), 32 + 6 * math.sin(angle)
+        x2, y2 = 32 + length * math.cos(angle), 32 + length * math.sin(angle)
+        rays.append(f"M{x1:.1f} {y1:.1f}L{x2:.1f} {y2:.1f}")
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+        f'<path d="{"".join(rays)}" fill="none" stroke="#63df4e" stroke-width="5.5" '
+        'stroke-linecap="round"/></svg>'
+    )
+
+
+FAVICON_SVG = _favicon_svg()
 
 
 def render_page(token: str, mode: str) -> bytes:
@@ -567,6 +590,9 @@ def make_handler(
             path = urlsplit(self.path).path
             if len(path) > 1:
                 path = path.rstrip("/")
+            if path == "/favicon.svg":
+                self._send(200, FAVICON_SVG.encode(), ctype="image/svg+xml")
+                return
             if path == "/":
                 try:
                     body = render_page(secret, mode)

@@ -208,3 +208,16 @@ def test_read_only_filesystem(server, tmp_path):
     with urllib.request.urlopen(base + "/api/stream/running1", timeout=5) as resp:
         _read_until(resp, b"data:", time.monotonic() + 5)
     assert _snapshot(tmp_path / ".harness") == before
+
+
+def test_favicon_and_tab_title(server):
+    _, base = server
+    code, headers, body = _get(base + "/favicon.svg")
+    assert code == 200
+    assert headers["Content-Type"] == "image/svg+xml"
+    assert body.startswith(b"<svg") and b"#63df4e" in body
+    _, _, page = _get(base + "/")
+    assert b"<title>Javier Pro</title>" in page
+    assert b'href="/favicon.svg?v=2"' in page
+    code, _, _ = _get(base + "/favicon.svg?v=2")
+    assert code == 200
