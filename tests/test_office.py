@@ -91,7 +91,11 @@ def test_start_ask_message_ready(tmp_path, make_office):
     assert v.reply_blocks[0]["type"] == "paragraph"
     assert v.stage == 1
     assert v.session_id and v.session_id.startswith("planner-")
-    assert v.progress == ["Glob: **/*.py", "Read: README.md", "Read: pyproject.toml"]
+    assert v.progress == [
+        "Finding files matching **/*.py",
+        "Reading README.md",
+        "Reading pyproject.toml",
+    ]
     assert not v.plan_exists
     office.message("my answers")
     wait_for(state_is(office, "ready"))
@@ -338,7 +342,7 @@ def test_view_from_log_live_office_session_asking_ready_busy(tmp_path):
     _log(tmp_path, ("planner_progress", {"tool": "Read", "detail": "a.py"}))
     v = office_view_from_log(tmp_path)
     assert v.state == "busy"
-    assert v.progress == ["Read: a.py"]
+    assert v.progress == ["Reading a.py"]
     _log(tmp_path, ("planner_reply", {"text": "**hi**", "plan_changed": False, "cost_usd": 0.5}))
     v = office_view_from_log(tmp_path)
     assert v.state == "asking"
@@ -346,6 +350,16 @@ def test_view_from_log_live_office_session_asking_ready_busy(tmp_path):
     assert v.cost_usd == 0.5
     _log(tmp_path, ("plan_ready", {"path": "p", "cost_usd": 0.5}))
     assert office_view_from_log(tmp_path).state == "ready"
+
+
+def test_view_from_log_shows_progress_summary(tmp_path):
+    started = ("planner_started", {"source": "office", "pid": os.getpid(), "stage": 1})
+    _log(tmp_path, started, ("planner_message", {"chars": 3, "phase": "project"}))
+    _log(
+        tmp_path,
+        ("planner_progress", {"tool": "Bash", "detail": "ls", "summary": "List the files"}),
+    )
+    assert office_view_from_log(tmp_path).progress == ["List the files"]
     _log(tmp_path, ("planner_message", {"chars": 3, "phase": "staging"}))
     assert office_view_from_log(tmp_path).state == "staging"
 

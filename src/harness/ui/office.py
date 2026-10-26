@@ -66,7 +66,7 @@ from harness.ui.runs import (
     save_run_options,
     unstaged_stages,
 )
-from harness.ui.view import IDLE_MINUTES, list_runs
+from harness.ui.view import IDLE_MINUTES, list_runs, progress_text
 from harness.worker import ProgressFn
 
 LOCK_FILE = Path(".harness") / "office.lock"
@@ -295,9 +295,7 @@ def _plan_fields(repo: Path) -> dict[str, Any]:
 
 
 def _progress_line(payload: dict[str, Any]) -> str:
-    tool = str(payload.get("tool", "?"))
-    detail = payload.get("detail")
-    return f"{tool}: {detail}" if isinstance(detail, str) and detail else tool
+    return progress_text(payload)
 
 
 def _terminal_live(sess: list[Event]) -> bool:
@@ -968,10 +966,11 @@ class Office:
             self._progress_lines = [*self._progress_lines, _progress_line(info)][-PROGRESS_LINES:]
             log = self._log
         if log is not None:
-            log.emit(
-                "planner_progress",
-                {"tool": info.get("tool"), "detail": info.get("detail", "")},
-            )
+            payload: dict[str, Any] = {"tool": info.get("tool"), "detail": info.get("detail", "")}
+            summary = info.get("summary")
+            if isinstance(summary, str) and summary:
+                payload["summary"] = summary
+            log.emit("planner_progress", payload)
 
     def _ask(self, _prompt: str) -> str | None:
         """run_planner's `ask`: park the boss as asking (or ready) and wait for a message.
