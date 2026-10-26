@@ -2,7 +2,7 @@
 
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
 POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), the run
-POST endpoint (POST /api/run/resume) and the Orchestrator POST endpoints
+POST endpoints (POST /api/run/{resume,stop,launch,options}) and the Orchestrator POST endpoints
 (POST /api/orchestrator/{message,new}), each behind the Host, Origin and token checks, a
 JSON-only body of at most 64 KB, and a strict per-route body schema."""
 
@@ -15,9 +15,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+from pydantic import ValidationError
+
 from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
-from harness.state import STATE_FILE, StateError, run_dir
+from harness.report import report_text, status_text
+from harness.state import STATE_FILE, StateError, load_state, run_dir
 from harness.ui.chat import CHAT_TIERS, ChatConflict
 from harness.ui.markdown import parse_markdown
 from harness.ui.office import (
@@ -25,9 +28,11 @@ from harness.ui.office import (
     Office,
     OfficeConflict,
     office_view_from_log,
+    plan_status,
     status_of,
 )
 from harness.ui.orchestrator import OrchestratorConflict
+from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.view import build_view, list_runs
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
@@ -41,9 +46,10 @@ _VIEW_ERRORS = (FileNotFoundError, StateError, OSError, ValueError)
 _TOKEN_META = '<meta name="harness-token" content="">'
 _MODE_META = '<meta name="harness-mode" content="read-only">'
 
-POST_ROUTES = ("start", "message", "implement", "next-stage")
+POST_ROUTES = ("start", "message", "implement", "next-stage", "stage")
 CHAT_ROUTES = ("start", "message", "close")
-RUN_ROUTES = ("resume",)
+RUN_ROUTES = ("resume", "stop", "launch", "options")
+MAX_PLAN_PATH_CHARS = 500
 ORCH_ROUTES = ("message", "new")
 ROUTE_CHOICES = ("auto", "quick", "project")
 
@@ -73,7 +79,8 @@ def _text_field(body: dict, key: str) -> str:
 def _check_body(route: str, body: object) -> dict:
     """The body of a POST to /api/planner/<route> or /api/run/<route>, or _BadBody. Exactly
     the allowed keys: start {description}, {description, route} or {from_draft: true};
-    message {text}; implement, next-stage and resume {}."""
+    message {text}; stage {stage} (an int of at least 1); launch {plan_path}; options
+    {review, max_parallel, max_cost, fake}; implement, next-stage, resume and stop {}."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
@@ -93,6 +100,29 @@ def _check_body(route: str, body: object) -> dict:
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
+    elif route == "stage":
+        if keys != {"stage"}:
+            raise _BadBody("send exactly: stage")
+        stage = body["stage"]
+        if isinstance(stage, bool) or not isinstance(stage, int) or stage < 1:
+            raise _BadBody("stage must be an integer of at least 1")
+    elif route == "launch":
+        if keys != {"plan_path"}:
+            raise _BadBody("send exactly: plan_path")
+        value = body["plan_path"]
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_PLAN_PATH_CHARS:
+            raise _BadBody(
+                f"plan_path must be a non-empty string of at most {MAX_PLAN_PATH_CHARS} characters"
+            )
+    elif route == "options":
+        if keys != {"review", "max_parallel", "max_cost", "fake"}:
+            raise _BadBody("send exactly: review, max_parallel, max_cost, fake")
+        try:
+            RunOptions.model_validate(body, strict=True)
+        except ValidationError as err:
+            first = err.errors()[0]
+            where = ".".join(str(x) for x in first["loc"])
+            raise _BadBody(f"bad run options: {where}: {first['msg']}") from None
     elif keys:
         raise _BadBody("this endpoint takes no fields")
     return body
@@ -192,12 +222,12 @@ def make_handler(
     token: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
-    `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`. Without an
-    `office` every other method answers 405 (read-only). With one, POST
-    `/api/planner/{start,message,implement,next-stage}`, POST `/api/chat/{start,message,close}`,
-    POST `/api/run/resume` and POST `/api/orchestrator/{message,new}` are served (`token`
-    guards them; one is made if not given) and every other method still answers 405. Request
-    logging is silenced."""
+    `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`, `/api/plans`,
+    `/api/report/<run_id>`. Without an `office` every other method answers 405 (read-only).
+    With one, POST `/api/planner/{start,message,implement,next-stage,stage}`, POST
+    `/api/chat/{start,message,close}`, POST `/api/run/{resume,stop,launch,options}` and POST
+    `/api/orchestrator/{message,new}` are served (`token` guards them; one is made if not
+    given) and every other method still answers 405. Request logging is silenced."""
     interactive = office is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
@@ -352,7 +382,14 @@ def make_handler(
                     else:
                         office.chats.close_chat(body["chat_id"])
                 elif kind == "run":
-                    office.resume_run()
+                    if route == "resume":
+                        office.resume_run()
+                    elif route == "stop":
+                        office.stop_run()
+                    elif route == "launch":
+                        office.launch_plan(body["plan_path"])
+                    else:
+                        office.set_run_options(RunOptions.model_validate(body, strict=True))
                 elif kind == "orchestrator":
                     if route == "message":
                         office.orchestrator.message(body["text"])
@@ -368,6 +405,8 @@ def make_handler(
                     office.message(body["text"])
                 elif route == "implement":
                     office.implement()
+                elif route == "stage":
+                    office.plan_stage(body["stage"])
                 else:
                     office.next_stage()
             except (OfficeConflict, ChatConflict, OrchestratorConflict) as err:
@@ -402,6 +441,19 @@ def make_handler(
                 return
             if path == "/api/plan":
                 self._plan()
+                return
+            if path == "/api/plans":
+                self._json(
+                    200,
+                    {
+                        "plans": [e.model_dump(mode="json") for e in list_plans(repo)],
+                        "unstaged": unstaged_stages(repo),
+                        "plan_status": plan_status(repo),
+                    },
+                )
+                return
+            if path.startswith("/api/report/"):
+                self._report(unquote(path[len("/api/report/") :]))
                 return
             if path == "/api/runs":
                 try:
@@ -468,6 +520,22 @@ def make_handler(
             self._json(
                 200,
                 {"exists": True, "status": None, "blocks": parse_markdown(text), "kind": "quick"},
+            )
+
+        def _report(self, run_id: str) -> None:
+            """The status and cost report texts of a run, as `harness status` and
+            `harness report` print them."""
+            try:
+                if run_id not in list_runs(repo):
+                    self._json(404, {"error": "unknown run"})
+                    return
+                state = load_state(run_dir(repo, run_id))
+            except (StateError, OSError, ValueError) as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(
+                200,
+                {"run_id": run_id, "status": status_text(state), "report": report_text(state)},
             )
 
         def _run(self, run_id: str) -> None:
