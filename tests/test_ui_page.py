@@ -1474,3 +1474,120 @@ def test_folder_listing_renders_rows_that_browse_into_folders(tmp_path):
         True,
         ["No subfolders", "Only the first folders are shown; type a path to go further."],
     ]
+
+
+# ---------------------------------------------------------------- run options and Stop run
+
+OPTION_IDS = [
+    "run-options", "opt-review", "opt-parallel", "opt-max-cost", "opt-fake", "opt-summary",
+    "opt-msg", "btn-stop-run",
+]  # fmt: skip
+
+
+def test_run_options_ids_labels_and_endpoints():
+    text = _text()
+    for id_ in OPTION_IDS:
+        assert f'id="{id_}"' in text, id_
+    assert '<button id="btn-stop-run" type="button" class="hidden">Stop run</button>' in text
+    assert '<div id="run-options" class="hidden">' in text
+    for word in [
+        "'/api/run/options'", "'/api/run/stop'", "Cost so far: ", "Run options: ",
+        "Running tasks are paused; Resume run continues them.", "wireOptions();",
+    ]:  # fmt: skip
+        assert word in text, word
+    assert text.count('<details class="fold">') == 2
+
+
+def test_options_body(tmp_path):
+    cases = [
+        [False, "4", "", False], [True, " 2 ", "1.5", True], [False, "4", "$3", False],
+        [False, "0", "", False], [False, "17", "", False], [False, "2.5", "", False],
+        [False, "", "", False], [False, "4", "0", False], [False, "4", "abc", False],
+        [False, "4", "-1", False], [False, 16, 0.25, False],
+    ]  # fmt: skip
+    script = (
+        _functions(_text(), "optionsBody")
+        + "var cases = " + json.dumps(cases) + ";\n"
+        + "console.log(JSON.stringify(cases.map(function (c) {"
+        + " return optionsBody(c[0], c[1], c[2], c[3]); })));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    parallel = "Parallel must be a whole number from 1 to 16."
+    cap = "The cost cap must be a number above 0, or empty for no cap."
+    assert out == [
+        {"body": {"review": False, "max_parallel": 4, "max_cost": None, "fake": False}},
+        {"body": {"review": True, "max_parallel": 2, "max_cost": 1.5, "fake": True}},
+        {"body": {"review": False, "max_parallel": 4, "max_cost": 3, "fake": False}},
+        {"error": parallel}, {"error": parallel}, {"error": parallel}, {"error": parallel},
+        {"error": cap}, {"error": cap}, {"error": cap},
+        {"body": {"review": False, "max_parallel": 16, "max_cost": 0.25, "fake": False}},
+    ]  # fmt: skip
+
+
+def test_launch_and_stop_confirm_texts(tmp_path):
+    script = (
+        "function str(x) { return (x === null || x === undefined) ? '?' : String(x); }\n"
+        "function money(x) { return (x === null || x === undefined || isNaN(Number(x))) ? '$?'"
+        " : '$' + Number(x).toFixed(4); }\n"
+        + _functions(_text(), "launchConfirm", "stopConfirm")
+        + "var o = {options_summary: 'review off · 4 parallel · no cost cap · real workers',"
+        + " total_cost_usd: 0.0793};\n"
+        + "console.log(JSON.stringify([launchConfirm('Run it?', o), launchConfirm('Run it?', null),"
+        + " stopConfirm('r1')]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        "Run it?\n\nRun options: review off · 4 parallel · no cost cap · real workers\n"
+        "Cost so far: $0.0793",
+        "Run it?\n\nRun options: ?\nCost so far: $?",
+        "Stop run r1? Running tasks are paused; Resume run continues them.",
+    ]
+
+
+OPTIONS_SCENARIO = """
+var out = [], hidden = {};
+var interactive = true, fakeLocked = false;
+function byId(id) { return document.getElementById(id); }
+function setHidden(id, h) { hidden[id] = h; }
+document.activeElement = null;
+['opt-review', 'opt-fake'].forEach(function (id) { nodes[id] = mk('input'); });
+['opt-parallel', 'opt-max-cost', 'opt-summary', 'btn-stop-run'].forEach(function (id) {
+  nodes[id] = mk('input');
+});
+var o = {run_options: {review: true, max_parallel: 3, max_cost: 1.5, fake: false},
+         options_summary: 'S', stoppable_run: 'r9'};
+renderOptions(o, false);
+out.push([nodes['opt-review'].checked, nodes['opt-parallel'].value, nodes['opt-max-cost'].value,
+          nodes['opt-fake'].checked, nodes['opt-summary'].text, hidden['btn-stop-run'],
+          nodes['btn-stop-run'].attrs.title, hidden['run-options']]);
+nodes['opt-parallel'].value = '9';
+document.activeElement = nodes['opt-parallel'];
+renderOptions({run_options: {review: false, max_parallel: 1, max_cost: null, fake: true},
+               options_summary: 'T', stoppable_run: null}, false);
+out.push([nodes['opt-parallel'].value, nodes['opt-review'].checked, nodes['opt-max-cost'].value,
+          nodes['opt-fake'].checked, hidden['btn-stop-run'], nodes['btn-stop-run'].attrs.title]);
+renderOptions({run_options: {review: false, max_parallel: 1, max_cost: null, fake: true},
+               options_summary: 'T'}, true);
+out.push([nodes['opt-parallel'].value, hidden['btn-stop-run']]);
+fakeLocked = true;
+renderOptions({run_options: {review: false, max_parallel: 1, max_cost: null, fake: false},
+               options_summary: 'T'}, true);
+out.push([nodes['opt-fake'].checked, nodes['opt-fake'].disabled]);
+interactive = false;
+renderOptions(o, true);
+out.push([hidden['run-options'], hidden['btn-stop-run']]);
+console.log(JSON.stringify(out));
+"""
+
+
+def test_render_options_follows_the_server_but_not_the_field_being_edited(tmp_path):
+    text = _text()
+    script = _page_helpers(text) + _functions(text, "renderOptions") + OPTIONS_SCENARIO
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        [True, "3", "1.5", False, "S", False, "Stop run r9", False],
+        ["9", False, "", True, True, ""],
+        ["1", True],
+        [True, True],
+        [True, True],
+    ]

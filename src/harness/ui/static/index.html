@@ -185,6 +185,12 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #project-msg:empty { display: none; }
 #project-view button, header button { font: inherit; padding: 4px 12px; cursor: pointer; }
 #project-view button:disabled, header button:disabled { cursor: default; opacity: 0.55; }
+#run-options { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 6px 0 10px; font-size: 13px; border-bottom: 1px solid #e5e7eb; }
+#run-options input[type="number"] { width: 4em; font: inherit; }
+#run-options input[type="text"] { width: 5em; font: inherit; }
+#opt-msg { color: #b91c1c; font-weight: 600; }
+#opt-msg:empty { display: none; }
+#btn-stop-run { background: #fee2e2; border: 1px solid #dc2626; border-radius: 4px; color: #7f1d1d; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -201,6 +207,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="office-total"></span>
   <span id="project-name" class="chip hidden"></span>
   <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
+  <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
 </header>
 <div id="banner"></div>
 <main id="layout">
@@ -297,6 +304,15 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
   </section>
   <section id="right">
+    <div id="run-options" class="hidden">
+      <strong>Run options</strong>
+      <label><input id="opt-review" type="checkbox"> review</label>
+      <label>parallel <input id="opt-parallel" type="number" min="1" max="16" step="1"></label>
+      <label>cost cap $ <input id="opt-max-cost" type="text" inputmode="decimal" placeholder="none"></label>
+      <label><input id="opt-fake" type="checkbox"> fake workers</label>
+      <span id="opt-summary" class="muted"></span>
+      <span id="opt-msg" role="alert"></span>
+    </div>
     <div id="office" aria-label="Office">
       <div id="teacher" class="teacher"></div>
       <div id="row-opus" class="row row-opus hidden"><div class="row-label">opus</div><div id="desks-opus" class="row-desks"></div></div>
@@ -353,6 +369,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
   var orchShown = null, orchCount = 0;
+  var fakeLocked = false;
   var hostMode = false, project = null, recent = [], serverStarted = null, fsDir = null;
 
   function needsTid(id, text) {
@@ -1017,18 +1034,23 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('btn-continue').addEventListener('click', function () { send('continue'); });
     byId('btn-implement').addEventListener('click', function () {
       if (office && office.plan_kind === 'quick') {
-        if (window.confirm('Start this quick plan?')) act('/api/planner/implement', {});
+        if (window.confirm(launchConfirm('Start this quick plan?', office))) act('/api/planner/implement', {});
         return;
       }
-      var cost = office ? money(office.cost_usd) : '$?';
-      var ok = window.confirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.\n\nPlanner cost so far: ' + cost);
+      var ok = window.confirm(launchConfirm('Start implementing?\n\nThis approves the plan, has the planner write stage 1 work orders (one more Opus session turn), then starts `harness run`.', office));
       if (ok) act('/api/planner/implement', {});
     });
     byId('btn-resume').addEventListener('click', function () { act('/api/planner/start', {from_draft: true}); });
     byId('btn-fresh').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
     byId('btn-new').addEventListener('click', function () { forcePrompt = true; renderComposer(); });
-    byId('btn-next').addEventListener('click', function () { act('/api/planner/next-stage', {}); });
-    byId('btn-resume-run').addEventListener('click', function () { act('/api/run/resume', {}); });
+    byId('btn-next').addEventListener('click', function () {
+      var n = office ? str(office.next_stage) : '?';
+      if (window.confirm(launchConfirm('Plan stage ' + n + '?\n\nThe planner writes its work orders, then `harness run` starts.', office))) act('/api/planner/next-stage', {});
+    });
+    byId('btn-resume-run').addEventListener('click', function () {
+      var id = office && typeof office.resumable_run === 'string' ? office.resumable_run : '?';
+      if (window.confirm(launchConfirm('Resume run ' + id + '?\n\nTasks already done are skipped.', office))) act('/api/run/resume', {});
+    });
   }
 
   // ---- an agent chat in the left panel, appended in place
@@ -1163,6 +1185,76 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     location.hash = '#' + encodeURIComponent(office.run_id);
   }
 
+  // ---- run options, the cost shown in every launch confirm, and Stop run
+  function optionsBody(review, parallel, cost, fake) {
+    // the POST /api/run/options body from the form fields, or {error: sentence}
+    var p = String(parallel).replace(/^\s+|\s+$/g, '');
+    var n = Number(p);
+    if (p === '' || n !== Math.floor(n) || n < 1 || n > 16) {
+      return {error: 'Parallel must be a whole number from 1 to 16.'};
+    }
+    var c = String(cost).replace(/^\s+|\s+$/g, '').replace(/^\$/, '');
+    var cap = null;
+    if (c !== '') {
+      cap = Number(c);
+      if (!isFinite(cap) || cap <= 0) return {error: 'The cost cap must be a number above 0, or empty for no cap.'};
+    }
+    return {body: {review: !!review, max_parallel: n, max_cost: cap, fake: !!fake}};
+  }
+
+  function launchConfirm(head, o) {
+    // every confirm that starts paid work: the options the run gets and what was spent so far
+    var v = o || {};
+    return head + '\n\nRun options: ' + (v.options_summary ? String(v.options_summary) : '?') +
+      '\nCost so far: ' + money(v.total_cost_usd);
+  }
+
+  function stopConfirm(id) {
+    return 'Stop run ' + str(id) + '? Running tasks are paused; Resume run continues them.';
+  }
+
+  function renderOptions(o, force) {
+    // the fields follow the server, except the one being edited
+    setHidden('run-options', !interactive);
+    var opts = o.run_options || {};
+    var active = document.activeElement;
+    function put(id, set) { if (force || active !== byId(id)) set(byId(id)); }
+    put('opt-review', function (f) { f.checked = !!opts.review; });
+    put('opt-parallel', function (f) { f.value = (opts.max_parallel === undefined) ? '' : String(opts.max_parallel); });
+    put('opt-max-cost', function (f) { f.value = (opts.max_cost === null || opts.max_cost === undefined) ? '' : String(opts.max_cost); });
+    put('opt-fake', function (f) { f.checked = fakeLocked || !!opts.fake; });
+    byId('opt-fake').disabled = fakeLocked;
+    byId('opt-summary').textContent = o.options_summary ? String(o.options_summary) : '';
+    var stop = typeof o.stoppable_run === 'string' ? o.stoppable_run : null;
+    setHidden('btn-stop-run', !interactive || !stop);
+    byId('btn-stop-run').setAttribute('title', stop ? 'Stop run ' + stop : '');
+  }
+
+  function wireOptions() {
+    function changed() {
+      var r = optionsBody(byId('opt-review').checked, byId('opt-parallel').value, byId('opt-max-cost').value, byId('opt-fake').checked);
+      var msg = byId('opt-msg');
+      if (r.error) { msg.textContent = r.error; return; }
+      msg.textContent = '';
+      api('/api/run/options', r.body).then(function (res) {
+        if (res.ok) {
+          if (res.data && res.data.office) applyOffice(res.data.office);
+          return;
+        }
+        msg.textContent = errorOf(res);
+        if (res.status === 409 && /fake workers only/.test(msg.textContent)) fakeLocked = true;
+        if (office) renderOptions(office, true);
+      }).catch(function () { msg.textContent = 'Connection lost; try again.'; });
+    }
+    ['opt-review', 'opt-parallel', 'opt-max-cost', 'opt-fake'].forEach(function (id) {
+      byId(id).addEventListener('change', changed);
+    });
+    byId('btn-stop-run').addEventListener('click', function () {
+      var id = office && typeof office.stoppable_run === 'string' ? office.stoppable_run : null;
+      if (id && window.confirm(stopConfirm(id))) act('/api/run/stop', {}, null, 'opt-msg');
+    });
+  }
+
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
   function projectSummary(p) {
     // one line about the open folder, from GET /api/project
@@ -1295,6 +1387,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     byId('office-total').textContent = totalText(o);
     renderComposer();
     renderChat();
+    renderOptions(o, false);
   }
 
   function pollOffice() {
@@ -1425,6 +1518,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   wireChat();
   wireOrch();
   wireProject();
+  wireOptions();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
   loadProject();
