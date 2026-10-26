@@ -191,6 +191,14 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #opt-msg { color: #b91c1c; font-weight: 600; }
 #opt-msg:empty { display: none; }
 #btn-stop-run { background: #fee2e2; border: 1px solid #dc2626; border-radius: 4px; color: #7f1d1d; }
+#plans-view, #report-view { padding: 12px 16px; max-width: 900px; }
+#plans-list, #plans-unstaged { list-style: none; padding: 0; margin: 8px 0; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; }
+#plans-list:empty, #plans-unstaged:empty { display: none; }
+#plans-list li, #plans-unstaged li { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+.plan-error { color: #b91c1c; }
+#plans-msg { color: #b91c1c; font-weight: 600; }
+#plans-msg:empty { display: none; }
+#plans-view button, #report-view button { font: inherit; padding: 4px 12px; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -207,6 +215,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="office-total"></span>
   <span id="project-name" class="chip hidden"></span>
   <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
+  <button id="btn-plans" type="button" class="hidden">Plans</button>
+  <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
 </header>
 <div id="banner"></div>
@@ -350,6 +360,19 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <ul id="recent-list"></ul>
   <p id="project-info"></p>
   <p id="project-msg" role="alert"></p>
+</section>
+<section id="plans-view" class="hidden">
+  <button id="btn-plans-back" type="button">Back</button>
+  <h2>Plans</h2>
+  <ul id="plans-list"></ul>
+  <ul id="plans-unstaged"></ul>
+  <p id="plans-msg" role="alert"></p>
+</section>
+<section id="report-view" class="hidden">
+  <button id="btn-report-back" type="button">Back</button>
+  <h2>Report</h2>
+  <pre id="report-status"></pre>
+  <pre id="report-text"></pre>
 </section>
 <script>
 (function () {
@@ -1216,6 +1239,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function renderOptions(o, force) {
     // the fields follow the server, except the one being edited
     setHidden('run-options', !interactive);
+    setHidden('btn-plans', !interactive);
+    setHidden('btn-report', !interactive);
     var opts = o.run_options || {};
     var active = document.activeElement;
     function put(id, set) { if (force || active !== byId(id)) set(byId(id)); }
@@ -1255,6 +1280,87 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
   }
 
+  // ---- the Plans panel and the Report view
+  function planLine(p) {
+    // what a plan row says besides its path: the counts or why it cannot run, and its last run
+    var what = p.error ? 'invalid: ' + String(p.error) : num(p.orders) + ' orders \u00b7 ' + num(p.waves) + ' waves';
+    var last = p.last_run ? 'last run ' + String(p.last_run) + (p.last_status ? ' (' + String(p.last_status) + ')' : '') : 'never run';
+    return what + ' \u00b7 ' + last;
+  }
+
+  function renderPlans(d) {
+    var plans = Array.isArray(d.plans) ? d.plans : [];
+    var rows = plans.map(function (p) {
+      var li = el('li');
+      li.appendChild(el('strong', null, str(p.path)));
+      li.appendChild(el('span', p.error ? 'plan-error' : 'muted', planLine(p)));
+      var run = el('button', null, 'Run');
+      run.type = 'button';
+      run.disabled = !!p.error;
+      run.addEventListener('click', function () {
+        if (!window.confirm(launchConfirm('Run ' + str(p.path) + '?', office))) return;
+        act('/api/run/launch', {plan_path: p.path}, function () { showMain('layout'); selectTask(null); }, 'plans-msg');
+      });
+      li.appendChild(run);
+      return li;
+    });
+    if (!rows.length) rows.push(el('li', 'muted', 'No plans yet. Start one from the Orchestrator.'));
+    var ul = byId('plans-list');
+    ul.replaceChildren.apply(ul, rows);
+    var stages = (Array.isArray(d.unstaged) ? d.unstaged : []).map(function (n) {
+      var li = el('li');
+      var b = el('button', null, 'Write work orders for stage ' + n);
+      b.type = 'button';
+      b.addEventListener('click', function () {
+        var ask = launchConfirm('Write work orders for stage ' + n + '?\n\nA planner session turns the approved plan\'s stage ' + n + ' into work orders, then `harness run` starts.', office);
+        if (!window.confirm(ask)) return;
+        act('/api/planner/stage', {stage: n}, function () { showMain('layout'); showOpus(); }, 'plans-msg');
+      });
+      li.appendChild(b);
+      return li;
+    });
+    var us = byId('plans-unstaged');
+    us.replaceChildren.apply(us, stages);
+  }
+
+  function loadPlans() {
+    fetch('/api/plans').then(function (r) { return r.json(); }).then(function (d) {
+      if (d && Array.isArray(d.plans)) renderPlans(d);
+    }).catch(function () { /* the next refresh retries */ });
+  }
+
+  function loadReport() {
+    if (!current) {
+      byId('report-status').textContent = 'No run yet.';
+      byId('report-text').textContent = '';
+      return;
+    }
+    fetch('/api/report/' + encodeURIComponent(current)).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && typeof d.report === 'string') {
+        byId('report-status').textContent = d.status;
+        byId('report-text').textContent = d.report;
+      } else {
+        byId('report-status').textContent = (d && d.error) ? String(d.error) : 'No report.';
+        byId('report-text').textContent = '';
+      }
+    }).catch(function () { /* the next refresh retries */ });
+  }
+
+  function wirePlans() {
+    byId('btn-plans').addEventListener('click', function () {
+      byId('plans-msg').textContent = '';
+      showMain('plans-view');
+      loadPlans();
+    });
+    byId('btn-report').addEventListener('click', function () { showMain('report-view'); loadReport(); });
+    byId('btn-plans-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
+    byId('btn-report-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
+    setInterval(function () {
+      if (!byId('plans-view').classList.contains('hidden')) loadPlans();
+      if (!byId('report-view').classList.contains('hidden')) loadReport();
+    }, 2000);
+  }
+
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
   function projectSummary(p) {
     // one line about the open folder, from GET /api/project
@@ -1269,7 +1375,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     return str(p.name) + ' \u00b7 ' + str(p.path) + ' \u00b7 ' + bits.join(', ');
   }
 
-  var MAIN_VIEWS = ['layout', 'project-view'];
+  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view'];
   function showMain(name) {
     // the page shows exactly one of the two panels and the launcher's views
     MAIN_VIEWS.forEach(function (id) { setHidden(id, id !== name); });
@@ -1519,6 +1625,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   wireOrch();
   wireProject();
   wireOptions();
+  wirePlans();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
   loadProject();

@@ -1591,3 +1591,109 @@ def test_render_options_follows_the_server_but_not_the_field_being_edited(tmp_pa
         [True, True],
         [True, True],
     ]
+
+
+# ---------------------------------------------------------------- Plans panel and Report view
+
+PLANS_IDS = [
+    "btn-plans", "btn-report", "plans-view", "plans-list", "plans-unstaged", "report-view",
+    "report-status", "report-text",
+]  # fmt: skip
+
+
+def test_plans_and_report_ids_labels_and_endpoints():
+    text = _text()
+    for id_ in PLANS_IDS:
+        assert f'id="{id_}"' in text, id_
+    assert '<button id="btn-plans" type="button" class="hidden">Plans</button>' in text
+    assert '<button id="btn-report" type="button" class="hidden">Report</button>' in text
+    assert '<pre id="report-status"></pre>' in text and '<pre id="report-text"></pre>' in text
+    for word in [
+        "'/api/plans'", "'/api/report/'", "'/api/run/launch'", "'/api/planner/stage'",
+        "'Write work orders for stage '", "wirePlans();",
+    ]:  # fmt: skip
+        assert word in text, word
+    assert "'plans-view'" in text and "'report-view'" in text
+
+
+def test_plan_line(tmp_path):
+    plans = [
+        {"orders": 3, "waves": 2, "error": None, "last_run": None, "last_status": None},
+        {"orders": 3, "waves": 2, "error": None, "last_run": "r1", "last_status": "stopped"},
+        {"orders": 0, "waves": 0, "error": "cycle: a, b", "last_run": "r2", "last_status": None},
+    ]
+    script = (
+        "function num(x) { return (x === null || x === undefined || isNaN(Number(x))) ? '?'"
+        " : String(x); }\n"
+        + _functions(_text(), "planLine")
+        + "console.log(JSON.stringify(" + json.dumps(plans) + ".map(planLine)));\n"
+    )  # fmt: skip
+    assert json.loads(_run_node(tmp_path, script)[-1]) == [
+        "3 orders · 2 waves · never run",
+        "3 orders · 2 waves · last run r1 (stopped)",
+        "invalid: cycle: a, b · last run r2",
+    ]
+
+
+PLANS_SCENARIO = """
+var out = [], confirms = [], acts = [], office = {options_summary: 'S', total_cost_usd: 1};
+function byId(id) { return document.getElementById(id); }
+function money(x) { return '$' + Number(x).toFixed(4); }
+function launchConfirm(head, o) { return head + '|' + o.options_summary; }
+function showMain(n) { out.push('main:' + n); }
+function selectTask(x) { out.push('select:' + x); }
+function showOpus() { out.push('opus'); }
+window = {confirm: function (t) { confirms.push(t); return window.answer; }, answer: true};
+function act(path, body, done, msg) { acts.push([path, body, msg]); if (done) done(); }
+var origEl = el;
+el = function (tag, cls, text) {
+  var n = origEl(tag, cls, text);
+  if (tag === 'button') n.disabled = false;
+  return n;
+};
+renderPlans({plans: [
+  {path: 'a/plan.json', orders: 2, waves: 1, error: null, last_run: null, last_status: null},
+  {path: 'b/plan.json', orders: 0, waves: 0, error: 'bad', last_run: 'r', last_status: 'done'}],
+  unstaged: [2, 3]});
+var rows = nodes['plans-list'].children;
+out.push(rows.map(function (r) { return r.children.map(function (c) { return c.text; }); }));
+out.push(rows.map(function (r) { return r.children[2].disabled; }));
+rows[0].children[2].on.click();
+window.answer = false;
+rows[0].children[2].on.click();
+var st = nodes['plans-unstaged'].children;
+out.push(st.map(function (r) { return r.children[0].text; }));
+window.answer = true;
+st[1].children[0].on.click();
+renderPlans({plans: [], unstaged: []});
+out.push([nodes['plans-list'].children.map(function (r) { return r.text; }),
+          nodes['plans-unstaged'].children.length]);
+out.push(acts);
+out.push(confirms.length);
+console.log(JSON.stringify(out));
+"""
+
+
+def test_plans_render_rows_with_run_and_stage_buttons(tmp_path):
+    text = _text()
+    script = (
+        _page_helpers(text)
+        + "var window;\n"
+        + _functions(text, "planLine", "renderPlans")
+        + PLANS_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out[0] == [
+        ["a/plan.json", "2 orders · 1 waves · never run", "Run"],
+        ["b/plan.json", "invalid: bad · last run r (done)", "Run"],
+    ]
+    assert out[1] == [False, True]
+    assert out[2:4] == ["main:layout", "select:null"]  # the first Run was confirmed
+    assert out[4] == ["Write work orders for stage 2", "Write work orders for stage 3"]
+    assert out[5:7] == ["main:layout", "opus"]  # stage 3 confirmed
+    assert out[7] == [["No plans yet. Start one from the Orchestrator."], 0]
+    assert out[8] == [
+        ["/api/run/launch", {"plan_path": "a/plan.json"}, "plans-msg"],
+        ["/api/planner/stage", {"stage": 3}, "plans-msg"],
+    ]
+    assert out[9] == 3  # the declined Run confirmed nothing more
