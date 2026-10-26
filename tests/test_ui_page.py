@@ -1369,3 +1369,108 @@ def test_orchestrator_send_picks_the_endpoint(tmp_path):
         {"path": "/api/orchestrator/message", "body": {"text": "d"}},
         {"path": "/api/orchestrator/message", "body": {"text": "e"}},
     ]
+
+
+# ---------------------------------------------------------------- the launcher: project browser
+
+PROJECT_IDS = [
+    "project-name", "btn-switch-project", "project-view", "fs-path", "btn-fs-go", "btn-fs-up",
+    "fs-hidden", "fs-list", "btn-fs-open", "recent-list", "project-info", "project-msg",
+]  # fmt: skip
+
+
+def test_project_view_ids_labels_and_endpoints():
+    text = _text()
+    for id_ in PROJECT_IDS:
+        assert f'id="{id_}"' in text, id_
+    assert '<button id="btn-fs-open" type="button">Open this folder</button>' in text
+    assert (
+        '<button id="btn-switch-project" type="button" class="hidden">Switch project</button>'
+        in text
+    )
+    for word in [
+        "'/api/project'",
+        "'/api/project/browse'",
+        "'/api/project/open'",
+        "location.reload()",
+    ]:
+        assert word in text, word
+    # a plain `harness ui` page never shows the launcher's controls
+    assert '<span id="project-name" class="chip hidden"></span>' in text
+    assert '<section id="project-view" class="hidden">' in text
+    assert text.index('id="project-view"') > text.index("</main>")
+
+
+def test_project_view_is_not_an_anchor_and_has_no_urls():
+    text = _text()
+    assert "<a " not in text and "http://" not in text and "https://" not in text
+
+
+def test_project_summary(tmp_path):
+    infos = [
+        None,
+        {"name": "p", "path": "/x/p", "is_git": False, "has_commit": False, "branch": None,
+         "on_main": False, "dirty": False, "origin_path": None},
+        {"name": "p", "path": "/x/p", "is_git": True, "has_commit": False, "branch": "main",
+         "on_main": True, "dirty": False, "origin_path": None},
+        {"name": "p", "path": "/x/p", "is_git": True, "has_commit": True, "branch": "main",
+         "on_main": True, "dirty": False, "origin_path": None},
+        {"name": "p", "path": "/x/p", "is_git": True, "has_commit": True, "branch": "dev",
+         "on_main": False, "dirty": True, "origin_path": "/x/o"},
+        {"name": "p", "path": "/x/p", "is_git": True, "has_commit": True, "branch": None,
+         "on_main": False, "dirty": False, "origin_path": None},
+    ]  # fmt: skip
+    script = (
+        "function str(x) { return (x === null || x === undefined) ? '?' : String(x); }\n"
+        + _functions(_text(), "projectSummary")
+        + "console.log(JSON.stringify(" + json.dumps(infos) + ".map(projectSummary)));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        "No project is open.",
+        "p · /x/p · not a git repository",
+        "p · /x/p · git, no commit yet",
+        "p · /x/p · branch main",
+        "p · /x/p · branch dev, not on main, uncommitted changes, origin /x/o",
+        "p · /x/p · detached HEAD, not on main",
+    ]
+
+
+BROWSER_SCENARIO = """
+var out = [], browsed = [], fsDir = null;
+function onKey(fn) {
+  return function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fn(); } };
+}
+function browse(path) { browsed.push(path); }
+function byId(id) { return document.getElementById(id); }
+nodes['btn-fs-up'] = mk('button');
+renderListing({path: '/a/b', parent: '/a', truncated: false, entries: [
+  {name: 'x', path: '/a/b/x', is_git: false}, {name: '<i>', path: '/a/b/<i>', is_git: true}]});
+var rows = nodes['fs-list'].children;
+out.push([nodes['fs-path'].value, fsDir, nodes['btn-fs-up'].disabled,
+          nodes['btn-fs-up'].attrs['data-parent'], rows.length]);
+out.push(rows.map(function (r) {
+  return [r.text, r.children.map(function (c) { return c.text; }), r.attrs.role, r.tabIndex];
+}));
+rows[1].on.click();
+rows[0].on.keydown({key: 'Enter', preventDefault: function () {}});
+rows[0].on.keydown({key: 'x', preventDefault: function () {}});
+out.push(browsed);
+renderListing({path: '/', parent: null, truncated: true, entries: []});
+out.push([nodes['btn-fs-up'].disabled,
+          nodes['fs-list'].children.map(function (r) { return r.text; })]);
+console.log(JSON.stringify(out));
+"""
+
+
+def test_folder_listing_renders_rows_that_browse_into_folders(tmp_path):
+    text = _text()
+    script = _page_helpers(text) + _functions(text, "renderListing") + BROWSER_SCENARIO
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out[0] == ["/a/b", "/a/b", False, "/a", 2]
+    assert out[1] == [["x", [], "button", 0], ["<i>", ["git"], "button", 0]]
+    assert out[2] == ["/a/b/<i>", "/a/b/x"]
+    assert out[3] == [
+        True,
+        ["No subfolders", "Only the first folders are shown; type a path to go further."],
+    ]

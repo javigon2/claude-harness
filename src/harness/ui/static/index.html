@@ -168,6 +168,23 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #orch-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #orch-view button:disabled { cursor: default; opacity: 0.55; }
+#project-view { padding: 12px 16px; max-width: 900px; }
+#project-view h2 { margin: 4px 0 8px; font-size: 18px; }
+#project-view h3 { margin: 14px 0 4px; font-size: 14px; }
+#fs-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#fs-path { flex: 1 1 300px; min-width: 0; font: inherit; padding: 3px 6px; }
+#fs-list, #recent-list { list-style: none; padding: 0; margin: 8px 0; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; }
+#fs-list { max-height: 45vh; overflow: auto; }
+#fs-list li, #recent-list li { padding: 5px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+#fs-list li[role="button"], #recent-list li[role="button"] { cursor: pointer; }
+#fs-list li[role="button"]:hover, #recent-list li[role="button"]:hover { background: #f3f4f6; }
+#recent-list:empty { display: none; }
+.fs-git { color: #047857; font-size: 12px; margin-left: 8px; }
+#project-info { margin: 8px 0; font-size: 14px; }
+#project-msg { color: #b91c1c; font-weight: 600; }
+#project-msg:empty { display: none; }
+#project-view button, header button { font: inherit; padding: 4px 12px; cursor: pointer; }
+#project-view button:disabled, header button:disabled { cursor: default; opacity: 0.55; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -182,6 +199,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="cost"></span>
   <span id="tiers"></span>
   <span id="office-total"></span>
+  <span id="project-name" class="chip hidden"></span>
+  <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
 </header>
 <div id="banner"></div>
 <main id="layout">
@@ -300,6 +319,22 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     </div>
   </section>
 </main>
+<section id="project-view" class="hidden">
+  <h2>Open a project</h2>
+  <div id="fs-bar">
+    <button id="btn-fs-up" type="button">Up</button>
+    <input id="fs-path" type="text" aria-label="Folder path" spellcheck="false">
+    <button id="btn-fs-go" type="button">Go</button>
+    <label><input id="fs-hidden" type="checkbox"> Show hidden folders</label>
+  </div>
+  <ul id="fs-list"></ul>
+  <button id="btn-fs-open" type="button">Open this folder</button>
+  <button id="btn-project-back" type="button" class="hidden">Back</button>
+  <h3>Recent</h3>
+  <ul id="recent-list"></ul>
+  <p id="project-info"></p>
+  <p id="project-msg" role="alert"></p>
+</section>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
@@ -318,6 +353,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
   var orchShown = null, orchCount = 0;
+  var hostMode = false, project = null, recent = [], serverStarted = null, fsDir = null;
 
   function needsTid(id, text) {
     // describe text already starts with the task id (e.g. "a started on haiku")
@@ -1127,6 +1163,125 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     location.hash = '#' + encodeURIComponent(office.run_id);
   }
 
+  // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
+  function projectSummary(p) {
+    // one line about the open folder, from GET /api/project
+    if (!p) return 'No project is open.';
+    var bits = [];
+    if (!p.is_git) bits.push('not a git repository');
+    else if (!p.has_commit) bits.push('git, no commit yet');
+    else bits.push(p.branch ? 'branch ' + p.branch : 'detached HEAD');
+    if (p.is_git && p.has_commit && !p.on_main) bits.push('not on main');
+    if (p.is_git && p.dirty) bits.push('uncommitted changes');
+    if (p.origin_path) bits.push('origin ' + p.origin_path);
+    return str(p.name) + ' \u00b7 ' + str(p.path) + ' \u00b7 ' + bits.join(', ');
+  }
+
+  var MAIN_VIEWS = ['layout', 'project-view'];
+  function showMain(name) {
+    // the page shows exactly one of the two panels and the launcher's views
+    MAIN_VIEWS.forEach(function (id) { setHidden(id, id !== name); });
+  }
+
+  function errorOf(res) {
+    return (res.data && res.data.error) ? String(res.data.error) : 'Request failed (HTTP ' + res.status + ')';
+  }
+  function projectMsg(text) { byId('project-msg').textContent = text; }
+
+  function renderListing(l) {
+    fsDir = l.path;
+    byId('fs-path').value = l.path;
+    byId('btn-fs-up').disabled = !l.parent;
+    byId('btn-fs-up').setAttribute('data-parent', l.parent || '');
+    var items = (Array.isArray(l.entries) ? l.entries : []).map(function (e) {
+      var li = el('li', null, str(e.name));
+      if (e.is_git) li.appendChild(el('span', 'fs-git', 'git'));
+      li.setAttribute('role', 'button');
+      li.tabIndex = 0;
+      li.addEventListener('click', function () { browse(e.path); });
+      li.addEventListener('keydown', onKey(function () { browse(e.path); }));
+      return li;
+    });
+    if (!items.length) items.push(el('li', 'muted', 'No subfolders'));
+    if (l.truncated) items.push(el('li', 'muted', 'Only the first folders are shown; type a path to go further.'));
+    var ul = byId('fs-list');
+    ul.replaceChildren.apply(ul, items);
+  }
+
+  function browse(path) {
+    api('/api/project/browse', {path: path, hidden: byId('fs-hidden').checked}).then(function (res) {
+      if (!res.ok) { projectMsg(errorOf(res)); return; }
+      projectMsg('');
+      renderListing(res.data);
+    }).catch(function () { projectMsg('Connection lost; try again.'); });
+  }
+
+  function openFolder(path) {
+    api('/api/project/open', {path: path}).then(function (res) {
+      if (!res.ok) { projectMsg(errorOf(res)); return; }
+      location.reload();
+    }).catch(function () { projectMsg('Connection lost; try again.'); });
+  }
+
+  function renderRecent() {
+    var items = recent.map(function (path) {
+      var li = el('li', null, path);
+      li.setAttribute('role', 'button');
+      li.tabIndex = 0;
+      li.addEventListener('click', function () { openFolder(path); });
+      li.addEventListener('keydown', onKey(function () { openFolder(path); }));
+      return li;
+    });
+    var ul = byId('recent-list');
+    ul.replaceChildren.apply(ul, items);
+  }
+
+  function applyProject(p) {
+    hostMode = true;
+    project = p.project || null;
+    recent = Array.isArray(p.recent) ? p.recent : [];
+    serverStarted = p.started;
+    byId('project-name').textContent = project ? str(project.name) : 'no project';
+    byId('project-name').setAttribute('title', project ? str(project.path) : '');
+    setHidden('project-name', false);
+    setHidden('btn-switch-project', !project);
+    setHidden('btn-project-back', !project);
+    byId('project-info').textContent = projectSummary(project);
+    renderRecent();
+    if (!project) {
+      showMain('project-view');
+      if (fsDir === null) browse(str(p.cwd));
+    }
+  }
+
+  function loadProject() {
+    // 404 means a plain `harness ui` server: the page stays as it was
+    fetch('/api/project').then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
+      if (p && typeof p === 'object' && 'project' in p) applyProject(p);
+    }).catch(function () { /* not a launcher server */ });
+  }
+
+  function wireProject() {
+    byId('btn-switch-project').addEventListener('click', function () {
+      projectMsg('');
+      showMain('project-view');
+      var path = project ? str(project.path) : fsDir;
+      var cut = path ? path.replace(/[\/\\][^\/\\]*$/, '') : '';
+      browse(fsDir === null ? (cut || path) : fsDir);
+    });
+    byId('btn-project-back').addEventListener('click', function () { showMain('layout'); });
+    byId('btn-fs-up').addEventListener('click', function () {
+      var up = byId('btn-fs-up').getAttribute('data-parent');
+      if (up) browse(up);
+    });
+    byId('btn-fs-go').addEventListener('click', function () { browse(byId('fs-path').value); });
+    byId('fs-path').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); browse(byId('fs-path').value); }
+    });
+    byId('fs-hidden').addEventListener('change', function () { if (fsDir) browse(fsDir); });
+    byId('btn-fs-open').addEventListener('click', function () { if (fsDir) openFolder(fsDir); });
+  }
+
   function applyOffice(o) {
     var sig = JSON.stringify(o);
     if (sig === officeSig) return;
@@ -1143,6 +1298,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function pollOffice() {
+    if (hostMode && !project) return;
     fetch('/api/office').then(function (r) { return r.json(); }).then(function (o) {
       if (o && typeof o.state === 'string') applyOffice(o);
     }).catch(function () { /* next poll retries */ });
@@ -1251,6 +1407,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   }
 
   function poll() {
+    if (hostMode && !project) return;
     fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
@@ -1267,8 +1424,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   wireComposer();
   wireChat();
   wireOrch();
+  wireProject();
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
+  loadProject();
   poll();
   setInterval(poll, 2000);
   pollOffice();
