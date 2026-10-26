@@ -18,7 +18,8 @@ class StateError(RuntimeError):
 
 
 class RunState(BaseModel):
-    """Everything the runner knows about one run. `tasks` keeps the plan's order."""
+    """Everything the runner knows about one run. `tasks` keeps the plan's order. `pid` is
+    os.getpid() of the `harness run` process that last started or resumed it."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -28,6 +29,7 @@ class RunState(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished: bool = False
+    pid: int | None = None
     tasks: dict[str, TaskState] = Field(default_factory=dict)
 
 
