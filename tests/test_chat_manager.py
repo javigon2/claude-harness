@@ -136,7 +136,7 @@ def test_working_chat(tmp_path):
     mgr, sessions = make(repo, gate=gate)
     try:
         cid = mgr.start("haiku", "go")
-        wait_for(lambda: view(mgr, cid).progress == ["Edit: 1.txt"])
+        wait_for(lambda: view(mgr, cid).progress == ["Editing 1.txt"])
         assert mgr.working()
         assert view(mgr, cid).state == "working"
         with pytest.raises(ChatConflict, match="the agent is still working"):

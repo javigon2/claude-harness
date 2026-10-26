@@ -39,6 +39,15 @@ def _start(tmp_path, cid, tier="haiku", pid=None):
     return log
 
 
+def test_chat_progress_summary(tmp_path):
+    log = _start(tmp_path, "s")
+    log.emit("chat_user", {"text": "go"})
+    log.emit("chat_progress", {"tool": "Bash", "detail": "ls", "summary": "List the files"})
+    view = {v.chat_id: v for v in chats_from_log(tmp_path)}["s"]
+    assert view.state == "working"
+    assert view.progress == ["List the files"]
+
+
 def test_chats_from_log(tmp_path):
     a = _start(tmp_path, "a")
     a.emit("chat_user", {"text": "hi"})
@@ -65,7 +74,7 @@ def test_chats_from_log(tmp_path):
     assert va.cost_usd == 0.25
     assert va.progress == []
     assert views["b"].state == "working"
-    assert views["b"].progress == ["Edit: a.py"]
+    assert views["b"].progress == ["Editing a.py"]
     assert views["c"].state == "closed"
     assert views["d"].state == "failed"
     assert views["d"].error == "boom"

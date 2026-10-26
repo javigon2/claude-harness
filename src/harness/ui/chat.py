@@ -28,6 +28,7 @@ from harness.state import StateError, load_state, new_run_id, run_dir
 from harness.ui.chat_git import changed_paths, chat_commit_message, commit_paths, dirty_snapshot
 from harness.ui.demo import DemoChatSession
 from harness.ui.markdown import parse_markdown
+from harness.ui.view import progress_text
 from harness.worker import WORKER_ENV, WORKER_TOOLS, ProgressFn
 from harness.worktree import WorktreeError
 
@@ -146,11 +147,8 @@ def _pid_alive(pid: object) -> bool:
 
 
 def _progress_line(payload: dict[str, Any]) -> str:
-    """f"{tool}: {detail}", or just the tool when detail is not a non-empty str; tool is
-    str(payload.get("tool", "?"))."""
-    tool = str(payload.get("tool", "?"))
-    detail = payload.get("detail")
-    return f"{tool}: {detail}" if isinstance(detail, str) and detail else tool
+    """progress_text(payload): the step in plain words."""
+    return progress_text(payload)
 
 
 def _num(value: object, default: float) -> float:
@@ -528,9 +526,11 @@ class ChatManager:
         async def progress(info: dict[str, Any]) -> None:
             with self._lock:
                 chat.progress = [*chat.progress, _progress_line(info)][-CHAT_PROGRESS_LINES:]
-            chat.log.emit(
-                "chat_progress", {"tool": info.get("tool"), "detail": info.get("detail", "")}
-            )
+            payload: dict[str, Any] = {"tool": info.get("tool"), "detail": info.get("detail", "")}
+            summary = info.get("summary")
+            if isinstance(summary, str) and summary:
+                payload["summary"] = summary
+            chat.log.emit("chat_progress", payload)
 
         session = self._factory(self.repo, chat.tier, progress)
         try:
