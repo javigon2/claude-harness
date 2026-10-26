@@ -4,7 +4,12 @@ Read-only by default (every POST answers 405). Given an `Office` it also serves 
 POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), the run
 POST endpoints (POST /api/run/{resume,stop,launch,options}) and the Orchestrator POST endpoints
 (POST /api/orchestrator/{message,new}), each behind the Host, Origin and token checks, a
-JSON-only body of at most 64 KB, and a strict per-route body schema."""
+JSON-only body of at most 64 KB, and a strict per-route body schema.
+
+Given a `Host` instead (the launcher) the project is not fixed: each request works on the
+Host's current project and Office, answers 409 `NO_PROJECT` when none is open, and the
+project endpoints (GET /api/project, POST /api/project/{browse,open,init-preview,init,
+pull-origin}, POST /api/server/restart) are served. Without a Host nothing changes."""
 
 import json
 import os
@@ -22,16 +27,20 @@ from harness.planner import PROJECT_PLAN_FILE
 from harness.report import report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
 from harness.ui.chat import CHAT_TIERS, ChatConflict
+from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
+from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
 from harness.ui.office import (
     MAX_TEXT_CHARS,
     Office,
     OfficeConflict,
+    live_run,
     office_view_from_log,
     plan_status,
     status_of,
 )
 from harness.ui.orchestrator import OrchestratorConflict
+from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.view import build_view, list_runs
 
@@ -51,6 +60,8 @@ CHAT_ROUTES = ("start", "message", "close")
 RUN_ROUTES = ("resume", "stop", "launch", "options")
 MAX_PLAN_PATH_CHARS = 500
 ORCH_ROUTES = ("message", "new")
+PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
+MAX_PATH_CHARS = 4096
 ROUTE_CHOICES = ("auto", "quick", "project")
 
 
@@ -178,6 +189,32 @@ def _check_orch_body(route: str, body: object) -> dict:
     return body
 
 
+def _check_project_body(route: str, body: object) -> dict:
+    """The body of a POST to /api/project/<route> or /api/server/restart, or _BadBody.
+    Exactly the allowed keys: browse {path, hidden}; open {path}; init-preview, init,
+    pull-origin and restart {}. `path` is at most MAX_PATH_CHARS characters and, after `~`
+    is expanded, absolute."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    keys = set(body)
+    if route in ("browse", "open"):
+        want = {"path", "hidden"} if route == "browse" else {"path"}
+        if keys != want:
+            raise _BadBody(f"send exactly: {', '.join(sorted(want, reverse=True))}")
+        value = body["path"]
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_PATH_CHARS:
+            raise _BadBody(
+                f"path must be a non-empty string of at most {MAX_PATH_CHARS} characters"
+            )
+        if "\0" in value or not Path(value).expanduser().is_absolute():
+            raise _BadBody("path must be an absolute folder path")
+        if route == "browse" and not isinstance(body["hidden"], bool):
+            raise _BadBody("hidden must be true or false")
+    elif keys:
+        raise _BadBody("this endpoint takes no fields")
+    return body
+
+
 class _Server(ThreadingHTTPServer):
     """ThreadingHTTPServer with daemon request threads and a `stopping` event that
     shutdown() sets first, so open SSE streams end."""
@@ -220,6 +257,7 @@ def make_handler(
     heartbeat_s: float = HEARTBEAT_S,
     office: Office | None = None,
     token: str | None = None,
+    host: Host | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
     `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`, `/api/plans`,
@@ -228,11 +266,26 @@ def make_handler(
     `/api/chat/{start,message,close}`, POST `/api/run/{resume,stop,launch,options}` and POST
     `/api/orchestrator/{message,new}` are served (`token` guards them; one is made if not
     given) and every other method still answers 405. Request logging is silenced."""
-    interactive = office is not None
+    fixed_repo, fixed_office = repo, office
+    interactive = office is not None or host is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
 
     class Handler(BaseHTTPRequestHandler):
+        _repo: Path
+        _office: Office | None
+        _no_project: bool = False
+
+        def _bind(self) -> None:
+            """Pick the project this request works on: the fixed one, or the Host's current
+            one (`_no_project` when none is open)."""
+            if host is None:
+                self._repo, self._office, self._no_project = fixed_repo, fixed_office, False
+                return
+            project, current = host.current()
+            self._repo, self._office = (project or host.cwd), current
+            self._no_project = project is None
+
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             return
 
@@ -271,11 +324,12 @@ def make_handler(
         do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _not_get
 
         def do_POST(self) -> None:
-            if office is None:
+            if not interactive:
                 self._not_get()
                 return
+            self._bind()
             try:
-                self._post(office)
+                self._post()
             except _CLIENT_GONE:
                 return
 
@@ -307,7 +361,7 @@ def make_handler(
             sent = self.headers.get("X-Harness-Token") or ""
             return secrets.compare_digest(sent.encode("utf-8"), secret.encode("utf-8"))
 
-        def _post(self, office: Office) -> None:
+        def _post(self) -> None:
             """Every safety rule in order; a request failing any of them changes nothing."""
             if not self._host_ok():
                 self._reject(403, "bad host")
@@ -326,6 +380,11 @@ def make_handler(
             elif path.startswith("/api/orchestrator/"):
                 kind, route = "orchestrator", path[len("/api/orchestrator/") :]
                 known = route in ORCH_ROUTES
+            elif host is not None and path.startswith("/api/project/"):
+                kind, route = "project", path[len("/api/project/") :]
+                known = route in PROJECT_ROUTES
+            elif host is not None and path == "/api/server/restart":
+                kind, route, known = "server", "restart", True
             else:
                 known = False
             if not known:
@@ -363,10 +422,20 @@ def make_handler(
                     body = _check_chat_body(route, parsed)
                 elif kind == "orchestrator":
                     body = _check_orch_body(route, parsed)
+                elif kind in ("project", "server"):
+                    body = _check_project_body(route, parsed)
                 else:
                     body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
                 self._json(400, {"error": str(err) if isinstance(err, _BadBody) else "bad JSON"})
+                return
+            if kind in ("project", "server"):
+                assert host is not None
+                self._project_post(host, route, body)
+                return
+            office = self._office
+            if office is None:
+                self._json(409, {"error": NO_PROJECT})
                 return
             try:
                 if kind == "chat":
@@ -414,10 +483,79 @@ def make_handler(
                 return
             self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
 
+        def _project_post(self, host: Host, route: str, body: dict) -> None:
+            """The /api/project/* and /api/server/restart routes. ProjectError answers 400;
+            HostConflict and GitOpError answer 409."""
+            try:
+                if route == "browse":
+                    listing = list_dir(Path(body["path"]).expanduser(), body["hidden"])
+                    self._json(200, listing.model_dump(mode="json"))
+                elif route == "open":
+                    host.open_project(Path(body["path"]).expanduser())
+                    project, _ = host.current()
+                    self._json(
+                        200,
+                        {"ok": True, "project": repo_info(project).model_dump(mode="json")}
+                        if project is not None
+                        else {"ok": True, "project": None},
+                    )
+                elif route == "restart":
+                    host.request_restart()
+                    self._json(200, {"ok": True})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                else:
+                    self._project_git(host, route)
+            except ProjectError as err:
+                self._json(400, {"error": str(err)})
+            except (HostConflict, GitOpError) as err:
+                self._json(409, {"error": str(err)})
+
+        def _project_git(self, host: Host, route: str) -> None:
+            """init-preview, init and pull-origin act on the open project."""
+            project, office = host.current()
+            if project is None or office is None:
+                raise HostConflict(NO_PROJECT)
+            if route == "init-preview":
+                files, truncated = init_preview(project)
+                self._json(200, {"files": files, "truncated": truncated})
+                return
+            if route == "init":
+                reason = host.busy() or (
+                    f"a run is active ({live}); wait for it to finish"
+                    if (live := live_run(project)) is not None
+                    else None
+                )
+                if reason is not None:
+                    raise HostConflict(reason)
+                sha = init_project(project)
+                self._json(
+                    200,
+                    {"ok": True, "sha": sha, "project": repo_info(project).model_dump(mode="json")},
+                )
+                return
+            self._json(200, {"ok": True, "output": pull_into_origin(project)})
+
+        def _project_info(self) -> None:
+            """GET /api/project: the open project and what the browser needs around it."""
+            assert host is not None
+            project, _ = host.current()
+            self._json(
+                200,
+                {
+                    "project": repo_info(project).model_dump(mode="json") if project else None,
+                    "recent": load_recent(host.recent_path),
+                    "cwd": str(host.cwd),
+                    "home": str(Path.home()),
+                    "started": host.started,
+                    "busy": host.busy(),
+                },
+            )
+
         def do_GET(self) -> None:
             if not self._host_ok():
                 self._json(403, {"error": "bad host"})
                 return
+            self._bind()
             try:
                 self._route()
             except _CLIENT_GONE:
@@ -435,6 +573,13 @@ def make_handler(
                     return
                 self._send(200, body, ctype="text/html; charset=utf-8")
                 return
+            if host is not None and path == "/api/project":
+                self._project_info()
+                return
+            if self._no_project:
+                self._json(409, {"error": NO_PROJECT})
+                return
+            repo, office = self._repo, self._office
             if path == "/api/office":
                 view = office.view() if office is not None else office_view_from_log(repo)
                 self._json(200, view.model_dump(mode="json"))
@@ -484,6 +629,7 @@ def make_handler(
         def _plan(self) -> None:
             """The quick plan's plan.md while the office has one (kind "quick"), else
             PROJECT_PLAN_FILE (kind "project"). Answers 500 on any other OSError."""
+            repo, office = self._repo, self._office
             quick_plan = office.view().quick_plan if office is not None else None
             if quick_plan is not None:
                 self._quick_plan(quick_plan)
@@ -508,7 +654,7 @@ def make_handler(
 
         def _quick_plan(self, quick_plan: str) -> None:
             """plan.md beside the quick plan.json at the repo-relative `quick_plan`."""
-            path = repo / PurePosixPath(quick_plan).parent / "plan.md"
+            path = self._repo / PurePosixPath(quick_plan).parent / "plan.md"
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except FileNotFoundError:
@@ -525,6 +671,7 @@ def make_handler(
         def _report(self, run_id: str) -> None:
             """The status and cost report texts of a run, as `harness status` and
             `harness report` print them."""
+            repo = self._repo
             try:
                 if run_id not in list_runs(repo):
                     self._json(404, {"error": "unknown run"})
@@ -540,7 +687,7 @@ def make_handler(
 
         def _run(self, run_id: str) -> None:
             try:
-                body = build_view(repo, run_id).model_dump_json().encode()
+                body = build_view(self._repo, run_id).model_dump_json().encode()
             except FileNotFoundError:
                 self._json(404, {"error": "unknown run"})
                 return
@@ -551,7 +698,9 @@ def make_handler(
 
         def _snapshot(self, run_id: str, sig: tuple[int, int]) -> bytes:
             try:
-                return b"data: " + build_view(repo, run_id).model_dump_json().encode() + b"\n\n"
+                return (
+                    b"data: " + build_view(self._repo, run_id).model_dump_json().encode() + b"\n\n"
+                )
             except _VIEW_ERRORS as err:
                 return (
                     b"event: problem\ndata: " + json.dumps({"error": str(err)}).encode() + b"\n\n"
@@ -567,6 +716,7 @@ def make_handler(
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             stopping = getattr(self.server, "stopping", None)
+            repo = self._repo
             sig = _signature(repo, run_id)
             self._write(self._snapshot(run_id, sig))
             last_write = time.monotonic()
@@ -602,10 +752,11 @@ def make_server(
     heartbeat_s: float = HEARTBEAT_S,
     office: Office | None = None,
     token: str | None = None,
+    host: Host | None = None,
 ) -> ThreadingHTTPServer:
     """A server bound to ("127.0.0.1", port); port 0 picks a free port. An OSError from the
     bind propagates. With an `office` the POST endpoints are on (see make_handler). The caller
     runs serve_forever() and later shutdown() + server_close()."""
     return _Server(
-        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token)
+        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token, host)
     )
