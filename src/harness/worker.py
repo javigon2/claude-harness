@@ -67,15 +67,23 @@ def session_init_facts(message: Any) -> dict[str, Any] | None:
     return {key: message.data.get(key) for key in SESSION_INIT_KEYS}
 
 
+def _cut(text: str) -> str:
+    if len(text) > PROGRESS_DETAIL_MAX:
+        return text[: PROGRESS_DETAIL_MAX - 1] + "…"
+    return text
+
+
 def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[str, str]:
     """{"tool": name, "detail": <detail>} for one tool call. Detail: the file path (relative
     to cwd when inside it) for Read/Edit/Write, the pattern for Glob/Grep, as `<pattern> in <path>`
     when a non-empty path is given (relative to cwd when inside it), the first command
     line (a leading `cd <dir> && ` removed) for Bash, "" for anything else or when the key is
     missing or not a string; cut to PROGRESS_DETAIL_MAX characters with a trailing `…`.
-    Never raises."""
+    A Bash call whose `description` is a non-blank string also gets "summary": the first
+    line of that description, stripped and cut the same way. Never raises."""
     try:
         detail = ""
+        summary = ""
         if name in ("Read", "Edit", "Write"):
             value = tool_input.get("file_path")
             if isinstance(value, str):
@@ -100,9 +108,13 @@ def describe_tool(name: str, tool_input: Mapping[str, Any], cwd: Path) -> dict[s
             if isinstance(value, str):
                 lines = value.strip().splitlines()
                 detail = re.sub(r"^cd .*? && ", "", lines[0]) if lines else ""
-        if len(detail) > PROGRESS_DETAIL_MAX:
-            detail = detail[: PROGRESS_DETAIL_MAX - 1] + "…"
-        return {"tool": str(name), "detail": detail}
+            about = tool_input.get("description")
+            if isinstance(about, str) and about.strip():
+                summary = about.strip().splitlines()[0].strip()
+        described = {"tool": str(name), "detail": _cut(detail)}
+        if summary:
+            described["summary"] = _cut(summary)
+        return described
     except Exception:
         return {"tool": str(name), "detail": ""}
 
