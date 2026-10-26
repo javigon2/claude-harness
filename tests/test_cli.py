@@ -324,8 +324,8 @@ def test_fake_delay_run_emits_progress_and_view_shows_activity(tmp_path: Path) -
         time.sleep(0.02)
     t.join(20)
     assert outcome and outcome[0].exit_code == 0, outcome[0].output if outcome else "no result"
-    assert any(a.startswith("Read: a.txt") for a in seen), seen
-    assert any(a.startswith("Bash: uv run pytest -q") for a in seen), seen
+    assert any(a.startswith("Reading a.txt") for a in seen), seen
+    assert any(a.startswith("Running the tests") for a in seen), seen
     assert all(t.activity is None for t in build_view(repo, "r1").tasks)
     types = [e["type"] for e in _events(repo, "r1")]
     assert types.count("worker_progress") == 6

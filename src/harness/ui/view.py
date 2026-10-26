@@ -90,6 +90,75 @@ class RunView(BaseModel):
 IDLE_MINUTES = 10  # a running run whose events.jsonl is this stale is probably dead
 MAX_STEPS = 200  # newest worker_progress steps kept per task
 
+# (first word, second word or "" for any) -> plain words; first match wins
+_COMMAND_WORDS: tuple[tuple[str, str, str], ...] = (
+    ("pytest", "", "Running the tests"),
+    ("ruff", "format", "Formatting the code"),
+    ("ruff", "", "Checking the code style"),
+    ("mypy", "", "Checking the types"),
+    ("pyright", "", "Checking the types"),
+    ("git", "status", "Checking which files changed"),
+    ("git", "diff", "Looking at the changes"),
+    ("git", "log", "Reading the commit history"),
+    ("git", "show", "Looking at a commit"),
+    ("git", "add", "Staging changes"),
+    ("git", "commit", "Committing changes"),
+    ("git", "", "Running git"),
+    ("uv", "sync", "Installing dependencies"),
+    ("uv", "add", "Adding a dependency"),
+    ("pip", "install", "Installing dependencies"),
+    ("npm", "install", "Installing dependencies"),
+    ("npm", "test", "Running the tests"),
+    ("ls", "", "Listing files"),
+    ("find", "", "Finding files"),
+    ("tree", "", "Listing files"),
+    ("cat", "", "Reading a file"),
+    ("head", "", "Reading a file"),
+    ("tail", "", "Reading a file"),
+    ("sed", "", "Reading a file"),
+    ("wc", "", "Counting lines"),
+    ("grep", "", "Searching the code"),
+    ("rg", "", "Searching the code"),
+    ("mkdir", "", "Creating a folder"),
+    ("rm", "", "Deleting files"),
+    ("mv", "", "Moving files"),
+    ("cp", "", "Copying files"),
+    ("python", "", "Running a Python script"),
+    ("python3", "", "Running a Python script"),
+)
+
+# leading words that only say how a command is started
+_COMMAND_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("uv", "run"),
+    ("python", "-m"),
+    ("python3", "-m"),
+    ("uvx",),
+    ("npx",),
+)
+
+
+def command_summary(command: str) -> str:
+    """Plain words for one shell command line, e.g. "Running the tests" for
+    "uv run pytest -q". Exact rules in the `decision: command_summary` context item.
+    Never raises."""
+    words = command.split()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _COMMAND_PREFIXES:
+            if len(words) > len(prefix) and tuple(words[: len(prefix)]) == prefix:
+                words = words[len(prefix) :]
+                changed = True
+    if not words:
+        return "Running a command"
+    first = words[0].rsplit("/", 1)[-1]
+    second = words[1] if len(words) > 1 else ""
+    for name, sub, text in _COMMAND_WORDS:
+        if first == name and sub in ("", second):
+            return text
+    return "Running a command"
+
+
 # tool -> (prefix used when there is a detail, text used when there is none)
 _STEP_WORDS: dict[str, tuple[str, str]] = {
     "Read": ("Reading", "Reading a file"),
@@ -97,13 +166,18 @@ _STEP_WORDS: dict[str, tuple[str, str]] = {
     "Write": ("Writing", "Writing a file"),
     "Grep": ("Searching for", "Searching the code"),
     "Glob": ("Finding files matching", "Finding files"),
-    "Bash": ("Running", "Running a command"),
 }
 
 
-def step_text(tool: str, detail: str) -> str:
-    """Plain words for one tool call, e.g. "Reading README.md" or "Running a command".
-    Exact texts in the `decision: step_text` context item. Never raises."""
+def step_text(tool: str, detail: str, summary: str = "") -> str:
+    """Plain words for one tool call, e.g. "Reading README.md" or "Running the tests".
+    A non-empty `summary` (the agent's own words for the call) is returned as is; a Bash
+    call without one gets command_summary(detail). Exact texts in the `decision:
+    step_text` context item. Never raises."""
+    if summary:
+        return summary
+    if tool == "Bash":
+        return command_summary(detail)
     if tool not in _STEP_WORDS:
         return f"Using {tool}: {detail}" if detail else f"Using {tool}"
     prefix, bare = _STEP_WORDS[tool]
@@ -118,17 +192,19 @@ def _step(e: Event) -> StepView:
     tier = p.get("tier")
     tool = p.get("tool")
     detail = p.get("detail")
+    summary = p.get("summary")
     attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else None
     tier = tier if isinstance(tier, str) else None
     tool = tool if isinstance(tool, str) else "?"
     detail = detail if isinstance(detail, str) else ""
+    summary = summary if isinstance(summary, str) else ""
     return StepView(
         ts=e.ts.isoformat(),
         attempt=attempt,
         tier=tier,
         tool=tool,
         detail=detail,
-        text=step_text(tool, detail),
+        text=step_text(tool, detail, summary),
     )
 
 
@@ -144,12 +220,17 @@ def _listed(payload: dict, key: str) -> str:
     return "?"
 
 
-def _progress(payload: dict) -> str:
-    tool = _val(payload, "tool")
+def progress_text(payload: dict) -> str:
+    """step_text of one progress payload: its "tool", "detail" and "summary" keys, each
+    replaced by "?", "" and "" when missing or not a str. Never raises."""
+    tool = payload.get("tool")
     detail = payload.get("detail")
-    if isinstance(detail, str) and detail:
-        return f"{tool}: {detail}"
-    return tool
+    summary = payload.get("summary")
+    return step_text(
+        tool if isinstance(tool, str) else "?",
+        detail if isinstance(detail, str) else "",
+        summary if isinstance(summary, str) else "",
+    )
 
 
 def _money(payload: dict, key: str) -> str:
@@ -201,7 +282,7 @@ def _describe(type_: str, task_id: str | None, payload: dict) -> str:
     if type_ == "merged":
         return f"{t} merged into main"
     if type_ == "worker_progress":
-        return f"{t} {_progress(payload)}"
+        return f"{t} {progress_text(payload)}"
     if type_ == "task_paused":
         return f"{t} paused: {_val(payload, 'reason')}"
     if type_ == "run_stopping":
@@ -297,7 +378,7 @@ def build_view(
         if e.type == "attempt_started":
             activity.pop(e.task_id, None)
         elif e.type == "worker_progress":
-            activity[e.task_id] = _progress(e.payload)
+            activity[e.task_id] = progress_text(e.payload)
             steps.setdefault(e.task_id, []).append(_step(e))
 
     tasks: list[TaskView] = []

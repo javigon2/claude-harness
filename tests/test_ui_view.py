@@ -16,7 +16,15 @@ from ui_fixtures import (
 
 from harness.events import EVENTS_FILE, read_events
 from harness.state import STATE_FILE, load_state, run_dir, runs_root, save_state
-from harness.ui.view import IDLE_MINUTES, RunView, build_view, list_runs, step_text
+from harness.ui.view import (
+    IDLE_MINUTES,
+    RunView,
+    build_view,
+    command_summary,
+    list_runs,
+    progress_text,
+    step_text,
+)
 
 
 def _rows(view: RunView) -> list[tuple]:
@@ -249,7 +257,7 @@ def test_running_activity(tmp_path: Path) -> None:
         tmp_path, "running1", "worker_progress", "b", {**prog, "tool": "Bash", "detail": ""}
     )
     view = build_view(tmp_path, "running1")
-    assert view.tasks[1].activity == "Bash"
+    assert view.tasks[1].activity == "Running a command"
     assert len(view.events) == 14
     assert all(e.type != "worker_progress" for e in view.events)
     append_event(tmp_path, "running1", "worker_progress", "a", prog)
@@ -282,7 +290,7 @@ def test_feed_not_crowded_by_progress(tmp_path: Path) -> None:
         ("Grep", "", "Searching the code"),
         ("Glob", "*.py", "Finding files matching *.py"),
         ("Glob", "", "Finding files"),
-        ("Bash", "uv run pytest -q", "Running uv run pytest -q"),
+        ("Bash", "uv run pytest -q", "Running the tests"),
         ("Bash", "", "Running a command"),
         ("WebFetch", "https://x", "Using WebFetch: https://x"),
         ("WebFetch", "", "Using WebFetch"),
@@ -319,7 +327,7 @@ def test_steps(tmp_path: Path) -> None:
     assert len(b.steps) == 200
     assert b.steps[0].detail == "5"
     assert b.steps[-1].detail == "204"
-    assert b.steps[-1].text == "Running 204"
+    assert b.steps[-1].text == "Running a command"
     assert build_view(tmp_path, "running1", max_steps=0).tasks[1].steps == []
 
 
@@ -370,3 +378,55 @@ def test_finished_runs_never_idle(tmp_path: Path) -> None:
     for run_id in ("happy1", "paused1"):
         now = _age_events(tmp_path, run_id, 600)
         assert build_view(tmp_path, run_id, now=now).idle_minutes is None
+
+
+@pytest.mark.parametrize(
+    ("command", "text"),
+    [
+        ("uv run pytest -q", "Running the tests"),
+        ("pytest tests/test_x.py", "Running the tests"),
+        ("python -m pytest", "Running the tests"),
+        ("uv run python -m pytest -q", "Running the tests"),
+        ("uv run ruff check src tests", "Checking the code style"),
+        ("uv run ruff format src", "Formatting the code"),
+        ("git status --short", "Checking which files changed"),
+        ("git diff HEAD", "Looking at the changes"),
+        ("git push", "Running git"),
+        ("ls -la", "Listing files"),
+        ("/bin/ls", "Listing files"),
+        ("python3 script.py", "Running a Python script"),
+        ("uv sync", "Installing dependencies"),
+        ("uv run", "Running a command"),
+        ("echo hi", "Running a command"),
+        ("", "Running a command"),
+        ("   ", "Running a command"),
+    ],
+)
+def test_command_summary(command: str, text: str) -> None:
+    assert command_summary(command) == text
+
+
+def test_step_text_summary_wins() -> None:
+    assert step_text("Bash", "echo", "Say hi") == "Say hi"
+    assert step_text("Read", "a.py", "Look") == "Look"
+
+
+def test_progress_text_ignores_non_str_summary() -> None:
+    payload = {"tool": "Bash", "detail": "git status", "summary": 3}
+    assert progress_text(payload) == "Checking which files changed"
+
+
+def test_progress_summary_in_view(tmp_path: Path) -> None:
+    write_running_run(tmp_path)
+    prog = {
+        "attempt": 1,
+        "tier": "haiku",
+        "tool": "Bash",
+        "detail": "uv run pytest -q",
+        "summary": "Run the tests",
+    }
+    append_event(tmp_path, "running1", "worker_progress", "b", prog)
+    view = build_view(tmp_path, "running1")
+    assert view.tasks[1].activity == "Run the tests"
+    assert view.tasks[1].steps[-1].text == "Run the tests"
+    assert view.tasks[1].steps[-1].detail == "uv run pytest -q"
