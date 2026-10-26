@@ -475,9 +475,13 @@ async def run_planner(
     on_triage: Callable[[Triage], None] | None = None,
     quick_dir: Path | None = None,
     triage_session: PlannerSession | None = None,
+    staging_only: bool = False,
 ) -> PlanResult:
     """Drive the planner for one request. Always closes both sessions (finally). Raises
     PlannerError when it stops without a valid plan.
+
+    With `staging_only` the project-planning turn is skipped for any stage, stage 1 too: the
+    approved PROJECT_PLAN.md on disk is the input (project route only).
 
     The "auto" route needs `triage_session`: it gets the one TRIAGE_PROMPT turn, and
     `session` (Opus) gets no message unless the route is quick or project. A triage turn
@@ -570,6 +574,8 @@ async def run_planner(
             raise PlannerError("stage must be at least 1")
         if route != "project" and stage != 1:
             raise PlannerError(f"the {route} route needs stage 1")
+        if staging_only and route != "project":
+            raise PlannerError("staging only needs the project route")
 
         triage: Triage | None = None
         effective: Route
@@ -610,7 +616,7 @@ async def run_planner(
         stage_dir = repo / stage_plan_dir(stage)
         plan_path = stage_dir / "plan.json"
 
-        if stage == 1:
+        if stage == 1 and not staging_only:
             start_fp = _fingerprint(project_plan)
             msg = PROJECT_PROMPT.format(
                 repo=repo, project_plan=project_plan, description=description.strip()

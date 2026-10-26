@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -56,6 +57,14 @@ from harness.ui.orchestrator import (
     Orchestrator,
     OrchestratorView,
     orchestrator_view_from_log,
+)
+from harness.ui.runs import (
+    RunOptions,
+    list_plans,
+    load_run_options,
+    options_summary,
+    save_run_options,
+    unstaged_stages,
 )
 from harness.ui.view import IDLE_MINUTES, list_runs
 from harness.worker import ProgressFn
@@ -149,6 +158,9 @@ class OfficeView(BaseModel):
     handoff_chat: str | None = None
     orchestrator: OrchestratorView | None = None
     total_cost_usd: float = 0.0
+    run_options: RunOptions = Field(default_factory=RunOptions)
+    options_summary: str = ""
+    stoppable_run: str | None = None
 
 
 # ---------------------------------------------------------------- small helpers
@@ -471,6 +483,9 @@ class Office:
         self.fake = fake
         self.fake_delay = fake_delay
         self.max_cost = max_cost
+        self._options = self._demo_forced(
+            load_run_options(self.repo, RunOptions(fake=fake, max_cost=max_cost))
+        )
         self.idle_timeout_s = idle_timeout_s
         self._launcher = launcher
         self._clock = clock
@@ -521,6 +536,7 @@ class Office:
         self._owns_lock_file = False
         self._popen: Any = None
         self._launched_plan: str | None = None
+        self._staging_only = False
         self.chats = ChatManager(
             self.repo,
             fake=fake,
@@ -701,6 +717,7 @@ class Office:
             )
         chats = self.chats.views()
         orch = self.orchestrator.view()
+        options = self.run_options()
         return view.model_copy(
             update={
                 "chats": chats,
@@ -709,6 +726,9 @@ class Office:
                 "resumable_run": resumable_run_of(self.repo)
                 if view.state in ("idle", "failed", "interrupted")
                 else None,
+                "run_options": options,
+                "options_summary": options_summary(options),
+                "stoppable_run": self._stoppable_run(),
             }
         )
 
@@ -797,13 +817,18 @@ class Office:
         from_draft: bool = False,
         route: RouteChoice = "project",
         auto: bool = False,
+        staging_only: bool = False,
     ) -> None:
-        """Start the planner thread. Caller holds the lock and has passed _guard_idle."""
+        """Start the planner thread. Caller holds the lock and has passed _guard_idle. With
+        `staging_only` the session only writes work orders for `stage` (stage 1 too) from the
+        approved PROJECT_PLAN.md."""
         sid = new_session_id()
         log = PlannerLog(self.repo, sid)
-        if from_draft or stage != 1:
+        staging = stage != 1 or staging_only
+        if from_draft or staging:
             route = "project"
-        self._phase = "staging" if stage != 1 else "triage" if route == "auto" else route
+        self._staging_only = staging_only
+        self._phase = "staging" if staging else "triage" if route == "auto" else route
         self._route_choice = route
         self._route = None if route == "auto" else route
         self._triage = None
@@ -819,7 +844,7 @@ class Office:
         self._answers = queue.Queue()
         self._stopping.clear()
         self._waiting = False
-        self._state = "busy" if stage == 1 else "staging"
+        self._state = "staging" if staging else "busy"
         triage = (
             ObservedSession(
                 self._triage_factory(self.repo, self._on_progress),
@@ -851,7 +876,7 @@ class Office:
                 "auto": auto,
             },
         )
-        if stage == 1 and not from_draft:
+        if stage == 1 and not from_draft and not staging_only:
             log.emit("planner_user", {"text": shown})
         self._thread = threading.Thread(
             target=self._thread_main,
@@ -1018,6 +1043,7 @@ class Office:
             on_triage=self._on_triage,
             quick_dir=self._quick_dir,
             triage_session=triage,
+            staging_only=self._staging_only,
         )
 
     def _on_triage(self, triage: Triage) -> None:
@@ -1115,15 +1141,21 @@ class Office:
                     self._log.emit("planner_failed", {"reason": reason, "cost_usd": self._cost})
 
     def run_argv(self, rel_plan: str, run_id: str) -> list[str]:
-        """The `harness run` command line. Built only from server-side values."""
+        """The `harness run` command line. Built only from server-side values: the stored run
+        options add their flags when they differ from `harness run`'s defaults."""
         argv = [
             sys.executable, "-m", "harness", "run", rel_plan,
             "--repo", str(self.repo), "--run-id", run_id,
         ]  # fmt: skip
-        if self.fake:
+        options = self._options
+        if options.fake:
             argv += ["--fake", "--fake-delay", str(self.fake_delay)]
-        if self.max_cost is not None:
-            argv += ["--max-cost", str(self.max_cost)]
+        if options.review:
+            argv.append("--review")
+        if options.max_parallel != RunOptions().max_parallel:
+            argv += ["--max-parallel", str(options.max_parallel)]
+        if options.max_cost is not None:
+            argv += ["--max-cost", str(options.max_cost)]
         return argv
 
     def _launch(self, rel_plan: str, *, run_id: str | None = None, resume: bool = False) -> None:
@@ -1236,6 +1268,115 @@ class Office:
             except (PlanError, OSError, ValueError) as err:
                 raise OfficeConflict(f"could not resume the run: {err}") from err
             self._error = None
+
+    # ------------------------------------------------------------ run control
+
+    def _demo_forced(self, options: RunOptions) -> RunOptions:
+        """The demo office (fake=True) runs fake workers only."""
+        if self.fake and not options.fake:
+            return options.model_copy(update={"fake": True})
+        return options
+
+    def run_options(self) -> RunOptions:
+        """The options the next launched run gets."""
+        return self._options.model_copy()
+
+    def set_run_options(self, options: RunOptions) -> None:
+        """Store `options` for the repo and use them for the next launched run. Raises
+        OfficeConflict if the demo office is asked for real workers."""
+        with self._lock:
+            if self.fake and not options.fake:
+                raise OfficeConflict("the demo office runs fake workers only")
+            save_run_options(self.repo, options)
+            self._options = options.model_copy()
+
+    def _active_run(self) -> str | None:
+        """The run going now: a live run, or the one this office supervises. Caller holds the
+        lock."""
+        live = live_run(self.repo, self._clock())
+        if live is not None:
+            return live
+        if self._state == "supervising" and self._run_id is not None:
+            return self._run_id if self._run_alive(self._run_id) else None
+        return None
+
+    def _run_pid(self, run_id: str) -> int | None:
+        """The pid recorded in the run's state.json, if that process lives and is not this
+        server."""
+        try:
+            pid = load_state(run_dir(self.repo, run_id)).pid
+        except (StateError, OSError, ValueError):
+            return None
+        return pid if pid is not None and pid != os.getpid() and pid_alive(pid) else None
+
+    def _stoppable_run(self) -> str | None:
+        """The live run whose process `stop_run` could signal, else None."""
+        with self._lock:
+            rid = self._active_run()
+            return rid if rid is not None and self._run_pid(rid) is not None else None
+
+    def stop_run(self) -> None:
+        """Ask the live run to stop: SIGTERM to its own pid (never its process group), so the
+        running tasks are paused and Resume continues them. Raises OfficeConflict if no run
+        is active or its pid is unknown."""
+        with self._lock:
+            self._refresh_supervising()
+            rid = self._active_run()
+            if rid is None:
+                raise OfficeConflict("no run is active")
+            try:
+                recorded = load_state(run_dir(self.repo, rid)).pid
+            except (StateError, OSError, ValueError):
+                raise OfficeConflict("no run is active") from None
+            if recorded is None:
+                raise OfficeConflict(f"run {rid} has no pid recorded")
+            pid = self._run_pid(rid)
+            if pid is None:
+                raise OfficeConflict("no run is active")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                raise OfficeConflict("no run is active") from None
+            except OSError as err:
+                raise OfficeConflict(f"could not stop run {rid}: {err}") from err
+            if self._log is None:
+                self._log = PlannerLog(self.repo, self._session_id or new_session_id())
+            self._log.emit("run_stop_requested", {"run_id": rid, "pid": pid})
+
+    def launch_plan(self, path: str) -> None:
+        """Start `harness run` on a validated plan under .harness/plans/ (a retry of a
+        stopped or failed one too: it is a new run). Raises OfficeConflict if a session or
+        run is active, a chat is working, or the plan is unknown or invalid."""
+        with self._lock:
+            self._guard_idle()
+            if self.chats.working():
+                raise OfficeConflict(CHAT_WORKING)
+            entry = next((e for e in list_plans(self.repo) if e.path == path), None)
+            if entry is None:
+                raise OfficeConflict(f"unknown plan: {path}")
+            if entry.error is not None:
+                raise OfficeConflict(f"plan {path} is invalid: {entry.error}")
+            if self._log is None:
+                self._log = PlannerLog(self.repo, self._session_id or new_session_id())
+            try:
+                self._launch(path)
+            except (PlanError, OSError, ValueError) as err:
+                raise OfficeConflict(f"could not start the run: {err}") from err
+            self._error = None
+
+    def plan_stage(self, stage: int) -> None:
+        """Start a staging session that writes the work orders of `stage` from the approved
+        PROJECT_PLAN.md (stage 1 too). When it ends, the run is launched as after Implement.
+        Allowed when the boss is idle, failed or interrupted and no run is live."""
+        with self._lock:
+            self._guard_idle()
+            if self._state not in ("idle", "failed", "interrupted"):
+                raise OfficeConflict("the planner is not idle")
+            if stage not in unstaged_stages(self.repo):
+                raise OfficeConflict(f"stage {stage} has no heading or already has work orders")
+            if self.chats.working():
+                raise OfficeConflict(CHAT_WORKING)
+            self._begin("", f"stage {stage}", stage=stage, staging_only=True)
 
     def _run_finished(self, run_id: str) -> bool:
         if self._resume_stamp is not None:
