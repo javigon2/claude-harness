@@ -1697,3 +1697,91 @@ def test_plans_render_rows_with_run_and_stage_buttons(tmp_path):
         ["/api/planner/stage", {"stage": 3}, "plans-msg"],
     ]
     assert out[9] == 3  # the declined Run confirmed nothing more
+
+
+# ------------------------------------------------------------ Initialize, origin pull, Restart
+
+
+def test_git_and_restart_ids_labels_and_endpoints():
+    text = _text()
+    for id_ in ["btn-init", "btn-pull-origin", "btn-restart"]:
+        assert f'id="{id_}"' in text, id_
+    assert '<button id="btn-init" type="button" class="hidden">Initialize git</button>' in text
+    assert (
+        '<button id="btn-pull-origin" type="button" class="hidden">Bring into origin</button>'
+        in text
+    )
+    assert '<button id="btn-restart" type="button" class="hidden">Restart server</button>' in text
+    for word in [
+        "'/api/project/init-preview'", "'/api/project/init'", "'/api/project/pull-origin'",
+        "'/api/server/restart'", "(fast-forward only)?", "setInterval(function () {",
+        "p.started !== oldStarted", "location.reload()",
+    ]:  # fmt: skip
+        assert word in text, word
+    assert text.index('id="btn-init"') < text.index('id="project-msg"')
+    assert text.index('id="btn-pull-origin"') < text.index('id="project-msg"')
+
+
+def test_project_actions_and_confirm_texts(tmp_path):
+    infos = [
+        None,
+        {"is_git": False, "has_commit": False, "on_main": False, "origin_path": None},
+        {"is_git": True, "has_commit": False, "on_main": True, "origin_path": None},
+        {"is_git": True, "has_commit": True, "on_main": False, "origin_path": None},
+        {"is_git": True, "has_commit": True, "on_main": True, "origin_path": "/o"},
+    ]  # fmt: skip
+    files = [f"f{i}" for i in range(35)]
+    script = (
+        "function str(x) { return (x === null || x === undefined) ? '?' : String(x); }\n"
+        + _functions(_text(), "projectActions", "initConfirm", "pullConfirm")
+        + "var INIT_FILES_SHOWN = 30;\n"
+        + "console.log(JSON.stringify([" + json.dumps(infos) + ".map(projectActions),"
+        + " initConfirm('/p', ['a', 'b'], false), initConfirm('/p', " + json.dumps(files)
+        + ", false), initConfirm('/p', [], false), initConfirm('/p', ['a'], true),"
+        + " pullConfirm('/o')]));\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out[0] == [
+        {"init": False, "pull": False},
+        {"init": True, "pull": False},
+        {"init": True, "pull": False},
+        {"init": True, "pull": False},
+        {"init": False, "pull": True},
+    ]
+    assert out[1] == (
+        "Initialize git in /p?\n\nThe first commit holds 2 files (.harness/ is left out):\na\nb"
+    )
+    big = out[2].split("\n")
+    assert big[:2] == ["Initialize git in /p?", ""]
+    assert big[3:33] == files[:30] and "f30" not in out[2] and big[-1] == "... and more"
+    assert "(none: an empty first commit)" in out[3]
+    assert "holds at least 1 files" in out[4] and out[4].endswith("... and more")
+    assert out[5] == "Pull main from this clone into /o (fast-forward only)?"
+
+
+def test_restart_polls_until_the_start_time_changes(tmp_path):
+    text = _text()
+    script = (
+        "var out = [], answers = [null, {started: 1}, {started: 1}, {started: 2}], i = 0;\n"
+        "var restarting = true, nodes = {banner: {textContent: ''}};\n"
+        "function byId(id) { return nodes[id]; }\n"
+        "var location = {reload: function () { out.push('reload'); }};\n"
+        "function fetch() {\n"
+        "  var a = answers[Math.min(i++, answers.length - 1)];\n"
+        "  return Promise.resolve({ok: a !== null,\n"
+        "    json: function () { return Promise.resolve(a); }});\n"
+        "}\n"
+        "var realSet = setInterval;\n"
+        "setInterval = function (fn) { return realSet(fn, 1); };\n"
+        + _functions(text, "waitForRestart")
+        + "waitForRestart(1, 50);\n"
+        "setTimeout(function () { out.push(i >= 4); out.push(restarting);\n"
+        "  answers = [null]; i = 0; waitForRestart(1, 3);\n"
+        "  setTimeout(function () { out.push(restarting, nodes.banner.textContent);\n"
+        "    console.log(JSON.stringify(out)); }, 200); }, 200);\n"
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        "reload", True, True, False,
+        "The server did not come back; start agent-orchestrator again.",
+    ]  # fmt: skip

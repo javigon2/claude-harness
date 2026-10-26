@@ -183,6 +183,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #project-info { margin: 8px 0; font-size: 14px; }
 #project-msg { color: #b91c1c; font-weight: 600; }
 #project-msg:empty { display: none; }
+#project-msg.ok { color: #047857; }
 #project-view button, header button { font: inherit; padding: 4px 12px; cursor: pointer; }
 #project-view button:disabled, header button:disabled { cursor: default; opacity: 0.55; }
 #run-options { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 6px 0 10px; font-size: 13px; border-bottom: 1px solid #e5e7eb; }
@@ -215,6 +216,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <span id="office-total"></span>
   <span id="project-name" class="chip hidden"></span>
   <button id="btn-switch-project" type="button" class="hidden">Switch project</button>
+  <button id="btn-restart" type="button" class="hidden">Restart server</button>
   <button id="btn-plans" type="button" class="hidden">Plans</button>
   <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
@@ -359,6 +361,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   <h3>Recent</h3>
   <ul id="recent-list"></ul>
   <p id="project-info"></p>
+  <button id="btn-init" type="button" class="hidden">Initialize git</button>
+  <button id="btn-pull-origin" type="button" class="hidden">Bring into origin</button>
   <p id="project-msg" role="alert"></p>
 </section>
 <section id="plans-view" class="hidden">
@@ -392,7 +396,7 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
   var orchShown = null, orchCount = 0;
-  var fakeLocked = false;
+  var fakeLocked = false, restarting = false;
   var hostMode = false, project = null, recent = [], serverStarted = null, fsDir = null;
 
   function needsTid(id, text) {
@@ -418,7 +422,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function renderBanner() {
     var b = document.getElementById('banner');
     var msg = '';
-    if (conn) msg = 'Connection lost, retrying...';
+    if (restarting) msg = 'Restarting the server...';
+    else if (conn) msg = 'Connection lost, retrying...';
     else if (problem !== null) msg = 'Problem reading the run: ' + problem;
     else if (idle !== null) msg = 'No activity for ' + idle + ' min, the process may have crashed.';
     else if (stopped && interactive) msg = 'Stopped early: ' + stopped + '.';
@@ -1384,7 +1389,47 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
   function errorOf(res) {
     return (res.data && res.data.error) ? String(res.data.error) : 'Request failed (HTTP ' + res.status + ')';
   }
-  function projectMsg(text) { byId('project-msg').textContent = text; }
+  function projectMsg(text, ok) {
+    byId('project-msg').textContent = text;
+    byId('project-msg').className = ok ? 'ok' : '';
+  }
+
+  var INIT_FILES_SHOWN = 30;
+  function projectActions(p) {
+    // which of the two git buttons the open project needs
+    if (!p) return {init: false, pull: false};
+    return {init: !p.is_git || !p.has_commit || !p.on_main, pull: !!p.origin_path};
+  }
+
+  function initConfirm(path, files, truncated) {
+    var shown = files.slice(0, INIT_FILES_SHOWN);
+    var more = files.length - shown.length;
+    var lines = 'Initialize git in ' + str(path) + '?\n\nThe first commit holds ' + (truncated ? 'at least ' : '') + files.length + ' files (.harness/ is left out):\n' + shown.join('\n');
+    if (more > 0 || truncated) lines += '\n... and more';
+    if (!files.length) lines += '(none: an empty first commit)';
+    return lines;
+  }
+
+  function pullConfirm(origin) {
+    return 'Pull main from this clone into ' + str(origin) + ' (fast-forward only)?';
+  }
+
+  function waitForRestart(oldStarted, tries) {
+    // poll every 500 ms until the server answers with a new start time, then reload
+    var left = tries;
+    var timer = setInterval(function () {
+      left -= 1;
+      if (left < 0) {
+        clearInterval(timer);
+        restarting = false;
+        byId('banner').textContent = 'The server did not come back; start agent-orchestrator again.';
+        return;
+      }
+      fetch('/api/project').then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
+        if (p && typeof p === 'object' && p.started !== oldStarted) { clearInterval(timer); location.reload(); }
+      }).catch(function () { /* still down: the next tick retries */ });
+    }, 500);
+  }
 
   function renderListing(l) {
     fsDir = l.path;
@@ -1445,6 +1490,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     setHidden('btn-switch-project', !project);
     setHidden('btn-project-back', !project);
     byId('project-info').textContent = projectSummary(project);
+    var acts = projectActions(project);
+    setHidden('btn-init', !acts.init);
+    setHidden('btn-pull-origin', !acts.pull);
+    setHidden('btn-restart', false);
     renderRecent();
     if (!project) {
       showMain('project-view');
@@ -1478,6 +1527,36 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
     });
     byId('fs-hidden').addEventListener('change', function () { if (fsDir) browse(fsDir); });
     byId('btn-fs-open').addEventListener('click', function () { if (fsDir) openFolder(fsDir); });
+    byId('btn-init').addEventListener('click', function () {
+      projectMsg('');
+      api('/api/project/init-preview', {}).then(function (res) {
+        if (!res.ok) { projectMsg(errorOf(res)); return null; }
+        if (!window.confirm(initConfirm(project ? project.path : '?', res.data.files || [], !!res.data.truncated))) return null;
+        return api('/api/project/init', {}).then(function (done) {
+          if (!done.ok) { projectMsg(errorOf(done)); return; }
+          projectMsg('Initialized: commit ' + str(done.data.sha) + ' on main.', true);
+          loadProject();
+        });
+      }).catch(function () { projectMsg('Connection lost; try again.'); });
+    });
+    byId('btn-pull-origin').addEventListener('click', function () {
+      projectMsg('');
+      if (!project || !project.origin_path || !window.confirm(pullConfirm(project.origin_path))) return;
+      api('/api/project/pull-origin', {}).then(function (res) {
+        if (!res.ok) { projectMsg(errorOf(res)); return; }
+        projectMsg('Origin updated: ' + str(res.data.output), true);
+        loadProject();
+      }).catch(function () { projectMsg('Connection lost; try again.'); });
+    });
+    byId('btn-restart').addEventListener('click', function () {
+      if (!window.confirm('Restart the server? Running agents are not interrupted, but the page reloads.')) return;
+      api('/api/server/restart', {}).then(function (res) {
+        if (!res.ok) { byId('banner').textContent = errorOf(res); return; }
+        restarting = true;
+        renderBanner();
+        waitForRestart(serverStarted, 120);
+      }).catch(function () { byId('banner').textContent = 'Connection lost; try again.'; });
+    });
   }
 
   function applyOffice(o) {
