@@ -12,7 +12,7 @@ import queue
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -28,6 +28,7 @@ from harness.state import StateError, load_state, new_run_id, run_dir
 from harness.ui.chat_git import changed_paths, chat_commit_message, commit_paths, dirty_snapshot
 from harness.ui.demo import DemoChatSession
 from harness.ui.markdown import parse_markdown
+from harness.ui.uploads import attachment_note, image_ids
 from harness.ui.view import progress_text
 from harness.worker import WORKER_ENV, WORKER_TOOLS, ProgressFn
 from harness.worktree import WorktreeError
@@ -66,6 +67,7 @@ class ChatEntry(BaseModel):
     ts: str
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
+    images: list[str] = Field(default_factory=list)
 
 
 class ChatView(BaseModel):
@@ -174,7 +176,9 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
         p = e.payload
         text = p.get("text")
         if e.type == "chat_user" and isinstance(text, str) and text:
-            transcript.append(ChatEntry(role="user", ts=e.ts.isoformat(), text=text))
+            transcript.append(
+                ChatEntry(role="user", ts=e.ts.isoformat(), text=text, images=image_ids(p))
+            )
             progress = []
             last_user = True
         elif e.type == "chat_reply" and isinstance(text, str):
@@ -388,10 +392,16 @@ class ChatManager:
         raise ChatConflict("unknown chat")
 
     def start(
-        self, tier: str, text: str, *, run_id: str | None = None, task_id: str | None = None
+        self,
+        tier: str,
+        text: str,
+        *,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        images: Sequence[str] = (),
     ) -> str:
-        """Open a chat on `tier` and send `text` (stripped) as its first message; return the
-        chat id. Checks in the order of the `decision: conflicts` context item."""
+        """Open a chat on `tier` and send `text` (stripped) and `images` (ids) as its first
+        message; return the chat id. Checks in the order of the `decision: conflicts` item."""
         if tier not in CHAT_TIERS:
             raise ChatConflict(f"no {tier} chat agent; use haiku or sonnet")
         stripped = _check_text(text)
@@ -401,17 +411,21 @@ class ChatManager:
         with self._lock:
             if any(c.tier == tier for c in self._chats.values()):
                 raise ChatConflict(f"a {tier} chat is already open")
-            first = stripped
+            note = attachment_note(self.repo, images)
+            first = stripped + note
             if run_id is not None and task_id is not None:
                 brief = task_brief(self.repo, run_id, task_id)
-                first = f"{brief}\n\nThe user says:\n{stripped}"
+                first = f"{brief}\n\nThe user says:\n{stripped}{note}"
             chat_id = new_chat_id()
             chat = _Chat(chat_id, cast(Tier, tier), ChatLog(self.repo, chat_id))
             chat.log.emit(
                 "chat_started",
                 {"tier": tier, "run_id": run_id, "task_id": task_id, "pid": os.getpid()},
             )
-            chat.log.emit("chat_user", {"text": stripped})
+            payload: dict[str, Any] = {"text": stripped}
+            if images:
+                payload["images"] = list(images)
+            chat.log.emit("chat_user", payload)
             chat.last_text = stripped
             self._chats[chat_id] = chat
             chat.inbox.put(first)
@@ -421,20 +435,23 @@ class ChatManager:
             chat.thread.start()
         return chat_id
 
-    def message(self, chat_id: str, text: str) -> None:
-        """Send `text` (stripped) to a waiting chat."""
+    def message(self, chat_id: str, text: str, images: Sequence[str] = ()) -> None:
+        """Send `text` (stripped) and `images` (ids) to a waiting chat."""
         stripped = _check_text(text)
         self._refuse_if_busy()
         with self._lock:
             chat = self._open_chat(chat_id)
             if chat.state == "working":
                 raise ChatConflict("the agent is still working")
-            chat.log.emit("chat_user", {"text": stripped})
+            payload: dict[str, Any] = {"text": stripped}
+            if images:
+                payload["images"] = list(images)
+            chat.log.emit("chat_user", payload)
             chat.state = "working"
             chat.error = None
             chat.progress = []
             chat.last_text = stripped
-            chat.inbox.put(stripped)
+            chat.inbox.put(stripped + attachment_note(self.repo, images))
 
     def close_chat(self, chat_id: str) -> None:
         """End an open chat (logged chat_closed {"reason": "closed by the user"}); a turn in
