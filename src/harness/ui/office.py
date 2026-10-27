@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -67,6 +67,7 @@ from harness.ui.runs import (
     save_run_options,
     unstaged_stages,
 )
+from harness.ui.uploads import attachment_note, image_ids
 from harness.ui.view import IDLE_MINUTES, list_runs, progress_text
 from harness.worker import ProgressFn
 
@@ -128,6 +129,7 @@ class TranscriptEntry(BaseModel):
     ts: str
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
+    images: list[str] = Field(default_factory=list)
 
 
 class OfficeView(BaseModel):
@@ -323,7 +325,14 @@ def transcript_of(sess: list[Event]) -> list[TranscriptEntry]:
             if not isinstance(text, str) or not text:
                 continue
             if e.type == "planner_user":
-                out.append(TranscriptEntry(role="user", ts=e.ts.isoformat(), text=text))
+                out.append(
+                    TranscriptEntry(
+                        role="user",
+                        ts=e.ts.isoformat(),
+                        text=text,
+                        images=image_ids(e.payload),
+                    )
+                )
             elif e.type == "planner_reply":
                 out.append(
                     TranscriptEntry(
@@ -790,6 +799,7 @@ class Office:
         from_draft: bool = False,
         route: RouteChoice = "project",
         title_request: bool = True,
+        images: Sequence[str] = (),
     ) -> None:
         """Start a stage-1 planner session. With `description`, an existing PROJECT_PLAN.md is
         first archived as PROJECT_PLAN.<UTC timestamp>.md. With `from_draft`, the session is
@@ -811,7 +821,7 @@ class Office:
                     raise OfficeConflict("the description is empty")
                 if len(shown) > MAX_TEXT_CHARS:
                     raise OfficeConflict("the description is too long")
-                text = shown
+                text = shown + attachment_note(self.repo, images)
                 if plan.exists():
                     self._archive(plan)
             self._begin(
@@ -820,6 +830,7 @@ class Office:
                 stage=1,
                 from_draft=from_draft,
                 route="project" if from_draft else route,
+                images=() if from_draft else images,
             )
             if title_request and not from_draft and self._request_titler is not None:
                 threading.Thread(
@@ -853,6 +864,7 @@ class Office:
         route: RouteChoice = "project",
         auto: bool = False,
         staging_only: bool = False,
+        images: Sequence[str] = (),
     ) -> None:
         """Start the planner thread. Caller holds the lock and has passed _guard_idle. With
         `staging_only` the session only writes work orders for `stage` (stage 1 too) from the
@@ -912,7 +924,10 @@ class Office:
             },
         )
         if stage == 1 and not from_draft and not staging_only:
-            log.emit("planner_user", {"text": shown})
+            payload: dict[str, Any] = {"text": shown}
+            if images:
+                payload["images"] = list(images)
+            log.emit("planner_user", payload)
         self._thread = threading.Thread(
             target=self._thread_main,
             args=(text, stage, observed, triage),
@@ -923,14 +938,17 @@ class Office:
 
     # ------------------------------------------------------------ messages
 
-    def message(self, text: str) -> None:
+    def message(self, text: str, images: Sequence[str] = ()) -> None:
         """Hand `text` to the planner (an answer, or a request to change the plan). Allowed
         when the boss is asking or ready and no run is live."""
         with self._lock:
             self._guard_message()
             if self._log is not None:
-                self._log.emit("planner_user", {"text": text.strip()})
-            self._send(text)
+                payload: dict[str, Any] = {"text": text.strip()}
+                if images:
+                    payload["images"] = list(images)
+                self._log.emit("planner_user", payload)
+            self._send(text + attachment_note(self.repo, images))
 
     def _guard_message(self) -> None:
         self._refresh_supervising()
@@ -1445,17 +1463,19 @@ class _OfficeOpusDesk:
     def __init__(self, office: Office) -> None:
         self._office = office
 
-    def start(self, text: str, plan: Literal["quick", "project"]) -> str:
+    def start(
+        self, text: str, plan: Literal["quick", "project"], images: Sequence[str] = ()
+    ) -> str:
         try:
-            self._office.start(description=text, route=plan, title_request=False)
+            self._office.start(description=text, route=plan, title_request=False, images=images)
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
         session_id, _state = self._office.boss_status()
         return session_id or ""
 
-    def message(self, text: str) -> None:
+    def message(self, text: str, images: Sequence[str] = ()) -> None:
         try:
-            self._office.message(text)
+            self._office.message(text, images)
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
 
