@@ -161,3 +161,40 @@ def test_get_image_read_only(read_only_site):
 def test_get_unknown(site, tail):
     status, _, _ = site.request("GET", f"{UPLOAD}/{tail}")
     assert status == 404
+
+
+def _upload_named(site: Site, data: bytes, name: str):
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "X-Harness-Token": site.token,
+        "Origin": site.origin,
+        "X-Filename": name,
+    }
+    status, _, out = site.request("POST", UPLOAD, data, headers)
+    return status, json.loads(out)
+
+
+def test_upload_a_markdown_file_and_read_it_back(site):
+    body = b"# Notes\nhello\n"
+    status, out = _upload_named(site, body, "my%20notes.md")
+    assert status == 200 and out["id"].endswith(".md")
+    assert out["type"] == "text/plain; charset=utf-8" and out["name"] == "my notes.md"
+    status, hdrs, data = site.request("GET", f"{UPLOAD}/{out['id']}")
+    assert status == 200 and data == body
+    assert hdrs["content-type"] == "text/plain; charset=utf-8"
+    assert hdrs["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize(
+    "data, name, status, message",
+    [
+        (b"MZ\x90\x00", "run.exe", 415, "only images or text and code files"),
+        (b"\xff\xfe\x00\x01 bytes", "a.py", 415, "not UTF-8 text"),
+        (b"a\0b", "a.txt", 415, "not UTF-8 text"),
+        (b"x" * (256 * 1024 + 1), "big.md", 413, "max 256 KB"),
+    ],
+)
+def test_refused_files(site, data, name, status, message):
+    got, out = _upload_named(site, data, name)
+    assert got == status and message in out["error"]
+    assert stored(site) == []

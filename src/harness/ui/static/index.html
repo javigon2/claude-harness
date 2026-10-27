@@ -169,6 +169,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #orch-view button, #past-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #past-view { display: none; }
+.file-chip, .msg-file { display: inline-block; padding: 4px 8px; border: 1px solid var(--sn-btn); border-radius: 4px; background: #fff; color: var(--sn-btn); font: 12px/1.3 monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file { cursor: pointer; margin-right: 6px; }
 #why { border: 1px solid #dc2626; background: #fef2f2; border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
 #why p { margin: 6px 0; }
 #why-raw { font-size: 12px; overflow-wrap: anywhere; }
@@ -465,7 +467,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       <div id="orch-composer" class="hidden">
         <p id="orch-msg" role="alert"></p>
         <textarea id="orch-text" rows="4" placeholder="Ask the office for anything"></textarea>
-        <div class="attach hidden" data-for="orch-text"><input id="orch-text-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden"><button id="orch-text-attach" type="button" class="attach-btn">Attach image</button><ul id="orch-text-thumbs" class="thumbs hidden"></ul></div>
+        <div class="attach hidden" data-for="orch-text"><input id="orch-text-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,.sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,.dart,.gradle,.dockerfile,.makefile" multiple class="hidden"><button id="orch-text-attach" type="button" class="attach-btn">Attach file</button><ul id="orch-text-thumbs" class="thumbs hidden"></ul></div>
         <select id="orch-route" aria-label="Who takes it">
           <option value="orchestrator">Orchestrator decides</option>
           <option value="quick">Opus: quick plan</option>
@@ -495,7 +497,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
         <section id="sec-prompt" class="hidden">
           <label for="desc">What should Opus plan?</label>
           <textarea id="desc" rows="7" placeholder="Describe the project in a few sentences"></textarea>
-          <div class="attach hidden" data-for="desc"><input id="desc-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden"><button id="desc-attach" type="button" class="attach-btn">Attach image</button><ul id="desc-thumbs" class="thumbs hidden"></ul></div>
+          <div class="attach hidden" data-for="desc"><input id="desc-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,.sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,.dart,.gradle,.dockerfile,.makefile" multiple class="hidden"><button id="desc-attach" type="button" class="attach-btn">Attach file</button><ul id="desc-thumbs" class="thumbs hidden"></ul></div>
           <select id="route" aria-label="Route">
             <option value="quick">Quick plan</option>
             <option value="project">Full plan</option>
@@ -508,12 +510,12 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
         </section>
         <section id="sec-reply" class="hidden">
           <textarea id="answer" rows="4" placeholder="Your answer"></textarea>
-          <div class="attach hidden" data-for="answer"><input id="answer-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden"><button id="answer-attach" type="button" class="attach-btn">Attach image</button><ul id="answer-thumbs" class="thumbs hidden"></ul></div>
+          <div class="attach hidden" data-for="answer"><input id="answer-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,.sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,.dart,.gradle,.dockerfile,.makefile" multiple class="hidden"><button id="answer-attach" type="button" class="attach-btn">Attach file</button><ul id="answer-thumbs" class="thumbs hidden"></ul></div>
           <button id="btn-send" type="button">Send</button>
         </section>
         <section id="sec-plan" class="hidden">
           <textarea id="continue" rows="3" placeholder="Ask for changes"></textarea>
-          <div class="attach hidden" data-for="continue"><input id="continue-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden"><button id="continue-attach" type="button" class="attach-btn">Attach image</button><ul id="continue-thumbs" class="thumbs hidden"></ul></div>
+          <div class="attach hidden" data-for="continue"><input id="continue-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,.sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,.dart,.gradle,.dockerfile,.makefile" multiple class="hidden"><button id="continue-attach" type="button" class="attach-btn">Attach file</button><ul id="continue-thumbs" class="thumbs hidden"></ul></div>
           <button id="btn-continue" type="button">Continue conversation</button>
           <button id="btn-implement" type="button">Start implementing</button>
         </section>
@@ -550,7 +552,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       <p id="chat-note"></p>
       <p id="chat-msg" role="alert"></p>
       <textarea id="chat-text" rows="4" placeholder="Message the agent"></textarea>
-      <div class="attach hidden" data-for="chat-text"><input id="chat-text-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden"><button id="chat-text-attach" type="button" class="attach-btn">Attach image</button><ul id="chat-text-thumbs" class="thumbs hidden"></ul></div>
+      <div class="attach hidden" data-for="chat-text"><input id="chat-text-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,.sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,.dart,.gradle,.dockerfile,.makefile" multiple class="hidden"><button id="chat-text-attach" type="button" class="attach-btn">Attach file</button><ul id="chat-text-thumbs" class="thumbs hidden"></ul></div>
       <button id="btn-chat-send" type="button">Send</button>
       <button id="btn-chat-close" type="button" class="hidden">Close chat</button>
     </div>
@@ -675,16 +677,28 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   function money(x) { return (x === null || x === undefined || isNaN(Number(x))) ? '$?' : '$' + Number(x).toFixed(4); }
   function str(x) { return (x === null || x === undefined) ? '?' : String(x); }
   var IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-  var MAX_IMAGES = 4, MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+  var MAX_IMAGES = 4, MAX_IMAGE_BYTES = 8 * 1024 * 1024, MAX_TEXT_BYTES = 256 * 1024;
+  var TEXT_EXTS = 'md txt rst log csv tsv json jsonl yaml yml toml ini cfg conf xml html css scss js jsx ts tsx mjs py pyi ipynb sh bash zsh sql java kt go rs c h cpp hpp cs rb php swift lua r scala dart gradle dockerfile makefile'.split(' ');
+  function textExt(name) {
+    // the TEXT_EXTS entry a file name ends in (Dockerfile and Makefile whole), else ''
+    var base = String(name || '').split(/[\\/]/).pop().toLowerCase();
+    if (base === 'dockerfile' || base === 'makefile') return base;
+    var ext = base.indexOf('.') >= 0 ? base.split('.').pop() : '';
+    return TEXT_EXTS.indexOf(ext) >= 0 ? ext : '';
+  }
+  function isImageId(id) { return /\.(png|jpg|gif|webp)$/.test(String(id)); }
   var COMPOSERS = {'orch-text': 'orch-msg', 'desc': 'office-msg', 'answer': 'office-msg', 'continue': 'office-msg', 'chat-text': 'chat-msg'};
   var pending = {};
 
   function refuseReason(file, count) {
-    // '' when `file` may join a message that already has `count` images, else the sentence
-    var name = file && file.name ? String(file.name) : 'image';
-    if (count >= MAX_IMAGES) return 'At most 4 images per message.';
-    if (!file || IMAGE_TYPES.indexOf(String(file.type)) === -1) return name + ': only PNG, JPEG, GIF or WebP images can be attached.';
-    if (Number(file.size) > MAX_IMAGE_BYTES) return name + ': larger than 8 MB.';
+    // '' when `file` may join a message that already has `count` attachments, else the sentence
+    var name = file && file.name ? String(file.name) : 'file';
+    if (count >= MAX_IMAGES) return 'At most 4 attachments per message.';
+    if (file && IMAGE_TYPES.indexOf(String(file.type)) >= 0) {
+      return Number(file.size) > MAX_IMAGE_BYTES ? name + ': larger than 8 MB.' : '';
+    }
+    if (!file || !textExt(file.name)) return name + ': only images and text or code files can be attached.';
+    if (Number(file.size) > MAX_TEXT_BYTES) return name + ': larger than 256 KB.';
     return '';
   }
   function imageFiles(list) {
@@ -725,7 +739,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     var failed = {ok: false, error: 'upload failed.'};
     return fetch('/api/upload', {
       method: 'POST',
-      headers: {'Content-Type': 'application/octet-stream', 'X-Harness-Token': token},
+      headers: {'Content-Type': 'application/octet-stream', 'X-Harness-Token': token, 'X-Filename': encodeURIComponent(String(file.name || '')).slice(0, 300)},
       body: file
     }).then(function (r) {
       return r.text().then(function (t) {
@@ -751,9 +765,16 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     items.forEach(function (p) {
       var li = document.createElement('li');
       li.className = 'thumb';
-      var img = document.createElement('img');
-      img.src = '/api/upload/' + encodeURIComponent(p.id);
-      img.alt = p.name;
+      var img;
+      if (isImageId(p.id)) {
+        img = document.createElement('img');
+        img.src = '/api/upload/' + encodeURIComponent(p.id);
+        img.alt = p.name;
+      } else {
+        img = document.createElement('span');
+        img.className = 'file-chip';
+        img.textContent = p.name;
+      }
       var x = document.createElement('button');
       x.type = 'button';
       x.className = 'thumb-x';
@@ -826,9 +847,9 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     });
   }
   function uploadWait(id, msgId) {
-    // true (and says why) while images of this composer are still uploading
+    // true (and says why) while files of this composer are still uploading
     if (uploading[id] > 0) {
-      byId(msgId).textContent = 'Wait for the images to finish uploading.';
+      byId(msgId).textContent = 'Wait for the files to finish uploading.';
       return true;
     }
     return false;
@@ -1255,6 +1276,13 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
         var strip = el('div', 'msg-images');
         entry.images.forEach(function (id) {
           var src = '/api/upload/' + encodeURIComponent(String(id));
+          if (!/\.(png|jpg|gif|webp)$/.test(String(id))) {
+            var chip = el('button', 'msg-file', '.' + String(id).split('.').pop() + ' file');
+            chip.type = 'button';
+            chip.addEventListener('click', function () { window.open(src, '_blank', 'noopener'); });
+            strip.appendChild(chip);
+            return;
+          }
           var img = el('img', 'msg-thumb');
           img.src = src;
           img.alt = 'attached image';

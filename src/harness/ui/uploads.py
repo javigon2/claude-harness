@@ -1,10 +1,15 @@
-"""Image uploads for the office chat panels.
+"""Image and text-file uploads for the office chat panels.
 
 The page uploads raw image bytes (POST /api/upload); they are checked by their magic bytes,
 never by a Content-Type or file name, and stored once per content as
 <repo>/.harness/uploads/<sha256>.<ext>. The file name is the image id that messages carry
 in `images`. Agents see the images through `attachment_note`: absolute paths they open with
-their Read tool."""
+their Read tool.
+
+Text and code files (`TEXT_EXTS`) are stored the same way, as <sha256>.<ext>. Their kind comes
+from the extension of the file name the page sends, and the bytes must be UTF-8 text without
+NUL bytes of at most MAX_TEXT_BYTES. The original name is kept beside the file as
+<id>.name, so the agent is told what the file was called."""
 
 import hashlib
 import os
@@ -23,8 +28,22 @@ IMAGE_TYPES: dict[str, str] = {
     "gif": "image/gif",
     "webp": "image/webp",
 }
-IMAGE_ID_RE = re.compile(r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
+MAX_TEXT_BYTES = 256 * 1024
+TEXT_TYPE = "text/plain; charset=utf-8"
+TEXT_EXTS = frozenset(
+    "md txt rst log csv tsv json jsonl yaml yml toml ini cfg conf xml html css scss "
+    "js jsx ts tsx mjs py pyi ipynb sh bash zsh sql java kt go rs c h cpp hpp cs rb php swift "
+    "lua r scala dart gradle dockerfile makefile".split()
+)
+IMAGE_ID_RE = re.compile(
+    r"^[0-9a-f]{64}\.(png|jpg|gif|webp|"
+    + "|".join(sorted(TEXT_EXTS, key=len, reverse=True)).replace(".", r"\.")
+    + ")$"
+)
 NOT_AN_IMAGE = "only png, jpeg, gif or webp images"
+NOT_AN_ATTACHMENT = "only images or text and code files (md, txt, py, js, json, \u2026)"
+NOT_TEXT = "the file is not UTF-8 text"
+TEXT_TOO_LARGE = "file too large (max 256 KB)"
 TOO_LARGE = "image too large (max 8 MB)"
 EMPTY_UPLOAD = "empty upload"
 BAD_IMAGES = "images must be a list of 1 to 4 image ids"
@@ -71,6 +90,11 @@ def store_image(repo: Path, data: bytes) -> str:
     if ext is None:
         raise UploadError(415, NOT_AN_IMAGE)
 
+    return _write(repo, data, ext)
+
+
+def _write(repo: Path, data: bytes, ext: str) -> str:
+    """Store `data` as <sha256>.<ext> once; the id. Temp file in the folder, then os.replace."""
     image_id = f"{hashlib.sha256(data).hexdigest()}.{ext}"
     folder = Path(repo) / UPLOADS_DIR
     folder.mkdir(parents=True, exist_ok=True)
@@ -87,6 +111,51 @@ def store_image(repo: Path, data: bytes) -> str:
         Path(tmp).unlink(missing_ok=True)
         raise
     return image_id
+
+
+def text_ext(name: str | None) -> str | None:
+    """The TEXT_EXTS entry a file name ends in (`Dockerfile` and `Makefile` count whole), else
+    None. Case-insensitive; only the last path part is looked at."""
+    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    if base in ("dockerfile", "makefile"):
+        return base
+    ext = base.rsplit(".", 1)[-1] if "." in base else ""
+    return ext if ext in TEXT_EXTS else None
+
+
+def store_attachment(repo: Path, data: bytes, name: str | None = None) -> str:
+    """An image (by its magic bytes) goes through store_image. Anything else needs a `name`
+    with a TEXT_EXTS extension (else UploadError 415 NOT_AN_ATTACHMENT), at most
+    MAX_TEXT_BYTES (413) of UTF-8 text without NUL bytes (415 NOT_TEXT); it is stored as
+    <sha256>.<ext> with its cleaned base name beside it. Returns the id."""
+    if sniff_image(data) is not None:
+        return store_image(repo, data)
+    ext = text_ext(name)
+    if ext is None or not data:
+        if name and data:
+            raise UploadError(415, NOT_AN_ATTACHMENT)
+        return store_image(repo, data)
+    if len(data) > MAX_TEXT_BYTES:
+        raise UploadError(413, TEXT_TOO_LARGE)
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UploadError(415, NOT_TEXT) from None
+    if b"\0" in data:
+        raise UploadError(415, NOT_TEXT)
+    file_id = _write(repo, data, ext)
+    label = re.sub(r"[^\w.\- ]", "_", (name or "").replace("\\", "/").rsplit("/", 1)[-1])[:100]
+    (Path(repo) / UPLOADS_DIR / f"{file_id}.name").write_text(label, encoding="utf-8")
+    return file_id
+
+
+def file_name(repo: Path, file_id: str) -> str | None:
+    """The cleaned name stored with a text file, or None."""
+    try:
+        text = (Path(repo) / UPLOADS_DIR / f"{file_id}.name").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return text or None
 
 
 def image_path(repo: Path, image_id: str) -> Path | None:
@@ -130,10 +199,24 @@ def image_ids(payload: dict[str, Any]) -> list[str]:
 
 def attachment_note(repo: Path, ids: Sequence[str]) -> str:
     """What is appended to the text an agent receives: "" when `ids` is empty, else
-    "\\n\\nAttached images: " followed by the absolute path of each id,
-    str(Path(repo).resolve() / UPLOADS_DIR / image_id), joined with ", "."""
+    "\\n\\nAttached images: " followed by the absolute path of each image id,
+    str(Path(repo).resolve() / UPLOADS_DIR / image_id), joined with ", ", and for text files
+    "\\n\\nAttached files: " with each path and, when known, " (name)"."""
     if not ids:
         return ""
     root = Path(repo).resolve()
-    paths = [str(root / UPLOADS_DIR / image_id) for image_id in ids]
-    return "\n\nAttached images: " + ", ".join(paths)
+    images: list[str] = []
+    files: list[str] = []
+    for image_id in ids:
+        path = str(root / UPLOADS_DIR / image_id)
+        if image_id.rsplit(".", 1)[-1] in IMAGE_TYPES:
+            images.append(path)
+        else:
+            name = file_name(repo, image_id)
+            files.append(f"{path} ({name})" if name else path)
+    note = ""
+    if images:
+        note += "\n\nAttached images: " + ", ".join(images)
+    if files:
+        note += "\n\nAttached files: " + ", ".join(files)
+    return note

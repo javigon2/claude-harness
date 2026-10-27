@@ -7,12 +7,20 @@ from test_ui_page import _run_node, _text
 IDS = ["orch-text", "desc", "answer", "continue", "chat-text"]
 
 
+ACCEPT = (
+    "image/png,image/jpeg,image/gif,image/webp,.md,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,"
+    ".yml,.toml,.ini,.cfg,.conf,.xml,.html,.css,.scss,.js,.jsx,.ts,.tsx,.mjs,.py,.pyi,.ipynb,"
+    ".sh,.bash,.zsh,.sql,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.lua,.r,.scala,"
+    ".dart,.gradle,.dockerfile,.makefile"
+)
+
+
 def _block(x: str) -> str:
     return (
         f'<div class="attach hidden" data-for="{x}">'
         f'<input id="{x}-file" type="file" '
-        'accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden">'
-        f'<button id="{x}-attach" type="button" class="attach-btn">Attach image</button>'
+        f'accept="{ACCEPT}" multiple class="hidden">'
+        f'<button id="{x}-attach" type="button" class="attach-btn">Attach file</button>'
         f'<ul id="{x}-thumbs" class="thumbs hidden"></ul></div>'
     )
 
@@ -40,6 +48,10 @@ out.svg = refuseReason({name: 'x.svg', type: 'image/svg+xml', size: 10}, 0);
 out.nameless = refuseReason({type: 'text/plain', size: 10}, 0);
 out.big = refuseReason({name: 'big.png', type: 'image/png', size: 9 * 1024 * 1024}, 0);
 out.full = refuseReason(png, 4);
+out.md = refuseReason({name: 'README.md', type: '', size: 2000}, 0);
+out.docker = refuseReason({name: 'Dockerfile', type: '', size: 2000}, 0);
+out.exe = refuseReason({name: 'run.exe', type: 'application/octet-stream', size: 10}, 0);
+out.bigmd = refuseReason({name: 'big.md', type: 'text/markdown', size: 300 * 1024}, 0);
 
 var f1 = {name: 'one.png', type: 'image/png', size: 1};
 var f2 = {name: 'two.jpg', type: 'image/jpeg', size: 1};
@@ -98,10 +110,13 @@ def test_attach_helpers_in_node(tmp_path):
     out = json.loads(lines[0])
 
     assert out["small"] == ""
-    assert out["svg"] == "x.svg: only PNG, JPEG, GIF or WebP images can be attached."
-    assert out["nameless"] == "image: only PNG, JPEG, GIF or WebP images can be attached."
+    assert out["svg"] == "x.svg: only images and text or code files can be attached."
+    assert out["nameless"] == "file: only images and text or code files can be attached."
     assert out["big"] == "big.png: larger than 8 MB."
-    assert out["full"] == "At most 4 images per message."
+    assert out["full"] == "At most 4 attachments per message."
+    assert out["md"] == "" and out["docker"] == ""
+    assert out["exe"] == "run.exe: only images and text or code files can be attached."
+    assert out["bigmd"] == "big.md: larger than 256 KB."
 
     assert out["list"] == ["one.png", "two.jpg"]
     assert out["items"] == ["one.png"]

@@ -52,11 +52,13 @@ from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.uploads import (
     IMAGE_TYPES,
     MAX_IMAGE_BYTES,
+    TEXT_TYPE,
     TOO_LARGE,
     UploadError,
     check_image_ids,
+    file_name,
     image_path,
-    store_image,
+    store_attachment,
 )
 from harness.ui.view import build_view, list_runs
 
@@ -414,7 +416,8 @@ def make_handler(
             return secrets.compare_digest(sent.encode("utf-8"), secret.encode("utf-8"))
 
         def _upload(self) -> None:
-            """Store the raw request body as an image; the type comes from its magic bytes."""
+            """Store the raw request body: an image (its magic bytes decide) or, with an X-Filename
+            header, a text or code file."""
             if self._no_project:
                 self._reject(409, NO_PROJECT)
                 return
@@ -436,7 +439,8 @@ def make_handler(
             self.connection.settimeout(30)
             data = self.rfile.read(length)
             try:
-                image_id = store_image(self._repo, data)
+                sent = unquote(self.headers.get("X-Filename") or "")[:300]
+                image_id = store_attachment(self._repo, data, sent or None)
             except UploadError as err:
                 self._json(err.code, {"error": str(err)})
                 return
@@ -444,7 +448,10 @@ def make_handler(
                 self._json(500, {"error": f"could not store the upload: {err}"})
                 return
             ext = image_id.rsplit(".", 1)[1]
-            self._json(200, {"id": image_id, "type": IMAGE_TYPES[ext], "bytes": len(data)})
+            reply = {"id": image_id, "type": IMAGE_TYPES.get(ext, TEXT_TYPE), "bytes": len(data)}
+            if ext not in IMAGE_TYPES:
+                reply["name"] = file_name(self._repo, image_id) or image_id
+            self._json(200, reply)
 
         def _image(self, image_id: str) -> None:
             p = image_path(self._repo, image_id)
@@ -460,7 +467,7 @@ def make_handler(
             self._send(
                 200,
                 data,
-                ctype=IMAGE_TYPES[p.name.rsplit(".", 1)[1]],
+                ctype=IMAGE_TYPES.get(p.name.rsplit(".", 1)[1], TEXT_TYPE),
                 extra={"X-Content-Type-Options": "nosniff"},
                 cache="private",
             )

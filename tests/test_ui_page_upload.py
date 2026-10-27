@@ -28,7 +28,8 @@ function fetch(path, opts) {
   calls.push({path: path, opts: opts});
   if (mode === 'reject') return Promise.reject(new Error('down'));
   var n = calls.length;
-  var body = mode === 'error' ? {error: 'image too large (max 8 MB)'} : {id: 'id' + n};
+  var ext = String(opts.headers['X-Filename']).slice(-3) === '.md' ? '.md' : '.png';
+  var body = mode === 'error' ? {error: 'image too large (max 8 MB)'} : {id: 'id' + n + ext};
   return Promise.resolve({
     ok: mode !== 'error',
     text: function () { return Promise.resolve(JSON.stringify(body)); }
@@ -73,15 +74,15 @@ tick().then(function () {
 });
 """,
     )
-    assert "only PNG, JPEG, GIF or WebP" in out["typeMsg"]
+    assert "only images and text or code files" in out["typeMsg"]
     assert out["calls"] == 1
     assert out["path"] == "/api/upload"
     assert out["token"] == "tok"
     assert out["ct"] == "application/octet-stream"
-    assert out["ids"] == ["id1"]
+    assert out["ids"] == ["id1.png"]
     assert out["lis"] == 1
     assert out["cls"] == "thumbs"
-    assert out["src"] == "/api/upload/id1"
+    assert out["src"] == "/api/upload/id1.png"
     assert out["alt"] == "b.png"
     assert out["aria"] == "Remove b.png"
 
@@ -125,7 +126,7 @@ tick().then(function () {
 """,
     )
     assert out["calls"] == 4
-    assert out["msg"] == "At most 4 images per message."
+    assert out["msg"] == "At most 4 attachments per message."
     assert len(out["ids"]) == 4
 
 
@@ -153,9 +154,30 @@ def test_wiring_in_page():
     assert re.search(r"wireOrch\(\);\s*wireAttach\(\);", text)
     assert text.count("withImages(") - 1 >= 4
     assert text.count("clearPending(") >= 5
-    assert "Wait for the images to finish uploading." in text
+    assert "Wait for the files to finish uploading." in text
     for bad in ("http://", "https://", "<a ", "innerHTML", "outerHTML", "insertAdjacentHTML"):
         assert bad not in text
     assert "document.write" not in text and "eval(" not in text
     assert "modal" not in text
     assert text.count('<details class="fold">') == 2
+
+
+def test_a_markdown_file_uploads_with_its_name_and_shows_a_chip(tmp_path):
+    out = _run(
+        tmp_path,
+        """
+var md = {name: 'my notes.md', type: '', size: 5};
+addFiles('desc', [md]);
+tick().then(function () {
+  var li = byId('desc-thumbs').children[0];
+  console.log(JSON.stringify({
+    name: calls[0].opts.headers['X-Filename'], ids: idsOf('desc'),
+    cls: li.children[0].className, text: li.children[0].textContent,
+    tag: li.children[0].tag
+  }));
+});
+""",
+    )
+    assert out["name"] == "my%20notes.md"
+    assert out["ids"] == ["id1.md"]
+    assert out["cls"] == "file-chip" and out["text"] == "my notes.md"

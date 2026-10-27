@@ -133,3 +133,16 @@ def test_attachment_note_lists_absolute_paths(tmp_path):
     base = tmp_path.resolve() / ".harness" / "uploads"
     expected = f"\n\nAttached images: {str(base / first)}, {str(base / second)}"
     assert attachment_note(tmp_path, [first, second]) == expected
+
+
+def test_text_files_are_stored_with_their_name_and_noted(tmp_path):
+    from harness.ui.uploads import file_name, image_path, store_attachment, text_ext
+
+    assert text_ext("src/App.TSX") == "tsx" and text_ext("Dockerfile") == "dockerfile"
+    assert text_ext("run.exe") is None and text_ext("noext") is None and text_ext(None) is None
+    file_id = store_attachment(tmp_path, b"print('hi')\n", "dir/../my script.py")
+    assert file_id.endswith(".py") and image_path(tmp_path, file_id) is not None
+    assert file_name(tmp_path, file_id) == "my script.py"
+    note = attachment_note(tmp_path, [file_id])
+    assert note.startswith("\n\nAttached files: ") and note.endswith("(my script.py)")
+    assert "Attached images" not in note
