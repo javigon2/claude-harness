@@ -189,7 +189,7 @@ def test_modal_ids_and_meta_tags():
         assert f'id="{id_}"' in text, id_
     assert '<meta name="harness-token" content="">' in text
     assert '<meta name="harness-mode" content="read-only">' in text
-    assert "<dialog" not in text
+    assert text.count("<dialog") == 1 and '<dialog id="img-view">' in text
 
 
 def test_composer_and_plan_fold_replace_the_modal():
@@ -199,7 +199,7 @@ def test_composer_and_plan_fold_replace_the_modal():
     for id_ in REMOVED_IDS:
         assert f'id="{id_}"' not in text, id_
         assert f"'{id_}'" not in text, id_
-    for word in ["openModal", "renderModal", "showPlan", "showModal", "modal"]:
+    for word in ["openModal", "renderModal", "showPlan", "modal"]:
         assert word not in text, word
     assert '<div id="composer" class="hidden">' in text
     assert '<details id="plan-fold" class="hidden"><summary>Plan</summary>' in text

@@ -418,6 +418,12 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 .thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid #d5dee4; display: block; }
 #orch-composer .thumb-x, #composer .thumb-x, #chat-view .thumb-x { position: absolute; top: -6px; right: -6px; padding: 0 6px !important; line-height: 1.4; border-radius: 10px; }
 textarea.drop-over { outline: 2px dashed #52b8ff; }
+.msg-images:not(.hidden) { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; cursor: zoom-in; }
+.msg-thumb.big { width: auto; height: auto; max-width: 100%; cursor: zoom-out; }
+#img-view { padding: 8px; border: 0; border-radius: 8px; }
+#img-view img { display: block; max-width: 90vw; max-height: 80vh; }
+#img-view::backdrop { background: rgba(3, 45, 66, 0.6); }
 </style>
 </head>
 <body>
@@ -622,6 +628,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     <pre id="report-text"></pre>
   </details>
 </section>
+<dialog id="img-view"><img id="img-view-img" alt="attached image"><form method="dialog"><button type="submit">Close</button></form></dialog>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
@@ -1230,12 +1237,35 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     li.appendChild(el('div', 'msg-who', user ? 'You' : orch ? 'Orchestrator' : who || 'Opus'));
     if (user) {
       li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
+      if (Array.isArray(entry.images) && entry.images.length) {
+        var strip = el('div', 'msg-images');
+        entry.images.forEach(function (id) {
+          var src = '/api/upload/' + encodeURIComponent(String(id));
+          var img = el('img', 'msg-thumb');
+          img.src = src;
+          img.alt = 'attached image';
+          img.addEventListener('click', function () { openImage(src, img); });
+          strip.appendChild(img);
+        });
+        li.appendChild(strip);
+      }
     } else {
       var md = el('div', 'md');
       md.appendChild(renderBlocks(entry.blocks));
       li.appendChild(md);
     }
     return li;
+  }
+
+  function openImage(src, thumb) {
+    // the large view: the native dialog when there is one, else the thumb grows in place
+    var dlg = document.getElementById('img-view');
+    if (dlg && typeof dlg.showModal === 'function') {
+      document.getElementById('img-view-img').src = src;
+      if (!dlg.open) dlg.showModal();
+      return;
+    }
+    if (thumb && thumb.classList) thumb.classList.toggle('big');
   }
 
   function renderTranscript(o) {
