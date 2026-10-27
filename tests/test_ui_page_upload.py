@@ -22,6 +22,8 @@ var document = {createElement: mkEl};
 function byId(id) { if (!els[id]) els[id] = mkEl('x'); return els[id]; }
 var token = 'tok';
 var uploading = {};
+var syncs = [];
+function syncSend(id) { syncs.push(id); }
 var calls = [];
 var mode = 'ok';
 function fetch(path, opts) {
@@ -153,7 +155,7 @@ def test_wiring_in_page():
     text = _text()
     assert re.search(r"wireOrch\(\);\s*wireAttach\(\);", text)
     assert text.count("withImages(") - 1 >= 4
-    assert text.count("clearPending(") >= 5
+    assert text.count("clearComposer(") >= 5
     assert "Wait for the files to finish uploading." in text
     for bad in ("http://", "https://", "<a ", "innerHTML", "outerHTML", "insertAdjacentHTML"):
         assert bad not in text

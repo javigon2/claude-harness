@@ -15,13 +15,19 @@ ACCEPT = (
 )
 
 
+SENDS = {
+    "orch-text": "btn-orch-send", "desc": "btn-start", "answer": "btn-send",
+    "continue": "btn-continue", "chat-text": "btn-chat-send",
+}  # fmt: skip
+
+
 def _block(x: str) -> str:
     return (
         f'<div class="attach hidden" data-for="{x}">'
         f'<input id="{x}-file" type="file" '
         f'accept="{ACCEPT}" multiple class="hidden">'
-        f'<button id="{x}-attach" type="button" class="attach-btn">Attach file</button>'
-        f'<ul id="{x}-thumbs" class="thumbs hidden"></ul></div>'
+        f'<button id="{x}-attach" type="button" class="attach-btn" '
+        f'aria-label="Attach file" title="Attach file">+</button></div>'
     )
 
 
@@ -86,11 +92,29 @@ console.log(JSON.stringify(out));
 
 
 @pytest.mark.parametrize("x", IDS)
-def test_attach_block_follows_each_textarea(x):
+def test_composer_box_layout(x):
+    # thumbnails, then the text, then one row: attach (+) on the left, send on the right
     text = _text()
     assert _block(x) in text
-    pattern = r'<textarea id="' + x + r'"[^>]*></textarea>\n\s*' + re.escape(_block(x))
-    assert re.search(pattern, text)
+    box = re.search(
+        r'<div class="composer-box" data-for="' + x + r'">.*?\n\s*</div>\n(?=\s*</)', text, re.S
+    )
+    assert box, x
+    body = box.group(0)
+    order = [
+        f'id="{x}-thumbs"', f'<textarea id="{x}"', '<div class="composer-row">',
+        f'id="{x}-attach"', f'id="{SENDS[x]}"',
+    ]  # fmt: skip
+    places = [body.index(w) for w in order]
+    assert places == sorted(places)
+    assert 'class="composer-grip"' in body and body.count("<textarea") == 1
+
+
+def test_one_composer_box_per_textarea():
+    text = _text()
+    assert text.count('class="composer-box"') == 5
+    assert text.count("<textarea") == 5
+    assert text.count('class="composer-row"') == 5
 
 
 def test_attach_blocks_hidden_by_default():

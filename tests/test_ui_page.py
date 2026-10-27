@@ -100,7 +100,8 @@ def test_two_panel_layout():
     assert '<main id="layout">' in text
     assert text.index('id="left"') < text.index('id="transcript"') < text.index('id="right"')
     assert text.index('id="right"') < text.index('id="office"') < text.index('id="content"')
-    assert re.search(r"#layout \{[^}]*grid-template-columns: 1fr 1fr;", text)
+    assert re.search(r"#layout \{[^}]*grid-template-columns: 20% 45% 35%;", text)
+    assert re.search(r"#layout\.collapsed \{[^}]*grid-template-columns: 56px 1fr 1fr;", text)
     assert re.search(r"#left \{[^}]*overflow: auto;", text)
     assert "@media (max-width: 900px)" in text
 
@@ -396,17 +397,17 @@ def test_transcript_appends_in_place_and_rebuilds_on_a_new_session(tmp_path):
     script = (
         _transcript_script()
         + "var E = " + json.dumps(entries) + ";\n"
-        + "var nodes = {transcript: mk('ol'), left: mk('section')};\n"
-        + "nodes.left.scrollHeight = 500; nodes.left.clientHeight = 100;\n"
-        + "nodes.left.scrollTop = 370;\n"
+        + "var nodes = {transcript: mk('ol')};\n"
+        + "nodes.transcript.scrollHeight = 500; nodes.transcript.clientHeight = 100;\n"
+        + "nodes.transcript.scrollTop = 370;\n"
         + "document.getElementById = function (id) { return nodes[id]; };\n"
         + "var out = [];\n"
         + "renderTranscript({session_id: 's1', transcript: E});\n"
-        + "out.push([nodes.transcript.children.length, nodes.left.scrollTop]);\n"
-        + "nodes.left.scrollTop = 0;\n"
+        + "out.push([nodes.transcript.children.length, nodes.transcript.scrollTop]);\n"
+        + "nodes.transcript.scrollTop = 0;\n"
         + "var first = nodes.transcript.children[0];\n"
         + "renderTranscript({session_id: 's1', transcript: E});\n"
-        + "out.push([nodes.transcript.children.length, nodes.left.scrollTop]);\n"
+        + "out.push([nodes.transcript.children.length, nodes.transcript.scrollTop]);\n"
         + "renderTranscript({session_id: 's1', transcript: E.slice(0, 2)});\n"
         + "out.push([nodes.transcript.children.length, nodes.transcript.children[0] === first]);\n"
         + "renderTranscript({session_id: 's1', transcript: E});\n"
@@ -621,7 +622,7 @@ var S0 = {ts: '2026-10-23T09:00:01+00:00', attempt: 1, tier: 'haiku', text: 'Rea
 var S1 = {ts: '2026-10-23T09:00:02+00:00', attempt: 1, tier: 'haiku', text: 'Running ls'};
 var S2 = {ts: '2026-10-23T09:01:00+00:00', attempt: 2, tier: 'sonnet', text: 'Editing a.py'};
 var S3 = {ts: '2026-10-23T09:01:05+00:00', attempt: 2, tier: 'sonnet', text: 'Writing b.py'};
-var left = byId('left');
+var left = byId('timeline');
 left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 0;
 function desc(li) {
   var t = li.children.length ? li.children.map(function (c) { return c.text; }).join(' ') : li.text;
@@ -721,10 +722,10 @@ def test_animations_css():
         assert word not in text, word
 
 
-ROUTE_SELECT = """          <select id="route" aria-label="Route">
-            <option value="quick">Quick plan</option>
-            <option value="project">Full plan</option>
-          </select>"""
+ROUTE_SELECT = (
+    '<select id="route" aria-label="Route"><option value="quick">Quick plan</option>'
+    '<option value="project">Full plan</option></select>'
+)
 
 
 def test_route_selector_triage_line_and_resume_button_markup():
@@ -788,7 +789,7 @@ def test_chat_view_markup():
     assert '<div id="chat-view" class="hidden">' in text
     ids = ["timeline-view", "chat-view", "btn-chat-back", "chat-title",
            "chat-transcript", "chat-progress", "chat-commits", "chat-note", "chat-msg",
-           "chat-text", "btn-chat-send", "btn-chat-close", "right"]  # fmt: skip
+           "btn-chat-close", "chat-text", "btn-chat-send", "right"]  # fmt: skip
     places = [text.index(f'id="{id_}"') for id_ in ids]
     assert places == sorted(places)
     assert '<button id="btn-chat-close" type="button" class="hidden">Close chat</button>' in text
@@ -834,7 +835,7 @@ var hidden = {}, rendered = 0;
 function setHidden(id, hide) { hidden[id] = hide; }
 function renderOffice() { rendered++; }
 function byId(id) { return document.getElementById(id); }
-var left = byId('left');
+var left = byId('chat-transcript');
 left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 0;
 function items() {
   return byId('chat-transcript').children.map(function (li) {
@@ -1083,7 +1084,9 @@ def test_orchestrator_panel_markup():
     assert '<button id="btn-convo-back" type="button">Back to Orchestrator</button>' in text
     assert text.count(">Back to Orchestrator</button>") == 3
     assert "Back to Opus" not in text
-    assert text.index('id="run-progress-box"') < text.index("</header>")
+    # the progress bar and phase now head the agent room
+    assert text.index('id="right"') < text.index('id="phase"') < text.index('id="run-progress-box"')
+    assert text.index('id="run-progress-box"') < text.index('id="run-options"')
     for gone in ('id="stage"', 'id="wave"', 'id="tiers"'):
         assert gone not in text, gone
     for gone in ("orch-cost", "office-cost", "chat-cost", "office-total", 'id="cost"'):
@@ -1141,7 +1144,7 @@ def test_orchestrator_message_nodes(tmp_path):
 
 ORCH_SCENARIO = """
 function byId(id) { return document.getElementById(id); }
-var left = byId('left');
+var left = byId('orch-transcript');
 left.scrollHeight = 500; left.clientHeight = 100; left.scrollTop = 370;
 function items() {
   return byId('orch-transcript').children.map(function (li) {
@@ -1163,12 +1166,12 @@ left.scrollTop = 0;
 renderOrch({thread_id: 'orch-1', transcript: [U, R, A], holder: 'haiku', holder_id: 'c1',
   cost_usd: 0.01});
 out.push([items(), byId('orch-transcript').children[0] === first, byId('orch-line').text,
-  left.scrollTop, hidden['orch-route']]);
+  left.scrollTop]);
 renderOrch({thread_id: 'orch-2', transcript: [U], holder: null, cost_usd: 0.02});
 out.push([items(), byId('orch-transcript').children[0] === first]);
-out.push([hidden['orch-composer'], hidden['orch-route']]);
+out.push(hidden['orch-composer']);
 renderOrch({thread_id: null, transcript: [], cost_usd: 0.02});
-out.push([items(), byId('orch-line').text, hidden['orch-route']]);
+out.push([items(), byId('orch-line').text]);
 interactive = false;
 renderOrch(null);
 out.push(hidden['orch-composer']);
@@ -1197,10 +1200,10 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     assert out == [
         [[], ""],
         [[you, routed], "", 500],
-        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0, True],
+        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0],
         [[you], False],
-        [False, False],
-        [[], "", False],
+        False,
+        [[], ""],
         True,
     ]  # fmt: skip
 
@@ -1327,49 +1330,38 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
 
 # ---------------------------------------------------------------- the Orchestrator composer
 
-ORCH_ROUTE_SELECT = """        <select id="orch-route" aria-label="Who takes it">
-          <option value="orchestrator">Orchestrator decides</option>
-          <option value="quick">Opus: quick plan</option>
-          <option value="project">Opus: project plan</option>
-        </select>"""
-
-
 def test_orchestrator_composer_markup():
     text = _text()
     assert '<div id="orch-composer" class="hidden">' in text
-    ids = ["orch-view", "orch-line", "orch-composer", "orch-msg", "orch-text", "orch-route",
-           "btn-orch-send", "btn-orch-new", "convo"]  # fmt: skip
+    ids = ["orch-view", "orch-line", "orch-composer", "orch-msg", "btn-orch-new",
+           "orch-text-thumbs", "orch-text", "orch-text-attach", "btn-orch-send",
+           "convo"]  # fmt: skip
     places = [text.index(f'id="{id_}"') for id_ in ids]
     assert places == sorted(places)
-    assert ORCH_ROUTE_SELECT in text
-    assert '<button id="btn-orch-send" type="button">Send</button>' in text
     assert '<button id="btn-orch-new" type="button">New request</button>' in text
     assert re.search(r"#orch-msg:empty \{ display: none; \}", text)
     for word in [
         "'/api/orchestrator/message'", "'/api/orchestrator/new'", "wireOrch();",
         "'#composer button, #chat-view button, #orch-view button'",
-        "setHidden('orch-composer', !interactive);", "setHidden('orch-route', !!o.holder);",
+        "setHidden('orch-composer', !interactive);",
     ]:  # fmt: skip
         assert word in text, word
-    for gone in ["Opus routed this", "Auto (Opus decides)", '<option value="auto">']:
+    for gone in [
+        "Opus routed this", "Auto (Opus decides)", '<option value="auto">', "orch-route",
+        "orchSend", "Who takes it", "Opus: quick plan", "Opus: project plan",
+    ]:  # fmt: skip
         assert gone not in text, gone
 
 
-def test_orchestrator_send_picks_the_endpoint(tmp_path):
-    script = (
-        _functions(_text(), "orchSend")
-        + "console.log(JSON.stringify([orchSend(null, 'orchestrator', 'a'),"
-        + " orchSend({holder: null}, 'quick', 'b'), orchSend({holder: null}, 'project', 'c'),"
-        + " orchSend({holder: 'haiku'}, 'quick', 'd'), orchSend(null, 'auto', 'e')]));\n"
-    )  # fmt: skip
-    out = json.loads(_run_node(tmp_path, script)[-1])
-    assert out == [
-        {"path": "/api/orchestrator/message", "body": {"text": "a"}},
-        {"path": "/api/planner/start", "body": {"description": "b", "route": "quick"}},
-        {"path": "/api/planner/start", "body": {"description": "c", "route": "project"}},
-        {"path": "/api/orchestrator/message", "body": {"text": "d"}},
-        {"path": "/api/orchestrator/message", "body": {"text": "e"}},
-    ]
+def test_orchestrator_send_always_posts_to_the_orchestrator():
+    text = _text()
+    m = re.search(r"  function wireOrch\(\) \{.*?\n  \}", text, re.S)
+    assert m
+    handler = m.group(0).split("btn-orch-new")[0]
+    post = "act('/api/orchestrator/message', withImages({text: text}, idsOf('orch-text'))"
+    assert post in handler
+    assert "/api/planner/start" not in handler
+    assert "showOpus" not in handler
 
 
 # ---------------------------------------------------------------- the launcher: project browser
@@ -1868,7 +1860,8 @@ console.log(JSON.stringify([
 
 def test_request_picker_and_past_view_markup():
     text = _text()
-    assert '<select id="run-picker" aria-label="Run"></select>' in text
+    # the select stays as the hidden mirror of the selection; the sidebar list is what users see
+    assert '<select id="run-picker" class="hidden" aria-label="Run"></select>' in text
     assert re.search(
         r'<select id="run-sub-picker" class="hidden" aria-label="[^"]+"></select>', text
     )
@@ -1881,7 +1874,7 @@ def test_request_picker_and_past_view_markup():
     assert "No run yet for this request" in text
     assert "<a " not in text
     # a toggled panel must use :not(.hidden): an ID rule with display: beats .hidden
-    assert "#left.past #orch-view:not(.hidden) + #past-view { display: block; }" in text
+    assert "#left.past #orch-view:not(.hidden) + #past-view { display: flex;" in text
     assert re.search(r"#past-view \{ display: none; \}", text)
     assert not re.search(r"#run-sub-picker \{[^}]*display", text)
     assert text.count('<details class="fold">') == 2
@@ -1991,6 +1984,7 @@ def test_picker_options_labels_and_run_sub_picker(tmp_path):
     label = re.search(r"  var STATE_LABEL = .*", text)
     script = (
         _page_helpers(text) + "var picker = document.getElementById('run-picker');\n"
+        + "var chatSel = null;\nfunction renderChatList() {}\nfunction markChat() {}\n"
         + label.group(0) + "\n"
         + _functions(text, "requestLabel", "runsOf", "renderRuns", "renderPickers")
         + PICKER_SCENARIO
