@@ -1,10 +1,12 @@
 """The office's HTTP server: loopback only, stdlib only.
 
+GET /api/upload/<id> serves a stored image (also read-only).
 Read-only by default (every POST answers 405). Given an `Office` it also serves the planner
 POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), the run
 POST endpoints (POST /api/run/{resume,stop,launch,options}) and the Orchestrator POST endpoints
-(POST /api/orchestrator/{message,new}), each behind the Host, Origin and token checks, a
-JSON-only body of at most 64 KB, and a strict per-route body schema.
+(POST /api/orchestrator/{message,new}) and POST /api/upload (raw image bytes), each behind
+the Host, Origin and token checks, a JSON-only body of at most 64 KB (the upload: raw image
+bytes, at most 8 MB), and a strict per-route body schema.
 
 Given a `Host` instead (the launcher) the project is not fixed: each request works on the
 Host's current project and Office, answers 409 `NO_PROJECT` when none is open, and the
@@ -45,6 +47,14 @@ from harness.ui.orchestrator import OrchestratorConflict
 from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
 from harness.ui.requests import list_requests, request_thread, request_title_of_run, run_titles
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
+from harness.ui.uploads import (
+    IMAGE_TYPES,
+    MAX_IMAGE_BYTES,
+    TOO_LARGE,
+    UploadError,
+    image_path,
+    store_image,
+)
 from harness.ui.view import build_view, list_runs
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
@@ -289,7 +299,8 @@ def make_handler(
     `/api/report/<run_id>`. Without an `office` every other method answers 405 (read-only).
     With one, POST `/api/planner/{start,message,implement,next-stage,stage}`, POST
     `/api/chat/{start,message,close}`, POST `/api/run/{resume,stop,launch,options}` and POST
-    `/api/orchestrator/{message,new}` are served (`token` guards them; one is made if not
+    `/api/orchestrator/{message,new}` and `/api/upload` are served (GET `/api/upload/<id>`
+    always; `token` guards the POSTs; one is made if not
     given) and every other method still answers 405. Request logging is silenced."""
     fixed_repo, fixed_office = repo, office
     interactive = office is not None or host is not None
@@ -320,11 +331,12 @@ def make_handler(
             body: bytes,
             ctype: str = "application/json; charset=utf-8",
             extra: dict[str, str] | None = None,
+            cache: str = "no-store",
         ) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -386,6 +398,58 @@ def make_handler(
             sent = self.headers.get("X-Harness-Token") or ""
             return secrets.compare_digest(sent.encode("utf-8"), secret.encode("utf-8"))
 
+        def _upload(self) -> None:
+            """Store the raw request body as an image; the type comes from its magic bytes."""
+            if self._no_project:
+                self._reject(409, NO_PROJECT)
+                return
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                self._reject(411, "content length required")
+                return
+            try:
+                length = int(raw_length)
+            except ValueError:
+                self._reject(400, "bad content length")
+                return
+            if length < 0:
+                self._reject(400, "bad content length")
+                return
+            if length > MAX_IMAGE_BYTES:
+                self._reject(413, TOO_LARGE)
+                return
+            self.connection.settimeout(30)
+            data = self.rfile.read(length)
+            try:
+                image_id = store_image(self._repo, data)
+            except UploadError as err:
+                self._json(err.code, {"error": str(err)})
+                return
+            except OSError as err:
+                self._json(500, {"error": f"could not store the upload: {err}"})
+                return
+            ext = image_id.rsplit(".", 1)[1]
+            self._json(200, {"id": image_id, "type": IMAGE_TYPES[ext], "bytes": len(data)})
+
+        def _image(self, image_id: str) -> None:
+            p = image_path(self._repo, image_id)
+            data = None
+            if p is not None:
+                try:
+                    data = p.read_bytes()
+                except OSError:
+                    data = None
+            if p is None or data is None:
+                self._json(404, {"error": "unknown image"})
+                return
+            self._send(
+                200,
+                data,
+                ctype=IMAGE_TYPES[p.name.rsplit(".", 1)[1]],
+                extra={"X-Content-Type-Options": "nosniff"},
+                cache="private",
+            )
+
         def _post(self) -> None:
             """Every safety rule in order; a request failing any of them changes nothing."""
             if not self._host_ok():
@@ -410,6 +474,8 @@ def make_handler(
                 known = route in PROJECT_ROUTES
             elif host is not None and path == "/api/server/restart":
                 kind, route, known = "server", "restart", True
+            elif path == "/api/upload":
+                kind, route, known = "upload", "", True
             else:
                 known = False
             if not known:
@@ -420,6 +486,9 @@ def make_handler(
                 return
             if not self._token_ok():
                 self._reject(403, "bad token")
+                return
+            if kind == "upload":
+                self._upload()
                 return
             if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
                 self._reject(415, "content type must be application/json")
@@ -608,6 +677,9 @@ def make_handler(
                 self._json(409, {"error": NO_PROJECT})
                 return
             repo, office = self._repo, self._office
+            if path.startswith("/api/upload/"):
+                self._image(unquote(path[len("/api/upload/") :]))
+                return
             if path == "/api/office":
                 view = office.view() if office is not None else office_view_from_log(repo)
                 self._json(200, view.model_dump(mode="json"))
