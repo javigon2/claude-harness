@@ -6,7 +6,9 @@ POST endpoints, the chat POST endpoints (POST /api/chat/{start,message,close}), 
 POST endpoints (POST /api/run/{resume,stop,launch,options}) and the Orchestrator POST endpoints
 (POST /api/orchestrator/{message,new}) and POST /api/upload (raw image bytes), each behind
 the Host, Origin and token checks, a JSON-only body of at most 64 KB (the upload: raw image
-bytes, at most 8 MB), and a strict per-route body schema.
+bytes, at most 8 MB), and a strict per-route body schema. The message routes (planner
+start with a description, planner message, chat start, chat message, orchestrator message)
+take an optional `images` list of uploaded image ids (400 when malformed or unknown).
 
 Given a `Host` instead (the launcher) the project is not fixed: each request works on the
 Host's current project and Office, answers 409 `NO_PROJECT` when none is open, and the
@@ -52,6 +54,7 @@ from harness.ui.uploads import (
     MAX_IMAGE_BYTES,
     TOO_LARGE,
     UploadError,
+    check_image_ids,
     image_path,
     store_image,
 )
@@ -126,10 +129,13 @@ def _check_body(route: str, body: object) -> dict:
     """The body of a POST to /api/planner/<route> or /api/run/<route>, or _BadBody. Exactly
     the allowed keys: start {description}, {description, route} or {from_draft: true};
     message {text}; stage {stage} (an int of at least 1); launch {plan_path}; options
-    {review, max_parallel, max_cost, fake}; implement, next-stage, resume and stop {}."""
+    {review, max_parallel, max_cost, fake}; implement, next-stage, resume and stop {}.
+    start with a description and message also accept an optional `images`."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
+    if route == "message" or (route == "start" and "description" in keys):
+        keys.discard("images")
     if route == "start":
         if keys == {"description", "route"}:
             _text_field(body, "description")
@@ -184,10 +190,12 @@ def _id_field(body: dict, key: str) -> str:
 def _check_chat_body(route: str, body: object) -> dict:
     """The body of a POST to /api/chat/<route>, or _BadBody. Exactly the allowed keys:
     start {tier, text} or {tier, text, run_id, task_id}; message {chat_id, text};
-    close {chat_id}."""
+    close {chat_id}. start and message also accept an optional `images`."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
+    if route in ("start", "message"):
+        keys.discard("images")
     if route == "start":
         if keys not in ({"tier", "text"}, {"tier", "text", "run_id", "task_id"}):
             raise _BadBody("send exactly: tier, text (and optionally run_id, task_id)")
@@ -211,11 +219,13 @@ def _check_chat_body(route: str, body: object) -> dict:
 
 def _check_orch_body(route: str, body: object) -> dict:
     """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
-    keys: message {text}; new {}; explain {who} ("orchestrator" or "opus")."""
+    keys: message {text} with an optional `images`; new {}; explain {who} ("orchestrator" or
+    "opus")."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
     if route == "message":
+        keys.discard("images")
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
@@ -536,6 +546,13 @@ def make_handler(
             if office is None:
                 self._json(409, {"error": NO_PROJECT})
                 return
+            images: list[str] = []
+            if "images" in body:
+                try:
+                    images = check_image_ids(self._repo, body["images"])
+                except ValueError as err:
+                    self._json(400, {"error": str(err)})
+                    return
             try:
                 if kind == "chat":
                     if route == "start":
@@ -544,9 +561,10 @@ def make_handler(
                             body["text"],
                             run_id=body.get("run_id"),
                             task_id=body.get("task_id"),
+                            images=images,
                         )
                     elif route == "message":
-                        office.chats.message(body["chat_id"], body["text"])
+                        office.chats.message(body["chat_id"], body["text"], images=images)
                     else:
                         office.chats.close_chat(body["chat_id"])
                 elif kind == "run":
@@ -563,7 +581,7 @@ def make_handler(
                         self._json(200, office.explain_error(body["who"]))
                         return
                     if route == "message":
-                        office.orchestrator.message(body["text"])
+                        office.orchestrator.message(body["text"], images=images)
                     else:
                         office.orchestrator.new_thread()
                 elif route == "start":
@@ -571,9 +589,10 @@ def make_handler(
                         description=body.get("description"),
                         from_draft=body.get("from_draft") is True,
                         route=body.get("route", "project"),
+                        images=images,
                     )
                 elif route == "message":
-                    office.message(body["text"])
+                    office.message(body["text"], images=images)
                 elif route == "implement":
                     office.implement()
                 elif route == "stage":
