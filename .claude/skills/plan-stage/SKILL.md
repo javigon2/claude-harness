@@ -41,7 +41,9 @@ yourself and record it as a `decision` item in the `context` of each order it af
 
 5. **Write each order.** For every order:
    - Write `acceptance` first: commands that fail before the work and pass after.
-     Usually the order's own new test file, then the full test suite, then the linter.
+     Usually the order's own new test file, then the linter. Never the whole test suite: the
+     user runs it on demand (the page's Run tests button), and the harness drops bare
+     whole-suite commands from `acceptance`.
      Every test file used in acceptance and created by the order is in `files_owned`.
    - Fill `context` with literal text, never "see X":
      - excerpts of existing code the worker calls or edits, with `path, lines a-b` labels

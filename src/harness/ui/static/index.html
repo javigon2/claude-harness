@@ -14,6 +14,7 @@ header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding
 #left { overflow: auto; max-height: calc(100vh - 80px); min-width: 0; }
 #right { min-width: 0; }
 @media (max-width: 900px) { #layout { grid-template-columns: 1fr; } #left { max-height: none; } }
+#tests-out { margin: 0; padding: 8px 14px; max-height: 240px; overflow: auto; font-size: 12px; background: #f4f4f4; border-bottom: 1px solid #ccc; white-space: pre-wrap; }
 .chip { border: 1px solid #ccc; border-radius: 10px; padding: 1px 8px; font-size: 13px; background: #f4f4f4; }
 .phase { font-weight: 600; padding: 1px 8px; border-radius: 4px; }
 .phase-running { background: #dbeafe; color: #1e40af; }
@@ -448,7 +449,10 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-dashboard" type="button" class="hidden">Dashboard</button>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
+  <button id="btn-run-tests" type="button" class="hidden" title="Run the project's whole test suite now">Run tests</button>
+  <span id="tests-status" class="chip hidden"></span>
 </header>
+<pre id="tests-out" class="hidden" aria-label="Test output"></pre>
 <div id="banner"></div>
 <main id="layout">
   <section id="left">
@@ -1841,6 +1845,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     setHidden('run-options', !interactive);
     setHidden('btn-plans', !interactive);
     setHidden('btn-report', !interactive);
+    setHidden('btn-run-tests', !interactive);
     setHidden('btn-dashboard', !interactive);
     var opts = o.run_options || {};
     var active = document.activeElement;
@@ -1854,6 +1859,50 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     var stop = typeof o.stoppable_run === 'string' ? o.stoppable_run : null;
     setHidden('btn-stop-run', !interactive || !stop);
     byId('btn-stop-run').setAttribute('title', stop ? 'Stop run ' + stop : '');
+  }
+
+  // ---- Run tests: the whole suite runs only when asked, here
+  var testsRunning = false;
+
+  function showTests(t) {
+    var status = t && t.status ? String(t.status) : 'idle';
+    var chip = byId('tests-status');
+    var out = byId('tests-out');
+    var btn = byId('btn-run-tests');
+    testsRunning = status === 'running';
+    btn.disabled = testsRunning;
+    if (status === 'idle') {
+      chip.classList.add('hidden');
+      out.classList.add('hidden');
+      return;
+    }
+    var secs = typeof t.duration_s === 'number' ? ' · ' + t.duration_s.toFixed(0) + ' s' : '';
+    var label = status === 'running' ? 'Tests running' : status === 'passed' ? 'Tests passed' : 'Tests failed';
+    chip.textContent = label + secs + (t.summary && status !== 'running' ? ' · ' + String(t.summary) : '');
+    chip.classList.remove('hidden');
+    out.textContent = t.output ? String(t.output) : '';
+    out.classList.toggle('hidden', status !== 'failed' || !t.output);
+  }
+
+  function pollTests() {
+    fetch('/api/tests').then(function (r) { return r.json(); }).then(showTests).catch(function () {});
+  }
+
+  function wireTests() {
+    byId('btn-run-tests').addEventListener('click', function () {
+      api('/api/tests/run', {}).then(function (res) {
+        if (res.ok && res.data && res.data.tests) { showTests(res.data.tests); pollTests(); return; }
+        var chip = byId('tests-status');
+        chip.textContent = (res.data && res.data.error) ? String(res.data.error) : 'Could not start the tests (HTTP ' + res.status + ')';
+        chip.classList.remove('hidden');
+      }).catch(function () {
+        var chip = byId('tests-status');
+        chip.textContent = 'Connection lost; try again.';
+        chip.classList.remove('hidden');
+      });
+    });
+    if (interactive) pollTests();
+    setInterval(function () { if (testsRunning) pollTests(); }, 2000);
   }
 
   function wireOptions() {
@@ -2570,6 +2619,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   wireAttach();
   wireProject();
   wireOptions();
+  wireTests();
   wirePlans();
   byId('btn-why-close').addEventListener('click', hideWhy);
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });

@@ -1,6 +1,7 @@
 """Load a plan file and check it: ids, dependencies, cycles, ownership, acceptance."""
 
 import json
+import re
 from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
@@ -10,6 +11,20 @@ from harness.models import Plan
 
 class PlanError(ValueError):
     """The plan file is invalid. The message says why."""
+
+
+# `pytest`, `uv run pytest -q`, `python -m pytest -x`: pytest with only flags, no test path
+_WHOLE_SUITE = re.compile(r"^(?:uv run |python -m )?(?:pytest|py\.test)(?:\s+-\S+)*\s*$")
+
+
+def drop_whole_suite(plan: Plan) -> None:
+    """Remove bare whole-suite pytest commands from every order's acceptance, so agents run
+    only targeted checks (the full suite runs on demand from the page). An order whose only
+    command is a whole-suite one keeps it, because acceptance cannot be empty."""
+    for order in plan.orders:
+        kept = [c for c in order.acceptance if not _WHOLE_SUITE.match(c.strip())]
+        if kept:
+            order.acceptance = kept
 
 
 def load_plan(path: Path) -> Plan:
@@ -22,6 +37,7 @@ def load_plan(path: Path) -> Plan:
     except ValidationError as err:
         raise PlanError(f"invalid plan: {err}") from err
     validate_plan(plan)
+    drop_whole_suite(plan)
     return plan
 
 

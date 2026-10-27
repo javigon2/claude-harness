@@ -100,3 +100,28 @@ def test_load_plan_missing_stage(tmp_path: Path):
     path.write_text(json.dumps({"orders": [_order("a")]}), encoding="utf-8")
     with pytest.raises(PlanError, match="invalid plan"):
         load_plan(path)
+
+
+def test_load_plan_drops_whole_suite_commands(tmp_path: Path):
+    order = _order("a")
+    order["acceptance"] = [
+        "uv run pytest tests/test_a.py -q",
+        "uv run pytest -q",
+        "pytest",
+        "python -m pytest -x",
+        "uv run ruff check src tests",
+    ]
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"stage": "s", "orders": [order]}))
+    assert load_plan(path).orders[0].acceptance == [
+        "uv run pytest tests/test_a.py -q",
+        "uv run ruff check src tests",
+    ]
+
+
+def test_load_plan_keeps_a_lone_whole_suite_command(tmp_path: Path):
+    order = _order("a")
+    order["acceptance"] = ["uv run pytest -q"]
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"stage": "s", "orders": [order]}))
+    assert load_plan(path).orders[0].acceptance == ["uv run pytest -q"]

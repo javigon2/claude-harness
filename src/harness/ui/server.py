@@ -49,6 +49,7 @@ from harness.ui.orchestrator import OrchestratorConflict
 from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
 from harness.ui.requests import list_requests, request_thread, request_title_of_run, run_titles
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
+from harness.ui.testrun import TestRunConflict, runner_for
 from harness.ui.uploads import (
     IMAGE_TYPES,
     MAX_IMAGE_BYTES,
@@ -498,6 +499,8 @@ def make_handler(
                 kind, route, known = "server", "restart", True
             elif path == "/api/upload":
                 kind, route, known = "upload", "", True
+            elif path == "/api/tests/run":
+                kind, route, known = "tests", "run", True
             else:
                 known = False
             if not known:
@@ -548,6 +551,17 @@ def make_handler(
             if kind in ("project", "server"):
                 assert host is not None
                 self._project_post(host, route, body)
+                return
+            if kind == "tests":
+                if self._no_project:
+                    self._json(409, {"error": NO_PROJECT})
+                    return
+                try:
+                    started = runner_for(self._repo).start()
+                except TestRunConflict as err:
+                    self._json(409, {"error": str(err)})
+                    return
+                self._json(200, {"ok": True, "tests": started})
                 return
             office = self._office
             if office is None:
@@ -713,6 +727,9 @@ def make_handler(
             repo, office = self._repo, self._office
             if path.startswith("/api/upload/"):
                 self._image(unquote(path[len("/api/upload/") :]))
+                return
+            if path == "/api/tests":
+                self._json(200, runner_for(repo).view())
                 return
             if path == "/api/office":
                 view = office.view() if office is not None else office_view_from_log(repo)
