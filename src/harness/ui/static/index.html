@@ -701,6 +701,121 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     input.type = 'file';
     return input.files !== undefined && input.files !== null;
   }
+  var uploading = {};
+
+  function uploadImage(file) {
+    // resolves {ok: true, id} or {ok: false, error}; never rejects
+    var failed = {ok: false, error: 'upload failed.'};
+    return fetch('/api/upload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/octet-stream', 'X-Harness-Token': token},
+      body: file
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = JSON.parse(t); } catch (e) { data = null; }
+        if (r.ok && data && typeof data.id === 'string') return {ok: true, id: data.id};
+        if (data && typeof data.error === 'string') return {ok: false, error: data.error};
+        return failed;
+      });
+    }).then(null, function () { return failed; });
+  }
+  function idsOf(id) {
+    return (pending[id] || []).map(function (p) { return p.id; });
+  }
+  function clearPending(id) {
+    pending[id] = [];
+    renderThumbs(id);
+  }
+  function renderThumbs(id) {
+    var list = byId(id + '-thumbs');
+    var items = pending[id] || [];
+    list.replaceChildren();
+    items.forEach(function (p) {
+      var li = document.createElement('li');
+      li.className = 'thumb';
+      var img = document.createElement('img');
+      img.src = '/api/upload/' + encodeURIComponent(p.id);
+      img.alt = p.name;
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'thumb-x';
+      x.textContent = '×';
+      x.setAttribute('aria-label', 'Remove ' + p.name);
+      x.addEventListener('click', function () {
+        pending[id] = (pending[id] || []).filter(function (q) { return q !== p; });
+        renderThumbs(id);
+      });
+      li.appendChild(img);
+      li.appendChild(x);
+      list.appendChild(li);
+    });
+    list.className = items.length ? 'thumbs' : 'thumbs hidden';
+  }
+  function addFiles(id, files) {
+    var msg = byId(COMPOSERS[id]);
+    msg.textContent = '';
+    imageFiles(files).forEach(function (file) {
+      var name = file.name ? String(file.name) : 'image';
+      var reason = refuseReason(file, pending[id].length + uploading[id]);
+      if (reason) { msg.textContent = reason; return; }
+      uploading[id]++;
+      uploadImage(file).then(function (res) {
+        uploading[id]--;
+        if (res.ok) {
+          var dup = pending[id].some(function (p) { return p.id === res.id; });
+          if (!dup) pending[id].push({id: res.id, name: name});
+          renderThumbs(id);
+        } else {
+          msg.textContent = name + ': ' + res.error;
+        }
+      });
+    });
+  }
+  function wireAttach() {
+    if (!interactive || !attachSupported(window)) return;
+    Object.keys(COMPOSERS).forEach(function (id) {
+      pending[id] = [];
+      uploading[id] = 0;
+      var box = document.querySelector('.attach[data-for="' + id + '"]');
+      if (box) box.classList.remove('hidden');
+      var input = byId(id + '-file');
+      var area = byId(id);
+      input.addEventListener('change', function () {
+        addFiles(id, input.files);
+        input.value = '';
+      });
+      byId(id + '-attach').addEventListener('click', function () { input.click(); });
+      if ('ondrop' in area) {
+        area.addEventListener('dragover', function (e) {
+          e.preventDefault();
+          area.classList.add('drop-over');
+        });
+        area.addEventListener('dragleave', function () { area.classList.remove('drop-over'); });
+        area.addEventListener('drop', function (e) {
+          e.preventDefault();
+          area.classList.remove('drop-over');
+          addFiles(id, e.dataTransfer ? e.dataTransfer.files : null);
+        });
+      }
+      area.addEventListener('paste', function (e) {
+        var cd = e.clipboardData;
+        var files = imageFiles(cd ? (cd.files && cd.files.length ? cd.files : cd.items) : null);
+        if (files.length) {
+          e.preventDefault();
+          addFiles(id, files);
+        }
+      });
+    });
+  }
+  function uploadWait(id, msgId) {
+    // true (and says why) while images of this composer are still uploading
+    if (uploading[id] > 0) {
+      byId(msgId).textContent = 'Wait for the images to finish uploading.';
+      return true;
+    }
+    return false;
+  }
 
   function hashId() {
     var h = location.hash.replace(/^#/, '');
@@ -1159,9 +1274,11 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     byId('btn-orch-send').addEventListener('click', function () {
       var text = textOf('orch-text');
       if (!text) { byId('orch-msg').textContent = 'Write a message first.'; return; }
+      if (uploadWait('orch-text', 'orch-msg')) return;
       var req = orchSend(office ? office.orchestrator : null, byId('orch-route').value, text);
-      act(req.path, req.body, function () {
+      act(req.path, withImages(req.body, idsOf('orch-text')), function () {
         byId('orch-text').value = '';
+        clearPending('orch-text');
         byId('orch-route').value = 'orchestrator';
         if (req.path === '/api/planner/start') showOpus();
       }, 'orch-msg');
@@ -1413,14 +1530,22 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   function send(id) {
     var text = textOf(id);
     if (!text) { byId('office-msg').textContent = 'Write a message first.'; return; }
-    act('/api/planner/message', {text: text}, function () { byId(id).value = ''; });
+    if (uploadWait(id, 'office-msg')) return;
+    act('/api/planner/message', withImages({text: text}, idsOf(id)), function () {
+      byId(id).value = '';
+      clearPending(id);
+    });
   }
 
   function wireComposer() {
     byId('btn-start').addEventListener('click', function () {
       var text = textOf('desc');
       if (!text) { byId('office-msg').textContent = 'Describe the project first.'; return; }
-      act('/api/planner/start', {description: text, route: byId('route').value}, function () { byId('desc').value = ''; });
+      if (uploadWait('desc', 'office-msg')) return;
+      act('/api/planner/start', withImages({description: text, route: byId('route').value}, idsOf('desc')), function () {
+        byId('desc').value = '';
+        clearPending('desc');
+      });
     });
     byId('btn-send').addEventListener('click', function () { send('answer'); });
     byId('btn-continue').addEventListener('click', function () { send('continue'); });
@@ -1551,8 +1676,12 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     byId('btn-chat-send').addEventListener('click', function () {
       var text = textOf('chat-text');
       if (!text) { byId('chat-msg').textContent = 'Write a message first.'; return; }
+      if (uploadWait('chat-text', 'chat-msg')) return;
       var req = chatSend(currentChat(), chatTier, text, chatSeed);
-      act(req.path, req.body, function () { byId('chat-text').value = ''; }, 'chat-msg');
+      act(req.path, withImages(req.body, idsOf('chat-text')), function () {
+        byId('chat-text').value = '';
+        clearPending('chat-text');
+      }, 'chat-msg');
     });
     byId('btn-tl-chat').addEventListener('click', function () {
       var t = findTask(selectedTask);
@@ -2334,6 +2463,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   wireComposer();
   wireChat();
   wireOrch();
+  wireAttach();
   wireProject();
   wireOptions();
   wirePlans();
