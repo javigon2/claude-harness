@@ -72,7 +72,7 @@ POST_ROUTES = ("start", "message", "implement", "next-stage", "stage")
 CHAT_ROUTES = ("start", "message", "close")
 RUN_ROUTES = ("resume", "stop", "launch", "options")
 MAX_PLAN_PATH_CHARS = 500
-ORCH_ROUTES = ("message", "new")
+ORCH_ROUTES = ("message", "new", "explain")
 PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
 MAX_PATH_CHARS = 4096
 ROUTE_CHOICES = ("auto", "quick", "project")
@@ -211,7 +211,7 @@ def _check_chat_body(route: str, body: object) -> dict:
 
 def _check_orch_body(route: str, body: object) -> dict:
     """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
-    keys: message {text}; new {}."""
+    keys: message {text}; new {}; explain {who} ("orchestrator" or "opus")."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
@@ -219,6 +219,11 @@ def _check_orch_body(route: str, body: object) -> dict:
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
+    elif route == "explain":
+        if keys != {"who"}:
+            raise _BadBody("send exactly: who")
+        if body["who"] not in ("orchestrator", "opus"):
+            raise _BadBody("who must be orchestrator or opus")
     elif keys:
         raise _BadBody("this endpoint takes no fields")
     return body
@@ -554,6 +559,9 @@ def make_handler(
                     else:
                         office.set_run_options(RunOptions.model_validate(body, strict=True))
                 elif kind == "orchestrator":
+                    if route == "explain":
+                        self._json(200, office.explain_error(body["who"]))
+                        return
                     if route == "message":
                         office.orchestrator.message(body["text"])
                     else:

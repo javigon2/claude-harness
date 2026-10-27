@@ -1304,7 +1304,7 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
         + "var office = null, interactive = true, runView = null;\n"
         + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
         + "var chatTier = null, chatDesks = {}, lastHandoff = null;\n"
-        + "function focusComposer() {}\n"
+        + "function focusComposer() {}\nfunction explainFailure() {}\n"
         + _chat_section(text)
         + _classroom_section(text)
         + DESKS_SCENARIO
@@ -2008,3 +2008,13 @@ def test_picker_options_labels_and_run_sub_picker(tmp_path):
     assert got[5] == ["orch-2", [["r2", "Run 2 · r2"], ["r1", "Run 1 · r1"]], "r1", False]
     assert got[6] == ["orch-1", True]
     assert got[7] == "old"
+
+
+def test_failed_desks_open_a_plain_english_summary():
+    text = _text()
+    assert 'id="why" class="hidden"' in text
+    assert '<button id="btn-why-close" type="button">Dismiss</button>' in text
+    assert "/api/orchestrator/explain" in text
+    assert "explainFailure('orchestrator'" in text and "explainFailure('opus'" in text
+    assert "byId('why').scrollIntoView(" in text
+    assert "#why:not" not in text and not re.search(r"#why \{[^}]*display:", text)

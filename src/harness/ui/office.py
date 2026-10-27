@@ -52,6 +52,7 @@ from harness.state import STATE_FILE, StateError, latest_run, load_state, new_ru
 from harness.titles import ensure_request_title, ensure_title
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
+from harness.ui.explain import ErrorExplainer
 from harness.ui.markdown import parse_markdown
 from harness.ui.orchestrator import (
     HandoffRefused,
@@ -486,6 +487,7 @@ class Office:
         orchestrator_session_factory: SessionFactory | None = None,
         titler: Callable[[Path, str], object] | None = None,
         request_titler: Callable[[Path, str, str], object] | None = None,
+        error_explainer: Callable[[str], str] | None = None,
     ) -> None:
         self.auto_advance = auto_advance
         self._resume_stamp: int | None = None
@@ -509,6 +511,12 @@ class Office:
             request_titler
             if request_titler is not None
             else (None if launcher else self._default_request_titler)
+        )
+        # a plain-English summary of a failure, asked for by clicking a failed desk
+        self._explain = (
+            error_explainer
+            if error_explainer is not None
+            else ErrorExplainer(self.repo, use_model=not fake and not launcher).explain
         )
         if session_factory is not None:
             self._factory: SessionFactory = session_factory
@@ -1211,6 +1219,18 @@ class Office:
         if options.max_cost is not None:
             argv += ["--max-cost", str(options.max_cost)]
         return argv
+
+    def explain_error(self, who: str) -> dict[str, str]:
+        """{error, summary} for the failed desk `who` ("orchestrator" or "opus"): the raw
+        reason and a plain-English summary of it (cached per reason). Raises OfficeConflict
+        when that desk has not failed."""
+        if who == "orchestrator":
+            error = self.orchestrator.view().error
+        else:
+            error = self.view().error
+        if not error:
+            raise OfficeConflict("Nothing has failed there.")
+        return {"error": error, "summary": self._explain(error)}
 
     def _default_titler(self, repo: Path, run_id: str) -> None:
         ensure_title(repo, run_id, use_model=not self.fake)

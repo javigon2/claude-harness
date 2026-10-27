@@ -169,6 +169,10 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
 #orch-view button, #past-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #past-view { display: none; }
+#why { border: 1px solid #dc2626; background: #fef2f2; border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
+#why p { margin: 6px 0; }
+#why-raw { font-size: 12px; overflow-wrap: anywhere; }
+#why button { font: inherit; padding: 4px 12px; cursor: pointer; background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font-weight: 600; }
 #left.past #orch-view:not(.hidden) { display: none; }
 #left.past #orch-view:not(.hidden) + #past-view { display: block; }
 #past-transcript { list-style: none; padding: 0; margin: 0; }
@@ -446,6 +450,12 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
 <div id="banner"></div>
 <main id="layout">
   <section id="left">
+    <div id="why" class="hidden" role="status">
+      <strong id="why-title"></strong>
+      <p id="why-summary"></p>
+      <p id="why-raw" class="muted"></p>
+      <button id="btn-why-close" type="button">Dismiss</button>
+    </div>
     <div id="orch-view">
       <div class="convo-head">
         <strong>Orchestrator</strong>
@@ -643,7 +653,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   var lastAutoRun = null, autoInit = false;
   var shownSession = null, shownCount = 0;
   var forcePrompt = false, lastState = null;
-  var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;
+  var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null, whyWho = null;
   var tlTask = null, tlFirst = null, tlCount = 0, tlAttempt = null, tlLast = null;
   var chatTier = null, chatId = null, chatShown = null, chatCount = 0;
   var chatDesks = {}, lastHandoff = null, chatSeed = null;
@@ -882,7 +892,9 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
 
   function bossClick() {
     showOpus();
+    if (office && office.state === 'failed') explainFailure('opus');
   }
+
 
   function bossDesk() {
     // the Opus agent desk: built once, kept first in the opus row, then updated in place
@@ -924,6 +936,8 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     // the Orchestrator desk: its thread in the left panel, ready to type
     selectTask(null);
     if (interactive) document.getElementById('orch-text').focus();
+    var v = office ? office.orchestrator : null;
+    if (v && v.state === 'failed') explainFailure('orchestrator');
   }
 
   function orchDesk() {
@@ -1552,6 +1566,37 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     }).catch(function () {
       setBusy(false);
       msg.textContent = 'Connection lost; try again.';
+    });
+  }
+
+  var WHY_LABEL = {orchestrator: 'Orchestrator', opus: 'Opus'};
+
+  function whyFailed(who) {
+    // the error text of a failed desk, or '' when that desk has not failed
+    var d = who === 'opus' ? office : (office ? office.orchestrator : null);
+    return d && d.state === 'failed' ? str(d.error) : '';
+  }
+
+  function hideWhy() { whyWho = null; setHidden('why', true); }
+
+  function explainFailure(who) {
+    // a failed desk was clicked: a plain-English summary of its error (one Haiku call, cached
+    // by the server); read-only pages have no POST, so they show the raw error alone
+    var raw = whyFailed(who);
+    whyWho = who;
+    setHidden('why', false);
+    byId('why').scrollIntoView({block: 'start'});  // the left panel may be scrolled to its end
+    byId('why-title').textContent = WHY_LABEL[who] + ' failed';
+    byId('why-raw').textContent = '';
+    if (!interactive) { byId('why-summary').textContent = raw; return; }
+    byId('why-summary').textContent = 'Asking Haiku what went wrong\u2026';
+    api('/api/orchestrator/explain', {who: who}).then(function (res) {
+      if (whyWho !== who) return;
+      if (!res.ok) { byId('why-summary').textContent = (res.data && res.data.error) ? String(res.data.error) : raw; return; }
+      byId('why-summary').textContent = str(res.data.summary);
+      byId('why-raw').textContent = str(res.data.error) === str(res.data.summary) ? '' : str(res.data.error);
+    }).catch(function () {
+      if (whyWho === who) byId('why-summary').textContent = raw;
     });
   }
 
@@ -2200,6 +2245,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     followLaunchedRun();
     followHandoff();
     renderOffice();
+    if (whyWho && !whyFailed(whyWho)) hideWhy();
     renderTranscript(o);
     renderOrch(o.orchestrator);
     renderComposer();
@@ -2497,6 +2543,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   wireProject();
   wireOptions();
   wirePlans();
+  byId('btn-why-close').addEventListener('click', hideWhy);
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
   loadProject();
