@@ -5,7 +5,9 @@ A run is launched from a plan, and the plan came from a planner session whose fi
 the `run_launched` event. `ensure_title` asks Haiku for a 3-7 word title and stores it in
 <repo>/.harness/titles/<run_id>.txt (outside the run directory, so the run's own files are
 untouched). Without a model, or when the call fails, the first words of the request are the
-title. Nothing here raises."""
+title. Requests (a conversation that may launch runs) are titled the same way with
+`ensure_request_title`, keyed by the request id (`orch-…` or `planner-…`) in the same
+folder. Nothing here raises."""
 
 import asyncio
 import re
@@ -160,6 +162,35 @@ def ensure_title(
         if not title:
             return None
         write_title(repo, run_id, title)
+        return title
+    except Exception:
+        return None
+
+
+def ensure_request_title(
+    repo: Path,
+    request_id: str,
+    text: str,
+    *,
+    use_model: bool = True,
+    query_fn: QueryFn | None = None,
+) -> str | None:
+    """Store and return the title of the request `request_id` (first message `text`) unless
+    it already has one. Blocking: run it on a thread. None when there is nothing to name."""
+    try:
+        existing = read_title(repo, request_id)
+        if existing:
+            return existing
+        text = text.strip()[:REQUEST_MAX_CHARS]
+        if not text:
+            return None
+        title = ""
+        if use_model:
+            title = asyncio.run(haiku_title(text, repo, query_fn))
+        title = title or fallback_title(text)
+        if not title:
+            return None
+        write_title(repo, request_id, title)
         return title
     except Exception:
         return None

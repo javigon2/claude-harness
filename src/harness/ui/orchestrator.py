@@ -165,24 +165,32 @@ def _text(payload: dict[str, Any]) -> str | None:
     return t if isinstance(t, str) and t else None
 
 
-def orchestrator_view_from_log(repo: Path) -> OrchestratorView:
+def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> OrchestratorView:
     """The Orchestrator's current thread rebuilt from the planner and chat logs, without
     touching anything. Algorithm in the `decision: orchestrator_view_from_log` context
-    item. Never raises on a missing or partly unreadable log."""
+    item. Never raises on a missing or partly unreadable log.
+
+    With `thread_id` it is that thread instead, open or closed, as a read-only past view:
+    always idle, no holder, and `cost_usd` is that thread's own. An unknown id is the empty
+    view."""
+    wanted = thread_id
     all_planner = read_planner_events(repo)
     events = [e for e in all_planner if e.run_id.startswith("orch-")]
     cost = sum(
-        _cost(e.payload) for e in events if e.type in ("orchestrator_turn", "orchestrator_failed")
+        _cost(e.payload)
+        for e in events
+        if e.type in ("orchestrator_turn", "orchestrator_failed")
+        and (wanted is None or e.run_id == wanted)
     )
     started: Event | None = None
     for e in events:
-        if e.type == "orchestrator_started":
+        if e.type == "orchestrator_started" and (wanted is None or e.run_id == wanted):
             started = e
     if started is None:
         return OrchestratorView(cost_usd=cost)
     thread_id = started.run_id
     thread = [e for e in events if e.run_id == thread_id]
-    if any(e.type == "orchestrator_closed" for e in thread):
+    if wanted is None and any(e.type == "orchestrator_closed" for e in thread):
         return OrchestratorView(cost_usd=cost)
 
     items: list[tuple[datetime, OrchEntry]] = []
@@ -276,7 +284,9 @@ def orchestrator_view_from_log(repo: Path) -> OrchestratorView:
         reason = r if isinstance(r, str) else None
         kind = last_turn.payload.get("target_kind")
         tid = last_turn.payload.get("target_id")
-        if kind == "chat":
+        if wanted is not None:
+            pass  # a past thread has no holder
+        elif kind == "chat":
             for v in chats_from_log(repo):
                 if v.chat_id == tid:
                     if v.state in ("working", "waiting"):
@@ -294,7 +304,9 @@ def orchestrator_view_from_log(repo: Path) -> OrchestratorView:
     last = thread[-1]
     state: OrchState = "idle"
     error: str | None = None
-    if last.type == "orchestrator_user" and _pid_alive(started.payload.get("pid")):
+    if wanted is not None:
+        pass  # a past thread is read only
+    elif last.type == "orchestrator_user" and _pid_alive(started.payload.get("pid")):
         state = "routing"
     elif last.type == "orchestrator_failed":
         state = "failed"
@@ -331,9 +343,12 @@ class Orchestrator:
         fake: bool = False,
         fake_delay: float = 2.0,
         session_factory: OrchSessionFactory | None = None,
+        titler: Callable[[Path, str, str], object] | None = None,
     ) -> None:
-        """Fields in the `decision: Orchestrator fields` context item."""
+        """Fields in the `decision: Orchestrator fields` context item. `titler(repo,
+        thread_id, first_message)` names a new thread; it runs on its own thread."""
         self.repo = Path(repo).resolve()
+        self._titler = titler
         self.chats = chats
         self.opus = opus
         if session_factory is not None:
@@ -407,6 +422,13 @@ class Orchestrator:
                 self._thread_id = new_thread_id()
                 self._log = PlannerLog(self.repo, self._thread_id)
                 self._pid_logged = False
+                if self._titler is not None:
+                    threading.Thread(
+                        target=self._titler,
+                        args=(self.repo, self._thread_id, stripped),
+                        daemon=True,
+                        name=f"title-{self._thread_id}",
+                    ).start()
             if not self._pid_logged:
                 self._emit("orchestrator_started", {"pid": os.getpid()})
                 self._pid_logged = True

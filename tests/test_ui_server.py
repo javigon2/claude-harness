@@ -57,6 +57,7 @@ def test_runs_list(server, tmp_path):
         "runs": ["running1", "happy1", "blocked1"],
         "latest": "running1",
         "titles": {},
+        "requests": [],
     }
 
 
@@ -65,7 +66,7 @@ def test_runs_empty(tmp_path):
     try:
         code, _, body = _get(base + "/api/runs")
         assert code == 200
-        assert json.loads(body) == {"runs": [], "latest": None, "titles": {}}
+        assert json.loads(body) == {"runs": [], "latest": None, "titles": {}, "requests": []}
     finally:
         srv.shutdown()
         srv.server_close()

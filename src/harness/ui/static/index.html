@@ -167,7 +167,17 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-msg { color: #b91c1c; font-weight: 600; }
 #orch-msg:empty { display: none; }
 #orch-text { width: 100%; box-sizing: border-box; font: inherit; margin: 6px 0; }
-#orch-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#orch-view button, #past-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
+#past-view { display: none; }
+#left.past #orch-view:not(.hidden) { display: none; }
+#left.past #orch-view:not(.hidden) + #past-view { display: block; }
+#past-transcript { list-style: none; padding: 0; margin: 0; }
+#past-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #f3f4f6; }
+#past-title { margin: 8px 0 0; }
+#past-title:empty { display: none; }
+#past-msg { color: #b91c1c; font-weight: 600; }
+#past-msg:empty { display: none; }
+header #run-sub-picker { max-width: 220px; }
 #orch-view button:disabled { cursor: default; opacity: 0.55; }
 #project-view { padding: 12px 16px; max-width: 900px; }
 #project-view h2 { margin: 4px 0 8px; font-size: 18px; }
@@ -229,8 +239,8 @@ tbody tr:hover td { background: #e8eef7; }
 .msg-user { background: #e6f4ff; border-color: var(--sn-sky-pale); }
 .msg-agent { background: var(--sn-green-pale); border-color: #a8e69c; }
 button, .btn { font-family: inherit; }
-#composer button, #chat-view button, #orch-view button, #plans-view button, #report-view button, #project-view button { background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font-weight: 600; }
-#composer button:hover:not(:disabled), #chat-view button:hover:not(:disabled), #orch-view button:hover:not(:disabled), #plans-view button:hover:not(:disabled), #report-view button:hover:not(:disabled), #project-view button:hover:not(:disabled) { background: #eaf3f8; }
+#composer button, #chat-view button, #orch-view button, #past-view button, #plans-view button, #report-view button, #project-view button { background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font-weight: 600; }
+#composer button:hover:not(:disabled), #chat-view button:hover:not(:disabled), #orch-view button:hover:not(:disabled), #past-view button:hover:not(:disabled), #plans-view button:hover:not(:disabled), #report-view button:hover:not(:disabled), #project-view button:hover:not(:disabled) { background: #eaf3f8; }
 #btn-orch-send, #btn-send, #btn-start, #btn-chat-send, #btn-implement, #btn-next { background: var(--sn-btn) !important; color: #fff !important; }
 #btn-orch-send:hover:not(:disabled), #btn-send:hover:not(:disabled), #btn-start:hover:not(:disabled), #btn-chat-send:hover:not(:disabled), #btn-implement:hover:not(:disabled), #btn-next:hover:not(:disabled) { background: #155a7b !important; }
 textarea, input[type="text"], input[type="number"], #left select, #right select { border: 1px solid #8a9199; border-radius: 4px; padding: 5px 8px; background: #fff; color: var(--sn-text); }
@@ -313,7 +323,7 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 #dashboard-view button, #report-view button { background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font: inherit; font-weight: 600; padding: 4px 12px; cursor: pointer; }
 /* chat panels (Orchestrator, Opus, worker chats): roomier, easier to read */
 #left { padding-right: 6px; }
-#orch-transcript, #transcript, #chat-transcript { display: flex; flex-direction: column; gap: 14px; margin: 14px 0 18px; }
+#orch-transcript, #past-transcript, #transcript, #chat-transcript { display: flex; flex-direction: column; gap: 14px; margin: 14px 0 18px; }
 .msg { margin: 0; padding: 12px 16px; border-radius: 10px; line-height: 1.6; font-size: 14.5px; max-width: 92%; box-shadow: 0 1px 2px rgba(3, 45, 66, 0.06); }
 .msg-user { align-self: flex-end; border-bottom-right-radius: 3px; }
 .msg-agent, .msg-orch { align-self: flex-start; border-bottom-left-radius: 3px; }
@@ -337,6 +347,67 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 #orch-composer label, #composer label { flex: 1 1 100%; font-weight: 600; }
 #orch-composer button, #composer button, #chat-view button { margin-right: 0 !important; padding: 7px 16px !important; }
 #orch-msg, #office-msg, #chat-msg, #office-note, #chat-note { flex: 1 1 100%; margin: 4px 0 8px; }
+/* chats, lighter: softer type and colour, quieter chrome, more air */
+.msg, .msg .md, .msg-text { font-family: "ServiceNow Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-weight: 400; font-size: 15px; line-height: 1.75; letter-spacing: .1px; color: #2e4350; }
+#orch-transcript, #past-transcript, #transcript, #chat-transcript { gap: 22px; margin: 18px 0 26px; }
+.msg { padding: 14px 20px; border: 1px solid transparent; border-radius: 14px; box-shadow: none; }
+.msg-user { background: #eef5fa; }
+.msg-agent, .msg-orch { background: #f7f9fb; }
+.msg-who { font-size: 10.5px; font-weight: 600; letter-spacing: .9px; color: #8aa0ae; margin-bottom: 8px; }
+.msg .md p { margin: 0 0 14px; }
+.msg .md li { margin: 7px 0; }
+.msg .md ul, .msg .md ol { margin: 8px 0 14px; }
+.msg .md h1, .msg .md h2, .msg .md h3, .msg .md h4 { font-weight: 600; color: var(--sn-navy); margin: 22px 0 10px; }
+.msg .md strong { font-weight: 600; }
+.msg .md code { background: #eaeff3; color: #1c3a4b; padding: 1px 5px; border-radius: 4px; }
+.msg .md pre { background: #f0f4f7; border: 0; border-radius: 10px; padding: 12px 16px; line-height: 1.6; }
+.msg .md blockquote { border-left: 3px solid #cfdbe3; color: #5b7583; }
+.msg .md table { font-size: 13.5px; }
+.msg .md th { background: transparent; color: #5b7583; border-bottom: 1px solid #d5dee4; font-weight: 600; }
+.msg .md td { border-bottom: 1px solid #edf1f4; }
+.convo-head { background: transparent; border: 0; border-bottom: 1px solid #e3e8ec; border-radius: 0; padding: 8px 2px 12px; }
+.convo-head strong { font-weight: 600; font-size: 16px; color: var(--sn-navy); }
+#orch-line, #triage-line, #chat-note, #office-note { color: #7d94a2; font-size: 13px; }
+#chat-progress, #chat-commits, #progress { color: #8aa0ae; font-size: 12px; font-weight: 400; opacity: .9; }
+#orch-composer textarea, #composer textarea, #chat-text { background: #fbfcfd; border: 1px solid #d5dee4; font-size: 15px; line-height: 1.6; }
+#orch-composer textarea:focus, #composer textarea:focus, #chat-text:focus { outline: 2px solid #c2e6ff; border-color: #52b8ff; }
+/* markdown: indentation, emphasis and a dark code view */
+.md ul, .md ol { padding-left: 24px; }
+.md li > ul, .md li > ol { margin: 6px 0 4px; padding-left: 22px; }
+.md ul { list-style: disc; }
+.md ul ul { list-style: circle; }
+.md ul ul ul { list-style: square; }
+.md ol { list-style: decimal; }
+.md ol ol { list-style: lower-alpha; }
+.md ol ol ol { list-style: lower-roman; }
+.md li::marker { color: var(--sn-slate); }
+.md li > p { margin: 0 0 6px; }
+.md strong, .md b { font-weight: 700; color: var(--sn-navy); }
+.md em { font-style: italic; color: #3d5666; }
+.md h1 { font-size: 21px; padding-bottom: 6px; border-bottom: 2px solid var(--sn-green); }
+.md h2 { font-size: 18px; padding-bottom: 4px; border-bottom: 1px solid #dde5ea; }
+.md h3 { font-size: 15.5px; color: var(--sn-slate); }
+.md h4, .md h5, .md h6 { font-size: 14px; text-transform: uppercase; letter-spacing: .6px; color: var(--sn-slate); }
+.md code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.88em; background: #e7eef3; color: #0c3a55; padding: 1px 6px; border-radius: 5px; }
+.md blockquote { margin: 12px 0; padding: 4px 16px; border-left: 3px solid var(--sn-green); background: #f4faf2; color: #3d5666; border-radius: 0 8px 8px 0; }
+.md hr { border: 0; border-top: 1px solid #dde5ea; margin: 18px 0; }
+.md table { border-radius: 8px; }
+.md tbody tr:nth-child(even) td { background: #f6f9fb; }
+.codeblock { margin: 12px 0; border-radius: 10px; overflow: hidden; background: #0b2a3c; box-shadow: 0 1px 3px rgba(3, 45, 66, .18); }
+.code-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: #123a50; }
+.code-lang { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: #8fb3c6; }
+.code-copy { font: inherit; font-size: 11.5px; padding: 2px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,.25); background: transparent; color: #cfe3ee; cursor: pointer; }
+.code-copy:hover { background: rgba(255,255,255,.12); }
+.codeblock pre, .md .codeblock pre { margin: 0; padding: 12px 16px; background: transparent; color: #e6f1f7; font-size: 12.8px; line-height: 1.65; overflow-x: auto; white-space: pre; border: 0; border-radius: 0; }
+.codeblock code, .md .codeblock code { background: transparent; color: inherit; padding: 0; font-size: inherit; }
+.tok-kw { color: #b8a9ff; }
+.tok-str { color: #8ee27c; }
+.tok-num { color: #6cc4ff; }
+.tok-com { color: #6f8fa1; font-style: italic; }
+.tok-diff-add { color: #8ee27c; background: rgba(99, 223, 78, .12); display: inline-block; width: 100%; }
+.tok-diff-del { color: #ff9b9b; background: rgba(255, 107, 107, .13); display: inline-block; width: 100%; }
+.tok-diff-hunk { color: #6cc4ff; }
+.tok-diff-file { color: #9fb6c3; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -345,7 +416,7 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 <body>
 <header>
   <div id="brandbox"><span class="brand"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path fill-rule="evenodd" d="M24 86C8 72 6 56 6 46A44 44 0 0 1 94 46C94 56 92 72 76 86C72 89 67 87 63 83C57 77 43 77 37 83C33 87 28 89 24 86ZM50 26A20 20 0 1 0 50 66A20 20 0 1 0 50 26Z"/></svg>agent harness</span>
-  <div class="run-pick"><label class="run-label" for="run-picker">Run</label><select id="run-picker" aria-label="Run"></select></div></div>
+  <div class="run-pick"><label class="run-label" for="run-picker">Run</label><select id="run-picker" aria-label="Run"></select><select id="run-sub-picker" class="hidden" aria-label="Runs of this request"></select></div></div>
   <span id="phase" class="phase"></span>
   <div id="run-progress-box" class="hidden">
     <div id="run-progress" role="progressbar" aria-label="Run progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="run-progress-fill"></div></div>
@@ -379,6 +450,12 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
         <button id="btn-orch-send" type="button">Send</button>
         <button id="btn-orch-new" type="button">New request</button>
       </div>
+    </div>
+    <div id="past-view">
+      <div id="past-banner"><strong>Past request, read only</strong><button id="btn-past-new" type="button" class="hidden">New request</button></div>
+      <p id="past-title" class="muted"></p>
+      <p id="past-msg" role="alert"></p>
+      <ol id="past-transcript"></ol>
     </div>
     <div id="convo" class="hidden">
       <div class="convo-head">
@@ -537,6 +614,7 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 (function () {
   var picker = document.getElementById('run-picker');
   var runs = [], titles = {}, latest = null, current = null, source = null;
+  var requests = [], pendingNew = false, newBase = null, newBaseThread = null, pastId = null, pastSeq = 0, pickerSig = '';
   var conn = false, problem = null, stopped = null, idle = null;
   var tokenMeta = document.querySelector('meta[name="harness-token"]');
   var modeMeta = document.querySelector('meta[name="harness-mode"]');
@@ -827,6 +905,92 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
   function appendInline(parent, spans) {
     (Array.isArray(spans) ? spans : []).forEach(function (sp) { parent.appendChild(inlineNode(sp)); });
   }
+  // ---- code blocks: a language label, a Copy button and a small in-page highlighter
+  var KW = {
+    py: 'and as assert async await break class continue def del elif else except finally for from global if import in is lambda None nonlocal not or pass raise return self True False try while with yield',
+    js: 'async await break case catch class const continue default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while yield interface type enum',
+    sh: 'if then else elif fi for while do done case esac function in echo cd export source return exit uv git npm pip python pytest ruff',
+    sql: 'select from where group by order having insert into values update set delete create table join left right inner outer on as and or not null limit distinct union',
+    yaml: 'true false null yes no'
+  };
+  var LANG = {python: 'py', py: 'py', javascript: 'js', js: 'js', jsx: 'js', typescript: 'js', ts: 'js', tsx: 'js',
+    json: 'json', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh', sql: 'sql', yaml: 'yaml', yml: 'yaml', diff: 'diff', patch: 'diff'};
+  var COMMENT = {py: '#.*', sh: '#.*', yaml: '#.*', sql: '--.*', js: '\\/\\/.*|\\/\\*[\\s\\S]*?\\*\\/', json: '(?!x)x'};
+  var STRING = {py: '"""[\\s\\S]*?"""|\'\'\'[\\s\\S]*?\'\'\'|"(?:\\\\.|[^"\\\\\\n])*"|\'(?:\\\\.|[^\'\\\\\\n])*\'',
+    js: '"(?:\\\\.|[^"\\\\\\n])*"|\'(?:\\\\.|[^\'\\\\\\n])*\'|`(?:\\\\.|[^`\\\\])*`'};
+  STRING.sh = STRING.yaml = STRING.sql = STRING.json = STRING.js;
+  function tokens(parent, code, kind) {
+    var re = new RegExp('(' + COMMENT[kind] + ')|(' + STRING[kind] + ')|(\\b\\d[\\d_.]*\\b)|([A-Za-z_][A-Za-z0-9_]*)', 'g');
+    var words = {};
+    (KW[kind] || '').split(' ').forEach(function (w) { if (w) words[kind === 'sql' ? w.toLowerCase() : w] = true; });
+    var last = 0, m;
+    while ((m = re.exec(code)) !== null) {
+      if (m[0] === '') { re.lastIndex++; continue; }
+      if (m.index > last) parent.appendChild(document.createTextNode(code.slice(last, m.index)));
+      var cls = null;
+      if (m[1] !== undefined) cls = 'tok-com';
+      else if (m[2] !== undefined) cls = 'tok-str';
+      else if (m[3] !== undefined) cls = 'tok-num';
+      else if (words[kind === 'sql' ? m[4].toLowerCase() : m[4]]) cls = 'tok-kw';
+      parent.appendChild(cls ? el('span', cls, m[0]) : document.createTextNode(m[0]));
+      last = m.index + m[0].length;
+    }
+    if (last < code.length) parent.appendChild(document.createTextNode(code.slice(last)));
+  }
+  function highlightInto(parent, code, lang) {
+    var kind = LANG[String(lang || '').toLowerCase()];
+    if (!kind || code.length > 20000) { parent.appendChild(document.createTextNode(code)); return; }
+    if (kind === 'diff') {
+      code.split('\n').forEach(function (line, i, all) {
+        var cls = null;
+        if (/^(\+\+\+|---)/.test(line)) cls = 'tok-diff-file';
+        else if (line.charAt(0) === '+') cls = 'tok-diff-add';
+        else if (line.charAt(0) === '-') cls = 'tok-diff-del';
+        else if (line.slice(0, 2) === '@@') cls = 'tok-diff-hunk';
+        var text = line + (i < all.length - 1 ? '\n' : '');
+        parent.appendChild(cls ? el('span', cls, text) : document.createTextNode(text));
+      });
+      return;
+    }
+    tokens(parent, code, kind);
+  }
+  function copyText(text, button) {
+    // no timers on this page: the label goes back to "Copy" when the pointer or focus leaves
+    function done(label) {
+      button.textContent = label;
+      if (!button.addEventListener) return;
+      function reset() {
+        button.textContent = 'Copy';
+        button.removeEventListener('mouseleave', reset);
+        button.removeEventListener('blur', reset);
+      }
+      button.addEventListener('mouseleave', reset);
+      button.addEventListener('blur', reset);
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done('Copied'); }, function () { done('Press Ctrl+C'); });
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    done('Press Ctrl+C');
+  }
+  function codeBlock(text, lang) {
+    var box = el('div', 'codeblock');
+    var head = el('div', 'code-head');
+    head.appendChild(el('span', 'code-lang', lang || 'text'));
+    var btn = el('button', 'code-copy', 'Copy');
+    btn.type = 'button';
+    if (btn.addEventListener) btn.addEventListener('click', function () { copyText(text, btn); });
+    head.appendChild(btn);
+    box.appendChild(head);
+    var pre = el('pre');
+    var code = el('code');
+    highlightInto(code, text, lang);
+    pre.appendChild(code);
+    box.appendChild(pre);
+    return box;
+  }
   function renderBlock(b) {
     var type = b && b.type, n, i;
     if (type === 'heading') {
@@ -849,11 +1013,7 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
       });
       return n;
     }
-    if (type === 'code') {
-      n = el('pre');
-      n.appendChild(el('code', null, str(b.text)));
-      return n;
-    }
+    if (type === 'code') return codeBlock(str(b.text), b.lang ? String(b.lang) : '');
     if (type === 'table') {
       n = el('table');
       var head = el('tr');
@@ -951,7 +1111,10 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
       }, 'orch-msg');
     });
     byId('btn-orch-new').addEventListener('click', function () {
-      act('/api/orchestrator/new', {}, null, 'orch-msg');
+      act('/api/orchestrator/new', {}, startNew, 'orch-msg');
+    });
+    byId('btn-past-new').addEventListener('click', function () {
+      act('/api/orchestrator/new', {}, startNew, 'past-msg');
     });
   }
 
@@ -1816,7 +1979,9 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
     var sig = JSON.stringify(o);
     if (sig === officeSig) return;
     officeSig = sig;
+    var before = JSON.stringify(liveIds());
     office = o;
+    if (JSON.stringify(liveIds()) !== before) choose();
     followLaunchedRun();
     followHandoff();
     renderOffice();
@@ -1926,7 +2091,11 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
     runView = null;
     selectTask(null);
     renderBanner();
-    if (!id) return;
+    if (!id) {
+      byId('phase').textContent = '';
+      setHidden('run-progress-box', true);
+      return;
+    }
     source = new EventSource('/api/stream/' + encodeURIComponent(id));
     source.onopen = function () { conn = false; renderBanner(); };
     source.onmessage = function (ev) {
@@ -1944,20 +2113,142 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
     source.onerror = function () { conn = true; renderBanner(); };
   }
 
+  // ---- requests: one dropdown entry per thing the user asked for
+  var STATE_LABEL = {running: 'running', waiting: 'needs you', done: 'done', attention: 'needs attention'};
+
+  function requestLabel(r) {
+    // the title plus a small state marker, as text
+    var t = (r && r.title) ? String(r.title) : str(r ? r.id : null);
+    var s = STATE_LABEL[r ? r.state : null];
+    return s ? t + ' \u00b7 ' + s : t;
+  }
+
+  function runsOf(r) { return (r && Array.isArray(r.runs)) ? r.runs : []; }
+
+  function selection(reqs, runIds, latestRun, h, fresh) {
+    // {request, run} for the URL hash `h`: a request id, or a run id (its request is
+    // selected too). No hash picks the newest request, or none right after "New request";
+    // a request shows its latest run that exists.
+    var req = null, run = null, i;
+    for (i = 0; i < reqs.length; i++) if (reqs[i].id === h) req = reqs[i];
+    if (!req && h) {
+      for (i = 0; i < reqs.length; i++) {
+        if (runsOf(reqs[i]).indexOf(h) >= 0 && runIds.indexOf(h) >= 0) { req = reqs[i]; run = h; break; }
+      }
+    }
+    if (!req && !run && h && runIds.indexOf(h) >= 0) run = h;
+    if (!req && !run && !fresh) req = reqs.length ? reqs[0] : null;
+    if (req && !run) {
+      var rs = runsOf(req).filter(function (x) { return runIds.indexOf(x) >= 0; });
+      run = rs.length ? rs[rs.length - 1] : null;
+    }
+    if (!req && !run && !fresh && !reqs.length) run = latestRun || null;
+    return {request: req, run: run};
+  }
+
+  function emptyText(reqs) { return reqs.length ? 'No run yet for this request' : 'No runs yet'; }
+
+  function liveIds() {
+    // the ids of the conversation the left panel already shows live
+    var o = office && office.orchestrator ? office.orchestrator : null;
+    return {thread: o && o.thread_id ? o.thread_id : null, session: office && office.session_id ? office.session_id : null};
+  }
+
+  function isPast(req, ids) {
+    // a request whose conversation is not the live Orchestrator thread or planner session
+    return !!req && !!office && req.id !== ids.thread && req.id !== ids.session;
+  }
+
+  function startNew() {
+    // "New request": the live thread starts empty; it gets an entry after its first message
+    var ids = liveIds();
+    pendingNew = true;
+    newBase = ids.session;
+    newBaseThread = ids.thread;
+    if (hashId()) location.hash = ''; else choose();
+  }
+
+  function renderPast(req) {
+    var id = isPast(req, liveIds()) ? req.id : null;
+    setHidden('btn-past-new', !interactive);
+    if (id === pastId) return;
+    pastId = id;
+    byId('left').classList.toggle('past', id !== null);
+    var list = byId('past-transcript');
+    list.replaceChildren();
+    byId('past-msg').textContent = '';
+    byId('past-title').textContent = id ? requestLabel(req) : '';
+    var seq = ++pastSeq;
+    if (id) {
+      fetch('/api/orchestrator/thread/' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (v) {
+        if (seq !== pastSeq) return;
+        var entries = (v && Array.isArray(v.transcript)) ? v.transcript : [];
+        entries.forEach(function (e) { list.appendChild(msgNode(e, e.role === 'agent' ? str(e.who) : null)); });
+        if (!entries.length) byId('past-msg').textContent = 'Nothing was saved for this request.';
+      }).catch(function () {
+        if (seq === pastSeq) byId('past-msg').textContent = 'Could not load this request.';
+      });
+    }
+    selectTask(null);
+  }
+
+  function renderPickers(sel) {
+    // the request picker holds its value; the second picker lists the runs of a request that has several
+    var req = sel.request;
+    picker.value = req ? req.id : (sel.run || '');
+    var rs = runsOf(req).filter(function (x) { return runs.indexOf(x) >= 0; });
+    var sub = byId('run-sub-picker');
+    var many = rs.length > 1;
+    setHidden('run-sub-picker', !many);
+    if (!many) { sub.replaceChildren(); return; }
+    var key = rs.join('|');
+    if (sub.getAttribute('data-key') !== key) {
+      sub.setAttribute('data-key', key);
+      var opts = rs.slice().reverse().map(function (r, i) {
+        var o = el('option', null, 'Run ' + (rs.length - i) + ' \u00b7 ' + r);
+        o.value = r;
+        return o;
+      });
+      sub.replaceChildren.apply(sub, opts);
+    }
+    sub.value = sel.run || '';
+  }
+
   function choose() {
+    var ids = liveIds();
     var h = hashId();
-    var id = (h && runs.indexOf(h) >= 0) ? h : latest;
-    if (!id) id = null;
-    if (id !== current) open(id);
-    picker.value = id || '';
+    if (h) pendingNew = false;
+    if (pendingNew) {
+      // the first message of the new request gives it an entry: select that
+      var made = null;
+      requests.forEach(function (r) {
+        if ((ids.thread && ids.thread !== newBaseThread && r.id === ids.thread) || (ids.session && ids.session !== newBase && r.id === ids.session)) made = r;
+      });
+      if (made) { pendingNew = false; location.hash = '#' + encodeURIComponent(made.id); return; }
+    }
+    var sel = selection(requests, runs, latest, h, pendingNew);
+    renderPast(sel.request);
+    if (sel.run !== current) open(sel.run);
+    renderPickers(sel);
+    var none = !sel.run;
+    byId('empty').textContent = emptyText(requests);
+    document.getElementById('empty').className = none ? '' : 'hidden';
+    document.getElementById('content').className = none ? 'hidden' : '';
   }
 
   function renderRuns() {
-    var empty = runs.length === 0;
-    document.getElementById('empty').className = empty ? '' : 'hidden';
-    document.getElementById('content').className = empty ? 'hidden' : '';
+    var empty = runs.length === 0 && requests.length === 0;
     document.querySelector('header').className = (empty && !interactive) ? 'hidden' : '';
-    var opts = runs.map(function (r) { var o = el('option', null, titles[r] || r); o.value = r; o.title = r; return o; });
+    var inRequest = {};
+    requests.forEach(function (r) { runsOf(r).forEach(function (x) { inRequest[x] = true; }); });
+    var items = [];
+    if (pendingNew) items.push({value: '', label: 'New request'});
+    requests.forEach(function (r) { items.push({value: r.id, label: requestLabel(r), title: r.first_message || r.id}); });
+    runs.forEach(function (r) { if (!inRequest[r]) items.push({value: r, label: titles[r] || r, title: r}); });
+    var sig = JSON.stringify(items);
+    if (sig === pickerSig) return;
+    pickerSig = sig;
+    var opts = items.map(function (it) { var o = el('option', null, it.label); o.value = it.value; o.title = it.title || it.label; return o; });
     picker.replaceChildren.apply(picker, opts);
   }
 
@@ -1967,13 +2258,20 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
       titles = (d.titles && typeof d.titles === 'object') ? d.titles : {};
+      requests = Array.isArray(d.requests) ? d.requests : [];
       renderRuns();
       followLaunchedRun();
       choose();
     }).catch(function () { /* next poll retries */ });
   }
 
-  picker.addEventListener('change', function () { location.hash = '#' + encodeURIComponent(picker.value); });
+  picker.addEventListener('change', function () {
+    if (picker.value === '') { startNew(); return; }
+    location.hash = '#' + encodeURIComponent(picker.value);
+  });
+  byId('run-sub-picker').addEventListener('change', function () {
+    location.hash = '#' + encodeURIComponent(byId('run-sub-picker').value);
+  });
   window.addEventListener('hashchange', choose);
   renderRuns();
   renderOffice();

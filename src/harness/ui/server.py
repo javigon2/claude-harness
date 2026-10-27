@@ -27,7 +27,6 @@ from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
 from harness.report import report_data, report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
-from harness.titles import read_title, read_titles
 from harness.ui.chat import CHAT_TIERS, ChatConflict
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
 from harness.ui.host import NO_PROJECT, Host, HostConflict
@@ -44,6 +43,7 @@ from harness.ui.office import (
 )
 from harness.ui.orchestrator import OrchestratorConflict
 from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
+from harness.ui.requests import list_requests, request_thread, request_title_of_run, run_titles
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.view import build_view, list_runs
 
@@ -637,14 +637,23 @@ def make_handler(
                 except (StateError, OSError, ValueError) as err:
                     self._json(500, {"error": str(err)})
                     return
+                requests = list_requests(repo)
                 self._json(
                     200,
                     {
                         "runs": runs,
                         "latest": runs[0] if runs else None,
-                        "titles": read_titles(repo, runs),
+                        "titles": run_titles(repo, runs, requests),
+                        "requests": [r.model_dump(mode="json") for r in requests],
                     },
                 )
+                return
+            if path.startswith("/api/orchestrator/thread/"):
+                thread = request_thread(repo, unquote(path[len("/api/orchestrator/thread/") :]))
+                if thread is None:
+                    self._json(404, {"error": "unknown request"})
+                    return
+                self._json(200, thread.model_dump(mode="json"))
                 return
             for prefix, stream in (("/api/run/", False), ("/api/stream/", True)):
                 if path.startswith(prefix):
@@ -725,7 +734,7 @@ def make_handler(
                     "status": status_text(state),
                     "report": report_text(state),
                     "data": report_data(state),
-                    "title": read_title(repo, run_id),
+                    "title": request_title_of_run(repo, run_id),
                 },
             )
 

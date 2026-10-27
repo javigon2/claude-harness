@@ -328,7 +328,9 @@ def test_markdown_blocks_render_to_the_expected_dom(tmp_path):
         "<ul><li><p>a</p><ul><li><p>child</p></li></ul></li><li><p>b</p></li></ul>"
         "<table><thead><tr><th>h</th><th>i</th></tr></thead>"
         "<tbody><tr><td><x></td><td><code>y</code></td></tr></tbody></table>"
-        "<pre><code><b></code></pre><blockquote><p>q</p></blockquote><hr></hr></div>"
+        '<div class="codeblock"><div class="code-head"><span class="code-lang">text</span>'
+        '<button class="code-copy">Copy</button></div><pre><code><b></code></pre></div>'
+        "<blockquote><p>q</p></blockquote><hr></hr></div>"
     )
 
 
@@ -1815,3 +1817,194 @@ console.log(JSON.stringify(out));
     assert got[2]["eta"] is None and got[2]["pct"] == 100
     assert got[3]["total"] == 0 and got[3]["pct"] == 0
     assert got[4] == ["under a minute", "about 5 min", "about 2h 5m"]
+
+
+def test_code_highlighter(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    text = _text()
+    el = re.search(r"  function el\(.*?\n  \}", text, re.S)
+    assert el
+    start = text.index("  // ---- code blocks")
+    end = text.index("  function renderBlock(")
+    script = (
+        STUB + el.group(0) + "\n" + text[start:end]
+        + """
+function show(code, lang) {
+  var p = mk('code');
+  highlightInto(p, code, lang);
+  return ser(p);
+}
+console.log(JSON.stringify([
+  show('def f(x):\\n    return "a" + 1  # note', 'python'),
+  show('+new\\n-old\\n@@ -1 +1 @@\\n ctx', 'diff'),
+  show('<b> & "x"', ''),
+  show('select * from t', 'SQL'),
+  show('x = 1', 'brainfuck'),
+]));
+"""
+    )  # fmt: skip
+    path = tmp_path / "hl.js"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.run([node, str(path)], capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    py, diff, plain, sql, unknown = json.loads(proc.stdout.decode().strip())
+    assert '<span class="tok-kw">def</span> f(x):' in py
+    assert '<span class="tok-kw">return</span>' in py
+    assert '<span class="tok-str">"a"</span>' in py
+    assert '<span class="tok-num">1</span>' in py
+    assert '<span class="tok-com"># note</span>' in py
+    assert '<span class="tok-diff-add">+new\n</span>' in diff
+    assert '<span class="tok-diff-del">-old\n</span>' in diff
+    assert '<span class="tok-diff-hunk">@@ -1 +1 @@\n</span>' in diff
+    assert plain == '<code><b> & "x"</code>'  # no language: untouched text
+    assert '<span class="tok-kw">select</span>' in sql and '<span class="tok-kw">from</span>' in sql
+    assert unknown == "<code>x = 1</code>"
+
+
+# ---------------------------------------------------------------- requests in the Run dropdown
+
+
+def test_request_picker_and_past_view_markup():
+    text = _text()
+    assert '<select id="run-picker" aria-label="Run"></select>' in text
+    assert re.search(
+        r'<select id="run-sub-picker" class="hidden" aria-label="[^"]+"></select>', text
+    )
+    ids = ["orch-view", "past-view", "past-banner", "btn-past-new", "past-transcript", "convo"]
+    places = [text.index(f'id="{i}"') for i in ids]
+    assert places == sorted(places)
+    assert "Past request, read only" in text
+    assert '<button id="btn-past-new" type="button" class="hidden">New request</button>' in text
+    assert "/api/orchestrator/thread/" in text
+    assert "No run yet for this request" in text
+    assert "<a " not in text
+    # a toggled panel must use :not(.hidden): an ID rule with display: beats .hidden
+    assert "#left.past #orch-view:not(.hidden) + #past-view { display: block; }" in text
+    assert re.search(r"#past-view \{ display: none; \}", text)
+    assert not re.search(r"#run-sub-picker \{[^}]*display", text)
+    assert text.count('<details class="fold">') == 2
+
+
+REQUEST_SCENARIO = """
+var reqs = [
+  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'], first_message: 'm'},
+  {id: 'orch-1', title: 'Fix login', state: 'waiting', runs: []},
+];
+var ids = ['r2', 'r1', 'old'];
+function sel(h, fresh, reqList, runList, latest) {
+  var s = selection(reqList || reqs, runList || ids, latest === undefined ? 'r2' : latest, h, !!fresh);
+  return [s.request ? s.request.id : null, s.run];
+}
+var out = [];
+out.push(['running', 'waiting', 'done', 'attention', 'odd', undefined].map(function (s) {
+  return requestLabel({id: 'x1', title: 'T', state: s});
+}));
+out.push([requestLabel({id: 'x1', state: 'done'}), requestLabel({id: 'x1', title: '', state: 'wat'})]);
+out.push([sel(''), sel('orch-1'), sel('r1'), sel('old'), sel('junk'), sel('', true), sel('orch-2', true)]);
+out.push([sel('r2', false, reqs, ['r1']), sel('orch-2', false, reqs, ['r1']), sel('orch-2', false, reqs, [])]);
+out.push([sel('', false, [], ids), sel('old', false, [], ids), sel('junk', false, [], ids), sel('', false, [], [], null)]);
+out.push([emptyText([]), emptyText(reqs)]);
+var office = null;
+out.push(isPast(reqs[0], {thread: null, session: null}));
+office = {};
+out.push([isPast(reqs[0], {thread: 'orch-2', session: null}), isPast(reqs[1], {thread: 'orch-2', session: null}),
+          isPast(reqs[1], {thread: null, session: 'orch-1'}), isPast(null, {thread: null, session: null})]);
+console.log(JSON.stringify(out));
+"""  # noqa: E501
+
+
+def test_request_labels_and_hash_selection(tmp_path):
+    text = _text()
+    label = re.search(r"  var STATE_LABEL = .*", text)
+    script = (
+        _page_helpers(text) + "var hidden = {};\n"
+        + label.group(0) + "\n"
+        + _functions(text, "requestLabel", "runsOf", "selection", "emptyText", "isPast")
+        + REQUEST_SCENARIO
+    )  # fmt: skip
+    got = json.loads(_run_node(tmp_path, script)[-1])
+    assert got[0] == [
+        "T · running", "T · needs you", "T · done", "T · needs attention", "T", "T",
+    ]  # fmt: skip
+    assert got[1] == ["x1 · done", "x1"]
+    assert got[2] == [
+        ["orch-2", "r2"],  # no hash: the newest request, its latest run
+        ["orch-1", None],  # a request without a run
+        ["orch-2", "r1"],  # an old run id still selects it (with its request)
+        [None, "old"],  # a run no request launched
+        ["orch-2", "r2"],  # junk falls back to the newest
+        [None, None],  # right after "New request"
+        ["orch-2", "r2"],  # a hash beats the fresh state
+    ]
+    assert got[3] == [["orch-2", "r1"], ["orch-2", "r1"], ["orch-2", None]]
+    assert got[4] == [[None, "r2"], [None, "old"], [None, "r2"], [None, None]]
+    assert got[5] == ["No runs yet", "No run yet for this request"]
+    assert got[6] is False
+    assert got[7] == [False, True, False, False]
+
+
+PICKER_SCENARIO = """
+var out = [];
+var hidden = {}, interactive = true, pickerSig = '', current = null, pendingNew = false;
+function setHidden(id, h) { hidden[id] = h; }
+function byId(id) { return document.getElementById(id); }
+byId('run-sub-picker').getAttribute = function (k) { return this.attrs[k] === undefined ? null : this.attrs[k]; };
+document.querySelector = function () { return byId('header'); };
+function opts(n) { return n.children.map(function (o) { return [o.value, o.text]; }); }
+var runs = ['r2', 'r1', 'old'], titles = {old: 'Old run', r1: 'Build the dashboard', r2: 'Build the dashboard'};
+var requests = [
+  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'], first_message: 'make it'},
+  {id: 'orch-1', title: 'Fix login', state: 'done', runs: []},
+];
+renderRuns();
+out.push(opts(picker));
+var same = picker.children[0];
+renderRuns();
+out.push(picker.children[0] === same);  // unchanged lists keep the open dropdown's options
+pendingNew = true;
+renderRuns();
+out.push(opts(picker)[0]);
+pendingNew = false;
+requests = [];
+runs = [];
+renderRuns();
+out.push([opts(picker), byId('header').className]);
+interactive = false;
+renderRuns();
+out.push(byId('header').className);
+requests = [{id: 'orch-2', title: 'T', state: 'done', runs: ['r1', 'r2']}];
+runs = ['r2', 'r1'];
+renderPickers({request: requests[0], run: 'r1'});
+out.push([picker.value, opts(byId('run-sub-picker')), byId('run-sub-picker').value, hidden['run-sub-picker']]);
+renderPickers({request: {id: 'orch-1', runs: ['r1']}, run: 'r1'});
+out.push([picker.value, hidden['run-sub-picker']]);
+renderPickers({request: null, run: 'old'});
+out.push(picker.value);
+console.log(JSON.stringify(out));
+"""  # noqa: E501
+
+
+def test_picker_options_labels_and_run_sub_picker(tmp_path):
+    text = _text()
+    label = re.search(r"  var STATE_LABEL = .*", text)
+    script = (
+        _page_helpers(text) + "var picker = document.getElementById('run-picker');\n"
+        + label.group(0) + "\n"
+        + _functions(text, "requestLabel", "runsOf", "renderRuns", "renderPickers")
+        + PICKER_SCENARIO
+    )  # fmt: skip
+    got = json.loads(_run_node(tmp_path, script)[-1])
+    assert got[0] == [
+        ["orch-2", "Build the dashboard · running"],
+        ["orch-1", "Fix login · done"],
+        ["old", "Old run"],  # a run no request launched stays reachable
+    ]
+    assert got[1] is True
+    assert got[2] == ["", "New request"]
+    assert got[3] == [[], ""]
+    assert got[4] == "hidden"  # nothing at all and no controls: the header is hidden
+    assert got[5] == ["orch-2", [["r2", "Run 2 · r2"], ["r1", "Run 1 · r1"]], "r1", False]
+    assert got[6] == ["orch-1", True]
+    assert got[7] == "old"

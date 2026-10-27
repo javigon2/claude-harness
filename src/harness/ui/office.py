@@ -49,7 +49,7 @@ from harness.planner_log import (
     read_planner_events,
 )
 from harness.state import STATE_FILE, StateError, latest_run, load_state, new_run_id, run_dir
-from harness.titles import ensure_title
+from harness.titles import ensure_request_title, ensure_title
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
@@ -476,6 +476,7 @@ class Office:
         auto_advance: bool = True,
         orchestrator_session_factory: SessionFactory | None = None,
         titler: Callable[[Path, str], object] | None = None,
+        request_titler: Callable[[Path, str, str], object] | None = None,
     ) -> None:
         self.auto_advance = auto_advance
         self._resume_stamp: int | None = None
@@ -492,6 +493,13 @@ class Office:
         # names a launched run from its request; off when a test injects the launcher
         self._titler = (
             titler if titler is not None else (None if launcher else self._default_titler)
+        )
+        # names a new request (Orchestrator thread or direct planner session) from its first
+        # message; off under the same rule
+        self._request_titler = (
+            request_titler
+            if request_titler is not None
+            else (None if launcher else self._default_request_titler)
         )
         if session_factory is not None:
             self._factory: SessionFactory = session_factory
@@ -555,6 +563,7 @@ class Office:
             fake=fake,
             fake_delay=fake_delay,
             session_factory=orchestrator_session_factory,
+            titler=self._request_titler,
         )
         if self._titler is not None:
             threading.Thread(target=self._backfill_titles, daemon=True, name="titles").start()
@@ -780,11 +789,13 @@ class Office:
         description: str | None = None,
         from_draft: bool = False,
         route: RouteChoice = "project",
+        title_request: bool = True,
     ) -> None:
         """Start a stage-1 planner session. With `description`, an existing PROJECT_PLAN.md is
         first archived as PROJECT_PLAN.<UTC timestamp>.md. With `from_draft`, the session is
         told to pick up the draft on disk. Raises OfficeConflict if a session or run is
-        active, a terminal planner is busy, or the input does not fit."""
+        active, a terminal planner is busy, or the input does not fit. `title_request` is off
+        for a session the Orchestrator started: its thread is the request and gets the title."""
         with self._lock:
             self._guard_idle()
             plan = self.repo / PROJECT_PLAN_FILE
@@ -810,6 +821,13 @@ class Office:
                 from_draft=from_draft,
                 route="project" if from_draft else route,
             )
+            if title_request and not from_draft and self._request_titler is not None:
+                threading.Thread(
+                    target=self._request_titler,
+                    args=(self.repo, self._session_id, shown),
+                    daemon=True,
+                    name=f"title-{self._session_id}",
+                ).start()
 
     def _previous_description(self) -> str:
         sess = last_session(read_planner_events(self.repo))
@@ -1179,6 +1197,9 @@ class Office:
     def _default_titler(self, repo: Path, run_id: str) -> None:
         ensure_title(repo, run_id, use_model=not self.fake)
 
+    def _default_request_titler(self, repo: Path, request_id: str, text: str) -> None:
+        ensure_request_title(repo, request_id, text, use_model=not self.fake)
+
     def _launch(self, rel_plan: str, *, run_id: str | None = None, resume: bool = False) -> None:
         """Validate the stage plan again, then start `harness run` as a detached process
         (own session, so Ctrl-C on the UI leaves it running; output to
@@ -1426,7 +1447,7 @@ class _OfficeOpusDesk:
 
     def start(self, text: str, plan: Literal["quick", "project"]) -> str:
         try:
-            self._office.start(description=text, route=plan)
+            self._office.start(description=text, route=plan, title_request=False)
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
         session_id, _state = self._office.boss_status()

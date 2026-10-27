@@ -657,3 +657,17 @@ def test_transcript_of_a_terminal_session_has_only_replies(tmp_path):
     )
     tr = office_view_from_log(tmp_path).transcript
     assert [(m.role, m.text) for m in tr] == [("opus", "hello")]
+
+
+def test_a_started_plan_is_named_unless_the_orchestrator_started_it(tmp_path, make_office):
+    named: list[tuple[str, str]] = []
+    office = make_office(request_titler=lambda repo, rid, text: named.append((rid, text)))
+    office.start("a demo project")
+    wait_for(lambda: named)
+    assert named == [(office.view().session_id, "a demo project")]
+    wait_for(state_is(office, "asking"))
+    office.close()
+    other = make_office(request_titler=lambda repo, rid, text: named.append((rid, text)))
+    other.start("from the desk", title_request=False)
+    wait_for(state_is(other, "asking"))
+    assert len(named) == 1

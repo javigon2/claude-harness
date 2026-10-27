@@ -291,3 +291,21 @@ def test_view_cost_sums(env):
     env.waiting_chat()
     env.say("b", route("haiku", cost=0.05))
     assert env.orch.view().cost_usd == pytest.approx(0.07)
+
+
+def test_titler_names_a_thread_once_on_its_first_message(tmp_path):
+    init_repo(tmp_path)
+    named: list[tuple[str, str]] = []
+    env = Env(tmp_path)
+    env.orch._titler = lambda repo, thread_id, text: named.append((thread_id, text))
+    try:
+        env.say(" fix typo ", route("haiku"))
+        env.waiting_chat()
+        env.say("and the other one", route("haiku"))
+        wait_for(lambda: named)
+        (thread_id, text) = named[0]
+        assert len(named) == 1 and text == "fix typo"
+        assert thread_id == env.orch.view().thread_id
+    finally:
+        env.orch.close()
+        env.chats.close()

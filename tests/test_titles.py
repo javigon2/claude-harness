@@ -6,6 +6,7 @@ from claude_agent_sdk import AssistantMessage, TextBlock
 from harness.planner_log import PlannerLog
 from harness.titles import (
     clean_title,
+    ensure_request_title,
     ensure_title,
     fallback_title,
     haiku_title,
@@ -92,3 +93,34 @@ def test_ensure_title_with_model_falls_back_when_the_call_fails(tmp_path):
 
     _launched(tmp_path, "planner-1", "run-a", "Fix it")
     assert ensure_title(tmp_path, "run-a", query_fn=boom) == "Fix it"
+
+
+def test_ensure_request_title_asks_the_injected_query_and_stores_it(tmp_path):
+    got = ensure_request_title(
+        tmp_path,
+        "orch-1",
+        "Please fix the login redirect",
+        query_fn=_fake_query("Fix login redirect."),
+    )
+    assert got == "Fix login redirect"
+    assert read_title(tmp_path, "orch-1") == "Fix login redirect"
+
+
+def test_ensure_request_title_falls_back_without_a_model_or_on_failure(tmp_path):
+    async def boom(*, prompt, options):
+        raise RuntimeError("no network")
+        yield  # pragma: no cover
+
+    text = "one two three four five six seven eight"
+    assert ensure_request_title(tmp_path, "orch-1", text, use_model=False) == (
+        "one two three four five six seven…"
+    )
+    assert ensure_request_title(tmp_path, "planner-2", "Fix it", query_fn=boom) == "Fix it"
+
+
+def test_ensure_request_title_keeps_an_existing_title_and_skips_empty_text(tmp_path):
+    write_title(tmp_path, "orch-1", "Kept")
+    never = _fake_query("Other")
+    assert ensure_request_title(tmp_path, "orch-1", "x", query_fn=never) == "Kept"
+    assert ensure_request_title(tmp_path, "orch-2", "   ", query_fn=never) is None
+    assert read_title(tmp_path, "orch-2") is None
