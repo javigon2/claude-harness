@@ -8,7 +8,7 @@ a restart or a read-only page rebuilds the thread with `orchestrator_view_from_l
 import asyncio
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -37,6 +37,7 @@ from harness.ui.chat import (
 )
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.markdown import parse_markdown
+from harness.ui.uploads import attachment_note, image_ids
 from harness.worker import ProgressFn
 
 OrchState = Literal["idle", "routing", "failed"]
@@ -63,11 +64,13 @@ class HandoffRefused(Exception):
 
 
 class OpusDesk(Protocol):
-    def start(self, text: str, plan: Literal["quick", "project"]) -> str:
+    def start(
+        self, text: str, plan: Literal["quick", "project"], images: Sequence[str] = ()
+    ) -> str:
         """Start an Opus planning session on `text`; return its session id."""
         ...
 
-    def message(self, text: str) -> None:
+    def message(self, text: str, images: Sequence[str] = ()) -> None:
         """Send `text` to the current Opus session."""
         ...
 
@@ -91,6 +94,7 @@ class OrchEntry(BaseModel):
     ts: str
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
+    images: list[str] = Field(default_factory=list)
 
 
 class OrchestratorView(BaseModel):
@@ -202,7 +206,14 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
         if e.type == "orchestrator_user":
             t = _text(p)
             if t:
-                items.append((e.ts, OrchEntry(role="user", who="You", ts=e.ts.isoformat(), text=t)))
+                entry = OrchEntry(
+                    role="user",
+                    who="You",
+                    ts=e.ts.isoformat(),
+                    text=t,
+                    images=image_ids(p),
+                )
+                items.append((e.ts, entry))
             last_user = e
         elif e.type == "orchestrator_turn":
             t = _text(p)
@@ -401,9 +412,10 @@ class Orchestrator:
 
     # -- public calls -------------------------------------------------------------------
 
-    def message(self, text: str) -> None:
+    def message(self, text: str, images: Sequence[str] = ()) -> None:
         """Take one user message. Algorithm in the `decision: message` context item."""
         stripped = text.strip()
+        ids = tuple(images)
         if not stripped:
             raise OrchestratorConflict("the message is empty")
         if len(stripped) > MAX_TEXT_CHARS:
@@ -433,10 +445,16 @@ class Orchestrator:
                 self._emit("orchestrator_started", {"pid": os.getpid()})
                 self._pid_logged = True
             entries = orchestrator_view_from_log(self.repo).transcript
-            self._emit("orchestrator_user", {"text": stripped})
+            user_payload: dict[str, Any] = {"text": stripped}
+            if ids:
+                user_payload["images"] = list(ids)
+            self._emit("orchestrator_user", user_payload)
             if holder is not None and holder[1] == "opus":
                 try:
-                    self.opus.message(stripped)
+                    if ids:
+                        self.opus.message(stripped, images=ids)
+                    else:
+                        self.opus.message(stripped)
                 except HandoffRefused as err:
                     reason = f"could not hand to opus: {err}"
                     self._emit("orchestrator_failed", {"reason": reason, "cost_usd": 0.0})
@@ -465,7 +483,7 @@ class Orchestrator:
             assert self._log is not None
             self._thread = threading.Thread(
                 target=self._thread_main,
-                args=(stripped, holder, entries, self._log),
+                args=(stripped, holder, entries, self._log, ids),
                 name="harness-orchestrator",
                 daemon=True,
             )
@@ -560,22 +578,40 @@ class Orchestrator:
             self._progress = []
 
     def _thread_main(
-        self, text: str, holder: Target | None, entries: list[OrchEntry], log: PlannerLog
+        self,
+        text: str,
+        holder: Target | None,
+        entries: list[OrchEntry],
+        log: PlannerLog,
+        images: tuple[str, ...] = (),
     ) -> None:
         try:
-            asyncio.run(self._route(text, holder, entries, log))
+            asyncio.run(self._route(text, holder, entries, log, images))
         except asyncio.CancelledError:
             return
         except Exception as err:
             self._fail(log, f"unexpected error: {type(err).__name__}: {err}", 0.0)
 
-    def _start_target(self, to: Tier, plan: Literal["quick", "project"], text: str) -> Target:
+    def _start_target(
+        self,
+        to: Tier,
+        plan: Literal["quick", "project"],
+        text: str,
+        images: tuple[str, ...] = (),
+    ) -> Target:
         if to == "opus":
+            if images:
+                return ("opus", "opus", self.opus.start(text, plan, images=images))
             return ("opus", "opus", self.opus.start(text, plan))
-        return (to, "chat", self.chats.start(to, text))
+        return (to, "chat", self.chats.start(to, text, images=images))
 
     async def _route(
-        self, text: str, holder: Target | None, entries: list[OrchEntry], log: PlannerLog
+        self,
+        text: str,
+        holder: Target | None,
+        entries: list[OrchEntry],
+        log: PlannerLog,
+        images: tuple[str, ...] = (),
     ) -> None:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
@@ -583,7 +619,7 @@ class Orchestrator:
             repo=self.repo,
             holder=holder[0] if holder else "nobody (new work)",
             tail=tail_text(entries),
-            text=text,
+            text=text + attachment_note(self.repo, images),
         )
 
         async def progress_cb(info: dict[str, Any]) -> None:
@@ -616,7 +652,7 @@ class Orchestrator:
                 routing = routing or Routing(to="sonnet", reason=NO_ROUTING_NEW)
                 to = routing.to
                 action = "start"
-                target = self._start_target(to, routing.plan, text)
+                target = self._start_target(to, routing.plan, text, images)
             elif routing is None or rank(routing.to) <= rank(holder[0]):
                 action = "forward"
                 routing = Routing(
@@ -625,7 +661,7 @@ class Orchestrator:
                     reason=routing.reason if routing else NO_ROUTING_FOLLOW,
                 )
                 to = holder[0]
-                self.chats.message(holder[2], text)
+                self.chats.message(holder[2], text, images=images)
                 target = holder
             else:
                 action = "escalate"
@@ -635,7 +671,7 @@ class Orchestrator:
                     self.chats.close_chat(holder[2])
                 except ChatConflict:
                     pass
-                target = self._start_target(to, routing.plan, brief)
+                target = self._start_target(to, routing.plan, brief, images)
         except (ChatConflict, HandoffRefused) as err:
             self._fail(log, f"could not hand to {to}: {err}", cost)
             return
