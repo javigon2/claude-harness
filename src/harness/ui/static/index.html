@@ -541,6 +541,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-dashboard" type="button" class="hidden">Dashboard</button>
   <button id="btn-git" type="button" class="hidden">Git</button>
+  <span id="git-branch-chip" class="chip hidden" title="The checked-out branch"></span>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
   <button id="btn-run-tests" type="button" class="hidden" title="Run the project's whole test suite now">Run tests</button>
   <span id="tests-status" class="chip hidden"></span>
@@ -2657,8 +2658,65 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       fillGitRemotes();
     });
   }
+  function gitReview(b) {
+    gitGet('/api/git/compare?base=' + encodeURIComponent(b.base) + '&head=' + encodeURIComponent(b.name), renderGitCompare);
+  }
+  function gitApprove(b) {
+    var text = 'Approve ' + b.name + '?\n\nThis merges it into ' + b.base + ' and checks out ' + b.base + '.';
+    if (!window.confirm(text)) return;
+    gitPost('/api/git/approve', {name: b.name}, function (d) {
+      byId('git-note').textContent = 'Approved ' + b.name + ': merged into ' + b.base + ' as ' + str(d.sha) + '. Push ' + b.base + ' when ready.';
+    });
+  }
+  function renderGitCompare(c) {
+    var ahead = Number(c.ahead) || 0;
+    var behind = Number(c.behind) || 0;
+    var summary;
+    if (ahead === 0) {
+      summary = 'Nothing to approve: ' + str(c.head) + ' has no commits that ' + str(c.base) + ' lacks.';
+    } else {
+      summary = ahead + (ahead === 1 ? ' commit' : ' commits') + ' to approve';
+      if (behind > 0) summary += ' · ' + str(c.base) + ' has ' + behind + ' newer';
+    }
+    var ul = el('ul', 'git-compare-commits');
+    (Array.isArray(c.commits) ? c.commits : []).forEach(function (m) {
+      var li = el('li', 'git-file');
+      li.appendChild(el('span', 'git-sha mono', str(m.short)));
+      li.appendChild(el('span', 'git-subject', str(m.subject)));
+      ul.appendChild(li);
+    });
+    var parts = [
+      el('h3', null, str(c.head) + ' → ' + str(c.base)),
+      el('p', 'muted', summary),
+      ul,
+      gitFiles(c.files),
+      patchHtml(c.patch, c.truncated)
+    ];
+    var node = byId('git-detail');
+    node.replaceChildren.apply(node, parts);
+  }
+  function showGitBranch(st) {
+    var chip = byId('git-branch-chip');
+    if (st && typeof st === 'object' && typeof st.branch === 'string' && st.branch !== '') {
+      chip.textContent = 'on ' + st.branch;
+      setHidden('git-branch-chip', false);
+    } else if (st && typeof st === 'object' && st.detached === true) {
+      chip.textContent = 'detached HEAD';
+      setHidden('git-branch-chip', false);
+    } else {
+      chip.textContent = '';
+      setHidden('git-branch-chip', true);
+    }
+  }
+  function loadGitBranchChip() {
+    fetch('/api/git/status').then(function (r) { return r.ok ? r.json() : null; }).then(showGitBranch).catch(function () { /* next poll retries */ });
+  }
   function gitBranchActs(b, current) {
     var acts = [];
+    if (b.kind === 'local' && b.work && b.base) {
+      acts.push(gitAct('Review', function () { gitReview(b); }));
+      acts.push(gitAct('Approve', function () { gitApprove(b); }));
+    }
     if (b.current || String(b.name).indexOf('harness/') === 0) return acts;
     var hasCur = typeof current === 'string' && current !== '';
     var merge = function () {
@@ -2956,6 +3014,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     setHidden('project-name', false);
     setHidden('btn-switch-project', !project);
     setHidden('btn-git', !project);
+    if (!project) showGitBranch(null);
     setHidden('btn-project-back', !project);
     byId('project-info').textContent = projectSummary(project);
     var acts = projectActions(project);
@@ -3410,6 +3469,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 
   function poll() {
     if (hostMode && !project) return;
+    loadGitBranchChip();
     fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
