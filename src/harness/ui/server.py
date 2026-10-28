@@ -36,7 +36,7 @@ from harness.ui.git_routes import GIT_POST_ROUTES, BadGitBody, check_git_body, g
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
 from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
-from harness.ui.metrics import build_dashboard
+from harness.ui.metrics import build_dashboard, build_overview
 from harness.ui.office import (
     MAX_TEXT_CHARS,
     Office,
@@ -778,6 +778,9 @@ def make_handler(
             if path.startswith("/api/report/"):
                 self._report(unquote(path[len("/api/report/") :]))
                 return
+            if path == "/api/overview":
+                self._overview()
+                return
             if path.startswith("/api/dashboard/"):
                 self._dashboard(unquote(path[len("/api/dashboard/") :]))
                 return
@@ -887,6 +890,17 @@ def make_handler(
                     "title": request_title_of_run(repo, run_id),
                 },
             )
+
+        def _overview(self) -> None:
+            """The cost and time of every remembered project, plus the open one."""
+            recent = load_recent(host.recent_path) if host is not None else []
+            repos = [self._repo, *(Path(p) for p in recent)]
+            try:
+                body = build_overview(repos).model_dump_json().encode()
+            except (StateError, OSError, ValueError) as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._send(200, body)
 
         def _dashboard(self, run_id: str) -> None:
             """The cost, time and latency numbers of a run next to the average of the others."""

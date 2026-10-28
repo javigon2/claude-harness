@@ -303,3 +303,110 @@ def build_dashboard(repo: Path, run_id: str) -> Dashboard:
         tiers=tier_rows,
         tasks=tasks,
     )
+
+
+class ProjectRow(BaseModel):
+    """One project (a repo folder) in the Overview. Fake runs are left out of every figure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    path: str
+    runs: int
+    run_cost_usd: float  # workers and reviews
+    planning_cost_usd: float  # planner, Orchestrator and agent chats
+    cost_usd: float  # run_cost_usd + planning_cost_usd
+    wall_s: float  # sum of the runs' start-to-end times
+    active_s: float  # sum of the runs' worker time
+
+
+class Overview(BaseModel):
+    """What the harness has spent across projects: the totals and one row per project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_cost_usd: float
+    run_cost_usd: float
+    planning_cost_usd: float
+    total_wall_s: float
+    total_active_s: float
+    total_runs: int
+    projects: list[ProjectRow]
+
+
+def _cost_of(payload: dict) -> float:
+    v = payload.get("cost_usd")
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return 0.0
+    return float(v)
+
+
+def planning_cost(repo: Path) -> float:
+    """What planning and chatting cost in `repo`: each planner session's last (running)
+    cost, the Orchestrator's turns and the agent chats' replies, read from the planner and
+    chat logs. 0.0 when there are no logs."""
+    planner = _read_events(Path(repo) / ".harness" / "planner" / "events.jsonl")
+    chats = _read_events(Path(repo) / ".harness" / "chats" / "events.jsonl")
+    sessions: dict[str, float] = {}
+    total = 0.0
+    for e in planner:
+        if e.run_id.startswith("planner-"):
+            sessions[e.run_id] = max(sessions.get(e.run_id, 0.0), _cost_of(e.payload))
+        elif e.run_id.startswith("orch-") and e.type in (
+            "orchestrator_turn",
+            "orchestrator_failed",
+        ):
+            total += _cost_of(e.payload)
+    total += sum(sessions.values())
+    total += sum(_cost_of(e.payload) for e in chats if e.type == "chat_reply")
+    return total
+
+
+def project_row(repo: Path) -> ProjectRow:
+    """The Overview row of one project folder. A run that cannot be read is skipped."""
+    repo = Path(repo)
+    runs = run_cost = wall = active = 0.0
+    for run_id in list_runs(repo):
+        try:
+            stats = run_stats(repo, run_id)
+        except Exception:
+            continue
+        if stats.fake:
+            continue
+        runs += 1
+        run_cost += stats.values.get("cost_usd") or 0.0
+        wall += stats.values.get("wall_s") or 0.0
+        active += stats.values.get("active_s") or 0.0
+    planning = planning_cost(repo)
+    return ProjectRow(
+        name=repo.name or str(repo),
+        path=str(repo),
+        runs=int(runs),
+        run_cost_usd=run_cost,
+        planning_cost_usd=planning,
+        cost_usd=run_cost + planning,
+        wall_s=wall,
+        active_s=active,
+    )
+
+
+def build_overview(repos: list[Path]) -> Overview:
+    """The Overview over `repos` (duplicates and missing folders dropped), costliest first."""
+    seen: set[Path] = set()
+    rows: list[ProjectRow] = []
+    for repo in repos:
+        repo = Path(repo).resolve()
+        if repo in seen or not repo.is_dir():
+            continue
+        seen.add(repo)
+        rows.append(project_row(repo))
+    rows.sort(key=lambda r: r.cost_usd, reverse=True)
+    return Overview(
+        total_cost_usd=sum(r.cost_usd for r in rows),
+        run_cost_usd=sum(r.run_cost_usd for r in rows),
+        planning_cost_usd=sum(r.planning_cost_usd for r in rows),
+        total_wall_s=sum(r.wall_s for r in rows),
+        total_active_s=sum(r.active_s for r in rows),
+        total_runs=sum(r.runs for r in rows),
+        projects=rows,
+    )

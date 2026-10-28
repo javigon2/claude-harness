@@ -315,6 +315,14 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 .dash-card .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #9fb6c3; }
 .dash-card .v { font-size: 24px; font-weight: 700; margin-top: 2px; }
 .dash-card .a { font-size: 12px; color: #9fb6c3; margin-top: 2px; }
+#ov-cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+#ov-charts { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+#ov-charts figure { flex: 1 1 380px; margin: 0; background: #fff; border: 1px solid var(--sn-border); border-radius: 8px; padding: 10px 12px; }
+#ov-charts figcaption { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--sn-slate); margin-bottom: 6px; }
+#ov-charts svg { width: 100%; height: auto; display: block; }
+#ov-charts .bar-label { font-size: 11px; fill: var(--sn-text); }
+#ov-charts .bar-value { font-size: 11px; fill: var(--sn-slate); font-variant-numeric: tabular-nums; }
+#ov-charts .bar-track { fill: var(--sn-zebra); }
 #dashboard-view td.num, #dashboard-view th.num, #report-view td.num, #report-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .delta-good { color: var(--sn-green-dark); font-weight: 600; }
 .delta-bad { color: #c23030; font-weight: 600; }
@@ -763,6 +771,15 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 <section id="dashboard-view" class="hidden">
   <button id="btn-dashboard-back" type="button">Back</button>
   <h2 id="dash-title">Dashboard</h2>
+  <h3>All projects</h3>
+  <p id="ov-sub" class="muted"></p>
+  <div id="ov-cards"></div>
+  <div id="ov-charts">
+    <figure><figcaption>Cost by project</figcaption><div id="ov-chart-cost"></div></figure>
+    <figure><figcaption>Time taken by project</figcaption><div id="ov-chart-time"></div></figure>
+  </div>
+  <table id="ov-projects"></table>
+  <h3>This run</h3>
   <p id="dash-sub" class="muted"></p>
   <div id="dash-cards"></div>
   <h3>Totals against the average of other runs</h3>
@@ -2364,6 +2381,59 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
     table.replaceChildren(thead, tbody);
   }
+  function barChart(rows, key, unit, fill) {
+    var NS = 'http://www.w3.org/2000/svg', W = 560, LABEL = 130, VALUE = 90, H = 26;
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + Math.max(1, rows.length) * H);
+    svg.setAttribute('role', 'img');
+    var max = Math.max.apply(null, rows.map(function (r) { return r[key]; }).concat([0]));
+    function mk(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+    rows.forEach(function (r, i) {
+      var y = i * H, track = W - LABEL - VALUE, w = max > 0 ? Math.max(2, r[key] / max * track) : 0;
+      var name = r.name.length > 18 ? r.name.slice(0, 17) + '…' : r.name;
+      var t = mk('title', {}, r.name + ': ' + fmtValue(r[key], unit));
+      var g = mk('g', {});
+      g.appendChild(t);
+      g.appendChild(mk('text', { x: LABEL - 8, y: y + 17, 'text-anchor': 'end', 'class': 'bar-label' }, name));
+      g.appendChild(mk('rect', { x: LABEL, y: y + 5, width: track, height: 16, rx: 4, 'class': 'bar-track' }));
+      g.appendChild(mk('rect', { x: LABEL, y: y + 5, width: w, height: 16, rx: 4, fill: fill }));
+      g.appendChild(mk('text', { x: LABEL + track + 8, y: y + 17, 'class': 'bar-value' }, fmtValue(r[key], unit)));
+      svg.appendChild(g);
+    });
+    return svg;
+  }
+  function renderOverview(o) {
+    byId('ov-sub').textContent = o.total_runs + ' real run' + (o.total_runs === 1 ? '' : 's') + ' across ' + o.projects.length + ' project' + (o.projects.length === 1 ? '' : 's') + ' · cost = workers and reviews plus planning and chats · fake runs are left out';
+    var cards = [
+      ['Total cost', fmtValue(o.total_cost_usd, 'usd'), 'runs ' + fmtValue(o.run_cost_usd, 'usd') + ' · planning ' + fmtValue(o.planning_cost_usd, 'usd')],
+      ['Time taken', fmtDuration(o.total_wall_s), 'worker time ' + fmtDuration(o.total_active_s)],
+      ['Runs', String(o.total_runs), o.projects.length + ' project' + (o.projects.length === 1 ? '' : 's')]
+    ].map(function (c) {
+      var d = el('div', 'dash-card');
+      d.appendChild(el('div', 'k', c[0]));
+      d.appendChild(el('div', 'v', c[1]));
+      d.appendChild(el('div', 'a', c[2]));
+      return d;
+    });
+    byId('ov-cards').replaceChildren.apply(byId('ov-cards'), cards);
+    byId('ov-chart-cost').replaceChildren(barChart(o.projects, 'cost_usd', 'usd', '#1b6e94'));
+    var byTime = o.projects.slice().sort(function (a, b) { return b.wall_s - a.wall_s; });
+    byId('ov-chart-time').replaceChildren(barChart(byTime, 'wall_s', 's', '#63df4e'));
+    fillTable('ov-projects', ['Project', 'Runs', 'Run cost', 'Planning cost', 'Total cost', 'Time taken', 'Worker time'], o.projects.map(function (p) {
+      var td = el('td', null, p.name); td.title = p.path;
+      return [td, String(p.runs), fmtValue(p.run_cost_usd, 'usd'), fmtValue(p.planning_cost_usd, 'usd'), fmtValue(p.cost_usd, 'usd'), fmtDuration(p.wall_s), fmtDuration(p.active_s)];
+    }));
+  }
+  function loadOverview() {
+    fetch('/api/overview').then(function (r) { return r.json(); }).then(function (o) {
+      if (o && Array.isArray(o.projects)) renderOverview(o);
+    }).catch(function () { /* the next refresh retries */ });
+  }
   function renderDashboard(d) {
     byId('dash-title').textContent = 'Dashboard · ' + (d.title || d.run_id);
     var sub = 'Run ' + d.run_id + ' · ' + (d.finished ? 'finished' : 'in progress') + ' · ';
@@ -2392,6 +2462,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }));
   }
   function loadDashboard() {
+    loadOverview();
     if (!current) { byId('dash-sub').textContent = 'No run yet.'; return; }
     fetch('/api/dashboard/' + encodeURIComponent(current)).then(function (r) { return r.json(); }).then(function (d) {
       if (d && Array.isArray(d.metrics)) renderDashboard(d);
