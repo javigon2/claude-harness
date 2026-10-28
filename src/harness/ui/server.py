@@ -23,7 +23,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import ValidationError
 
@@ -32,6 +32,7 @@ from harness.planner import PROJECT_PLAN_FILE
 from harness.report import report_data, report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
 from harness.ui.chat import CHAT_TIERS, ChatConflict
+from harness.ui.git_routes import git_get
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
 from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
@@ -725,6 +726,11 @@ def make_handler(
                 self._json(409, {"error": NO_PROJECT})
                 return
             repo, office = self._repo, self._office
+            if path.startswith("/api/git/"):
+                query = parse_qs(urlsplit(self.path).query)
+                code, body = git_get(repo, unquote(path[len("/api/git/") :]), query)
+                self._json(code, body)
+                return
             if path.startswith("/api/upload/"):
                 self._image(unquote(path[len("/api/upload/") :]))
                 return
