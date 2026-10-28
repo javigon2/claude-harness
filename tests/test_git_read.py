@@ -61,6 +61,22 @@ def test_graph_subjects_and_refs(repo):
     assert page.head == git(repo, "rev-parse", "HEAD")
 
 
+def test_graph_branch_starts_on_shared_commit_then_moves_after_commit(tmp_path):
+    repo = init_repo(tmp_path / "branch-graph")
+    git(repo, "switch", "-q", "-c", "scratch/testing-branching")
+
+    shared = read_graph(repo)
+    assert len(shared.commits) == 1
+    assert shared.commits[0].refs == ["HEAD -> scratch/testing-branching", "main"]
+
+    commit(repo, "branch-test.txt", "test branch commit")
+    moved = read_graph(repo)
+    assert [c.subject for c in moved.commits] == ["test branch commit", "init"]
+    assert moved.commits[0].refs == ["HEAD -> scratch/testing-branching"]
+    assert moved.commits[1].refs == ["main"]
+    assert moved.commits[0].parents == [moved.commits[1].sha]
+
+
 def test_graph_harness_flag(repo):
     s = by_subject(read_graph(repo, harness=True))
     assert s["w1"].refs == ["work/x", "harness/r1/t1"]
