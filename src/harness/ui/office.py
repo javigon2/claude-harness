@@ -192,9 +192,9 @@ def plan_status(repo: Path) -> Literal["draft", "approved"] | None:
 
 def next_stage_of(repo: Path) -> int | None:
     """The stage "Plan next stage" would plan: N+1 when the last run launched by an office
-    came from `stage-N/plan.json` and has finished, PROJECT_PLAN.md is approved and has a
-    `## Stage N+1:` heading, and no run was launched from `stage-(N+1)/plan.json` yet.
-    None otherwise."""
+    came from `stage-N/plan.json` and has finished with every task done, PROJECT_PLAN.md is
+    approved and has a `## Stage N+1:` heading, and no run was launched from
+    `stage-(N+1)/plan.json` yet. None otherwise."""
     launches = [e for e in read_planner_events(repo) if e.type == "run_launched"]
     if not launches or plan_status(repo) != "approved":
         return None
@@ -203,7 +203,8 @@ def next_stage_of(repo: Path) -> int | None:
     if m is None or not isinstance(run_id, str):
         return None
     try:
-        if not load_state(run_dir(repo, run_id)).finished:
+        state = load_state(run_dir(repo, run_id))
+        if not state.finished or any(t.status != "done" for t in state.tasks.values()):
             return None
         text = (repo / PROJECT_PLAN_FILE).read_text(encoding="utf-8")
     except (StateError, OSError, ValueError):
