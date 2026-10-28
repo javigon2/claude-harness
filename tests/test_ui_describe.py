@@ -168,7 +168,7 @@ def test_models_forbid_unknown_fields() -> None:
             run_id="r",
             stage="s",
             finished=False,
-            phase="finished",
+            phase="ended",
             stopped_reason=None,
             idle_minutes=None,
             wave=0,

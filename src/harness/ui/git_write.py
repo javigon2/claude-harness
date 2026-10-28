@@ -37,11 +37,19 @@ def _has_head(repo: Path) -> bool:
     return run(repo, "rev-parse", "--verify", "-q", "HEAD", ok=(0, 1)).returncode == 0
 
 
+def _harness_ignored(repo: Path) -> bool:
+    """True when git already ignores `.harness`. Then the exclude pathspec is not needed, and
+    `git add` would stage the files but exit 1 with "paths are ignored" because of it."""
+    return run(repo, "check-ignore", "-q", ".harness", ok=(0, 1)).returncode == 0
+
+
 def stage(repo: Path, paths: list[str]) -> None:
-    """`git add -A -- <paths> :(exclude).harness`."""
+    """`git add -A -- <paths> :(exclude).harness`; the exclude is left off when `.harness`
+    is already ignored."""
     require_repo(repo)
     checked = _paths(paths)
-    run(repo, "add", "-A", "--", *checked, EXCLUDE_HARNESS)
+    exclude = [] if _harness_ignored(repo) else [EXCLUDE_HARNESS]
+    run(repo, "add", "-A", "--", *checked, *exclude)
 
 
 def unstage(repo: Path, paths: list[str]) -> None:

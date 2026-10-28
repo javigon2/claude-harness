@@ -22,7 +22,9 @@ header, #tests-out, #banner { flex: none; }
 .phase { font-weight: 600; padding: 1px 8px; border-radius: 4px; }
 .phase-running { background: #dbeafe; color: #1e40af; }
 .phase-stopped { background: #fde68a; color: #78350f; }
-.phase-finished { background: #d1fae5; color: #065f46; }
+.phase-ended { background: #e5e7eb; color: #374151; }
+.outcome-completed { background: #d1fae5; color: #065f46; }
+.outcome-attention { background: #fde68a; color: #78350f; }
 #banner { padding: 8px 16px; background: #fff3cd; border-bottom: 1px solid #e0c36a; }
 #banner:empty { display: none; }
 table { border-collapse: collapse; width: 100%; background: #fff; }
@@ -315,6 +317,14 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 .dash-card .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #9fb6c3; }
 .dash-card .v { font-size: 24px; font-weight: 700; margin-top: 2px; }
 .dash-card .a { font-size: 12px; color: #9fb6c3; margin-top: 2px; }
+#ov-cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+#ov-charts { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+#ov-charts figure { flex: 1 1 380px; margin: 0; background: #fff; border: 1px solid var(--sn-border); border-radius: 8px; padding: 10px 12px; }
+#ov-charts figcaption { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--sn-slate); margin-bottom: 6px; }
+#ov-charts svg { width: 100%; height: auto; display: block; }
+#ov-charts .bar-label { font-size: 11px; fill: var(--sn-text); }
+#ov-charts .bar-value { font-size: 11px; fill: var(--sn-slate); font-variant-numeric: tabular-nums; }
+#ov-charts .bar-track { fill: var(--sn-zebra); }
 #dashboard-view td.num, #dashboard-view th.num, #report-view td.num, #report-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .delta-good { color: var(--sn-green-dark); font-weight: 600; }
 .delta-bad { color: #c23030; font-weight: 600; }
@@ -485,8 +495,9 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 #img-view { padding: 8px; border: 0; border-radius: 8px; }
 #img-view img { display: block; max-width: 90vw; max-height: 80vh; }
 #img-view::backdrop { background: rgba(3, 45, 66, 0.6); }
-/* the Git view: tabs over a list pane and a detail pane */
-#git-view { padding: 12px 16px; box-sizing: border-box; }
+/* Git has its own resizable, independently scrolling workspace. */
+#git-view { padding: 20px 24px; box-sizing: border-box; overflow: hidden; flex-direction: column; background: #f3f7f8; }
+#git-view:not(.hidden) { display: flex; }
 #git-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 #git-bar h2 { margin: 0 8px 0 0; font-size: 18px; }
 #git-tabs { display: flex; gap: 4px; }
@@ -494,16 +505,25 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 #git-tabs button.selected { background: var(--sn-btn); color: #fff; }
 #git-msg { color: #b91c1c; margin: 8px 0 0; }
 #git-msg:empty { display: none; }
-#git-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-top: 12px; }
-#git-list, #git-detail { min-width: 0; }
+#git-body { --git-list-width: 54%; display: grid; grid-template-columns: minmax(0, var(--git-list-width)) 12px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; margin-top: 16px; }
+#git-list, #git-detail { min-width: 0; overflow: auto; overscroll-behavior: contain; background: #fff; border: 1px solid #d9e4e7; }
+#git-list { border-radius: 12px 0 0 12px; padding: 14px 10px; }
+#git-detail { border-radius: 0 12px 12px 0; padding: 24px; line-height: 1.55; }
+#git-detail h3 { margin: 0 0 14px; font-size: 19px; line-height: 1.35; overflow-wrap: anywhere; }
+#git-detail p { margin: 0 0 18px; overflow-wrap: anywhere; }
+#git-detail .refs { display: block; margin-bottom: 20px; }
+#git-detail .git-msg-body { margin: 0 0 20px; }
+#git-divider { cursor: col-resize; touch-action: none; position: relative; }
+#git-divider::after { content: ""; position: absolute; top: 16px; bottom: 16px; left: 5px; width: 2px; border-radius: 2px; background: #bdced3; }
+#git-divider:hover::after, #git-divider:focus-visible::after { background: #167594; width: 4px; left: 4px; }
 .git-svg { flex: none; display: block; }
 .refs .ref { display: inline-block; margin-right: 4px; padding: 0 6px; border-radius: 8px; font-size: 12px; border: 1px solid #c9cdd2; background: #f4f5f7; }
 .ref-head { background: #deffd9; border-color: #1e7a34; font-weight: 700; }
 .ref-remote { background: #c2e6ff; border-color: #1b6e94; }
 .ref-tag { background: #fef3c7; border-color: #d97706; }
 .ref-work { background: #ede9fe; border-color: #7661ff; }
-pre.patch { margin: 8px 0 0; padding: 8px 0; background: #f8fafb; border: 1px solid #c9cdd2; border-radius: 4px; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; }
-pre.patch span { display: block; min-height: 1.5em; padding: 0 10px; }
+pre.patch { margin: 16px 0 0; padding: 12px 0; background: #f8fafb; border: 1px solid #c9cdd2; border-radius: 8px; font: 12px/1.7 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; }
+pre.patch span { display: block; min-height: 1.7em; padding: 0 14px; }
 pre.patch .add { background: #e6ffed; color: #1e7a34; }
 pre.patch .del { background: #ffeef0; color: #b91c1c; }
 pre.patch .hunk { color: #1b6e94; background: #f1f8ff; }
@@ -511,12 +531,21 @@ pre.patch .meta { color: #6b7280; font-weight: 600; }
 pre.patch .cut { color: #92400e; font-style: italic; }
 #git-graph:not(.hidden) { display: flex; align-items: flex-start; }
 .git-rows { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-width: 0; }
-.git-row { height: 28px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 8px; white-space: nowrap; overflow: hidden; cursor: pointer; }
-.git-row:hover { background: #f4f7f9; }
-.git-row.selected { background: #dce8ef; }
+.git-row { height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px; white-space: nowrap; overflow: hidden; cursor: pointer; border-bottom: 1px solid #edf1f2; font-size: 13px; }
+.git-row:hover, .git-row:focus-visible { background: #eef6f7; }
+.git-row.selected { background: #dceef0; box-shadow: inset 3px 0 #157796; }
+.git-row .git-author { display: none; }
+.git-row .git-when, .git-row .git-sha { font-size: 11px; }
+.git-row.git-minor { background: #fafcfc; color: #536b73; }
+.git-row.git-gap { color: #396779; font-size: 12px; font-weight: 600; }
+.git-row.git-gap[aria-expanded="true"] { background: #f1f7f8; }
+.git-row.git-gap .git-subject { padding-left: 4px; }
+.git-graph-note { margin: 0 0 12px; padding: 0 12px; font-size: 12px; color: #536b73; }
 .git-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.git-files { list-style: none; padding: 0; margin: 8px 0; font-size: 13px; }
-.git-file { display: flex; gap: 8px; }
+.git-files { list-style: none; padding: 0; margin: 16px 0 24px; font-size: 13px; }
+.git-file { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid #edf1f2; overflow-wrap: anywhere; }
+.git-file .git-path { min-width: 0; flex: 1; }
+.git-file .git-count { white-space: nowrap; }
 .git-st { font-family: ui-monospace, Menlo, Consolas, monospace; width: 2em; flex: none; }
 .git-msg-body { white-space: pre-wrap; }
 .git-group { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #345c71; margin: 14px 0 4px; }
@@ -531,6 +560,15 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 #git-view button.git-act { padding: 0 8px; font-size: 12px; font-weight: 400; }
 #git-branch-box:not(.hidden) { margin-bottom: 8px; }
 #git-remote { font: inherit; padding: 3px 6px; }
+@media (max-width: 760px) {
+  #git-view { padding: 12px; overflow: auto; }
+  #git-body { display: flex; flex-direction: column; overflow: visible; flex: none; gap: 12px; }
+  #git-list, #git-detail { overflow: auto; border-radius: 12px; }
+  #git-list { max-height: 55vh; }
+  #git-detail { min-height: 160px; padding: 18px; }
+  #git-divider { display: none; }
+  .git-row .git-sha { display: none; }
+}
 </style>
 </head>
 <body>
@@ -656,7 +694,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
         </section>
         <section id="sec-next" class="hidden">
           <p id="next-line"></p>
-          <button id="btn-next" type="button">Plan next stage</button>
+          <button id="btn-next" type="button">Plan and run next stage</button>
           <button id="btn-new" type="button">New project</button>
         </section>
       </div>
@@ -763,6 +801,15 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 <section id="dashboard-view" class="hidden">
   <button id="btn-dashboard-back" type="button">Back</button>
   <h2 id="dash-title">Dashboard</h2>
+  <h3>All projects</h3>
+  <p id="ov-sub" class="muted"></p>
+  <div id="ov-cards"></div>
+  <div id="ov-charts">
+    <figure><figcaption>Cost by project</figcaption><div id="ov-chart-cost"></div></figure>
+    <figure><figcaption>Time taken by project</figcaption><div id="ov-chart-time"></div></figure>
+  </div>
+  <table id="ov-projects"></table>
+  <h3>This run</h3>
   <p id="dash-sub" class="muted"></p>
   <div id="dash-cards"></div>
   <h3>Totals against the average of other runs</h3>
@@ -804,6 +851,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   <p id="git-note" role="status"></p>
   <div id="git-body">
     <div id="git-list">
+      <p id="git-graph-note" class="git-graph-note">Highlights show branch tips, merges and every tenth commit. Click a highlight to reveal nearby work.</p>
       <div id="git-graph" role="tabpanel"></div>
       <div id="git-commit-box" class="hidden">
         <textarea id="git-commit-msg" rows="3" placeholder="Commit message" aria-label="Commit message"></textarea>
@@ -814,7 +862,8 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       <div id="git-branches" role="tabpanel" class="hidden"></div>
       <button id="btn-git-more" type="button" class="hidden">Load more</button>
     </div>
-    <div id="git-detail" aria-label="Details"></div>
+    <div id="git-divider" role="separator" aria-orientation="vertical" aria-label="Resize Git details" aria-valuemin="30" aria-valuemax="75" aria-valuenow="54" tabindex="0" title="Drag to resize Git details, double-click to reset"></div>
+    <div id="git-detail" aria-label="Details"><p class="muted">Select a commit to see its changes.</p></div>
   </div>
 </section>
 <dialog id="img-view"><img id="img-view-img" alt="attached image"><form method="dialog"><button type="submit">Close</button></form></dialog>
@@ -1821,7 +1870,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }
     if (which === 'next') {
       byId('next-line').textContent = 'The last run finished. Plan the next stage of the approved project plan, or start a new project.';
-      byId('btn-next').textContent = 'Plan next stage (' + str(o.next_stage) + ')';
+      byId('btn-next').textContent = 'Plan and run stage ' + str(o.next_stage);
     }
     renderPlanFold(o);
   }
@@ -2364,6 +2413,59 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
     table.replaceChildren(thead, tbody);
   }
+  function barChart(rows, key, unit, fill) {
+    var NS = 'http:' + '//www.w3.org/2000/svg', W = 560, LABEL = 130, VALUE = 90, H = 26;
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + Math.max(1, rows.length) * H);
+    svg.setAttribute('role', 'img');
+    var max = Math.max.apply(null, rows.map(function (r) { return r[key]; }).concat([0]));
+    function mk(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+    rows.forEach(function (r, i) {
+      var y = i * H, track = W - LABEL - VALUE, w = max > 0 ? Math.max(2, r[key] / max * track) : 0;
+      var name = r.name.length > 18 ? r.name.slice(0, 17) + '…' : r.name;
+      var t = mk('title', {}, r.name + ': ' + fmtValue(r[key], unit));
+      var g = mk('g', {});
+      g.appendChild(t);
+      g.appendChild(mk('text', { x: LABEL - 8, y: y + 17, 'text-anchor': 'end', 'class': 'bar-label' }, name));
+      g.appendChild(mk('rect', { x: LABEL, y: y + 5, width: track, height: 16, rx: 4, 'class': 'bar-track' }));
+      g.appendChild(mk('rect', { x: LABEL, y: y + 5, width: w, height: 16, rx: 4, fill: fill }));
+      g.appendChild(mk('text', { x: LABEL + track + 8, y: y + 17, 'class': 'bar-value' }, fmtValue(r[key], unit)));
+      svg.appendChild(g);
+    });
+    return svg;
+  }
+  function renderOverview(o) {
+    byId('ov-sub').textContent = o.total_runs + ' real run' + (o.total_runs === 1 ? '' : 's') + ' across ' + o.projects.length + ' project' + (o.projects.length === 1 ? '' : 's') + ' · cost = workers and reviews plus planning and chats · fake runs are left out';
+    var cards = [
+      ['Total cost', fmtValue(o.total_cost_usd, 'usd'), 'runs ' + fmtValue(o.run_cost_usd, 'usd') + ' · planning ' + fmtValue(o.planning_cost_usd, 'usd')],
+      ['Time taken', fmtDuration(o.total_wall_s), 'worker time ' + fmtDuration(o.total_active_s)],
+      ['Runs', String(o.total_runs), o.projects.length + ' project' + (o.projects.length === 1 ? '' : 's')]
+    ].map(function (c) {
+      var d = el('div', 'dash-card');
+      d.appendChild(el('div', 'k', c[0]));
+      d.appendChild(el('div', 'v', c[1]));
+      d.appendChild(el('div', 'a', c[2]));
+      return d;
+    });
+    byId('ov-cards').replaceChildren.apply(byId('ov-cards'), cards);
+    byId('ov-chart-cost').replaceChildren(barChart(o.projects, 'cost_usd', 'usd', '#1b6e94'));
+    var byTime = o.projects.slice().sort(function (a, b) { return b.wall_s - a.wall_s; });
+    byId('ov-chart-time').replaceChildren(barChart(byTime, 'wall_s', 's', '#63df4e'));
+    fillTable('ov-projects', ['Project', 'Runs', 'Run cost', 'Planning cost', 'Total cost', 'Time taken', 'Worker time'], o.projects.map(function (p) {
+      var td = el('td', null, p.name); td.title = p.path;
+      return [td, String(p.runs), fmtValue(p.run_cost_usd, 'usd'), fmtValue(p.planning_cost_usd, 'usd'), fmtValue(p.cost_usd, 'usd'), fmtDuration(p.wall_s), fmtDuration(p.active_s)];
+    }));
+  }
+  function loadOverview() {
+    fetch('/api/overview').then(function (r) { return r.json(); }).then(function (o) {
+      if (o && Array.isArray(o.projects)) renderOverview(o);
+    }).catch(function () { /* the next refresh retries */ });
+  }
   function renderDashboard(d) {
     byId('dash-title').textContent = 'Dashboard · ' + (d.title || d.run_id);
     var sub = 'Run ' + d.run_id + ' · ' + (d.finished ? 'finished' : 'in progress') + ' · ';
@@ -2392,6 +2494,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }));
   }
   function loadDashboard() {
+    loadOverview();
     if (!current) { byId('dash-sub').textContent = 'No run yet.'; return; }
     fetch('/api/dashboard/' + encodeURIComponent(current)).then(function (r) { return r.json(); }).then(function (d) {
       if (d && Array.isArray(d.metrics)) renderDashboard(d);
@@ -2418,7 +2521,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 
   // ---- Git view helpers: pure, so the tests run them in node
   var LANE_COLORS = ['#1b6e94', '#1e7a34', '#7661ff', '#d97706', '#d64545', '#0891b2', '#a21caf', '#4d7c0f'];
-  var GIT_ROW = 28, GIT_LANE = 14;
+  var GIT_ROW = 56, GIT_LANE = 22;
   var SVG_NS = 'http:' + '//www.w3.org/2000/svg';  // split so the page holds no literal URL
 
   function svgEl(tag, attrs) {
@@ -2432,24 +2535,37 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     var svg = svgEl('svg', {'class': 'git-svg', width: width, height: height,
       viewBox: '0 0 ' + width + ' ' + height, 'aria-hidden': 'true'});
     function x(l) { return l * GIT_LANE + GIT_LANE / 2; }
+    var plotted = [];
     commits.forEach(function (c, r) {
-      var y1 = r * GIT_ROW + GIT_ROW / 2, y2 = y1 + GIT_ROW, mid = y1 + GIT_ROW / 2;
+      if (c.gap) {
+        (c.hidden || []).forEach(function (h, i) {
+          var span = (r + 1 < commits.length ? 2 : 1) * GIT_ROW;
+          plotted.push({commit: h, y: (r - 1) * GIT_ROW + GIT_ROW / 2 + (i + 1) * span / (c.hidden.length + 1)});
+        });
+      } else {
+        plotted.push({commit: c, y: r * GIT_ROW + GIT_ROW / 2});
+      }
+    });
+    plotted.forEach(function (row, r) {
+      var c = row.commit, y1 = row.y, y2 = r + 1 < plotted.length ? plotted[r + 1].y : y1 + GIT_ROW;
+      var mid = (y1 + y2) / 2;
       (c.edges || []).forEach(function (edge) {
         var a = edge[0], b = edge[1];
         var colour = LANE_COLORS[(a === c.lane ? b : a) % 8];
         if (a === b) {
           svg.appendChild(svgEl('line', {x1: x(a), y1: y1, x2: x(b), y2: y2,
-            stroke: colour, 'stroke-width': 2}));
+            stroke: colour, 'stroke-width': 3.5, 'stroke-linecap': 'round'}));
         } else {
           svg.appendChild(svgEl('path', {
             d: 'M' + x(a) + ' ' + y1 + ' C' + x(a) + ' ' + mid + ' ' + x(b) + ' ' + mid + ' ' + x(b) + ' ' + y2,
-            stroke: colour, 'stroke-width': 2, fill: 'none'}));
+            stroke: colour, 'stroke-width': 3.5, 'stroke-linecap': 'round', fill: 'none'}));
         }
       });
     });
     commits.forEach(function (c, r) {
-      svg.appendChild(svgEl('circle', {cx: x(c.lane), cy: r * GIT_ROW + GIT_ROW / 2, r: 4,
-        fill: LANE_COLORS[c.lane % 8]}));
+      svg.appendChild(svgEl('circle', {cx: x(c.lane), cy: r * GIT_ROW + GIT_ROW / 2, r: c.gap ? 4 : 7,
+        fill: c.gap ? '#fff' : LANE_COLORS[c.lane % 8],
+        stroke: LANE_COLORS[c.lane % 8], 'stroke-width': c.gap ? 2 : 0}));
     });
     return svg;
   }
@@ -2503,6 +2619,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   // ---- the Git view: read-only tabs over GET /api/git/* for the open project
   var GIT_TABS = ['graph', 'changes', 'branches'];
   var gitTab = 'graph', gitRemotes = ['origin'], gitLimit = 500, gitSelSha = null, gitRowNodes = {};
+  var gitExpanded = {};
 
   function gitGet(path, done) {
     // GET one /api/git/ route: done(data) on success, else the error sentence goes to git-msg
@@ -2542,13 +2659,26 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   function loadGitGraph() {
     gitGet('/api/git/graph?limit=' + gitLimit + (byId('git-show-harness').checked ? '&harness=1' : ''), renderGitGraph);
   }
+  function gitHighlights(commits) {
+    var groups = [], group = null;
+    commits.forEach(function (c, i) {
+      if (i === 0 || i % 10 === 0 || (c.refs || []).length || (c.parents || []).length > 1) {
+        group = {main: c, minor: []};
+        groups.push(group);
+      } else {
+        group.minor.push(c);
+      }
+    });
+    return groups;
+  }
   function renderGitGraph(page) {
     var commits = (page && Array.isArray(page.commits)) ? page.commits : [];
     var now = Math.floor(Date.now() / 1000);
     gitRowNodes = {};
     var ol = el('ol', 'git-rows');
-    commits.forEach(function (c) {
-      var li = el('li', c.sha === gitSelSha ? 'git-row selected' : 'git-row');
+    var drawn = [];
+    function addCommit(c, minor, hasMinor) {
+      var li = el('li', 'git-row' + (minor ? ' git-minor' : '') + (c.sha === gitSelSha ? ' selected' : ''));
       li.setAttribute('data-sha', c.sha);
       li.setAttribute('role', 'button');
       li.tabIndex = 0;
@@ -2557,12 +2687,38 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       li.appendChild(el('span', 'git-author muted', str(c.author)));
       li.appendChild(el('span', 'git-when muted', relTime(c.time, now)));
       li.appendChild(el('span', 'git-sha mono', str(c.short)));
-      li.addEventListener('click', function () { loadGitCommit(c.sha); });
-      li.addEventListener('keydown', onKey(function () { loadGitCommit(c.sha); }));
+      function select() {
+        loadGitCommit(c.sha);
+        if (hasMinor) {
+          gitExpanded[c.sha] = !gitExpanded[c.sha];
+          renderGitGraph(page);
+        }
+      }
+      li.addEventListener('click', select);
+      li.addEventListener('keydown', onKey(select));
       gitRowNodes[c.sha] = li;
       ol.appendChild(li);
+      drawn.push(c);
+      return li;
+    }
+    gitHighlights(commits).forEach(function (group) {
+      var main = addCommit(group.main, false, group.minor.length > 0);
+      if (!group.minor.length) return;
+      var expanded = !!gitExpanded[group.main.sha];
+      main.title = 'Click to inspect this commit and reveal nearby commits';
+      var gap = el('li', 'git-row git-gap');
+      gap.setAttribute('role', 'button');
+      gap.setAttribute('aria-expanded', String(expanded));
+      gap.tabIndex = 0;
+      gap.appendChild(el('span', 'git-subject', (expanded ? '− Hide' : '+ Show') + ' ' + group.minor.length + ' nearby commit' + (group.minor.length === 1 ? '' : 's')));
+      function toggle() { gitExpanded[group.main.sha] = !gitExpanded[group.main.sha]; renderGitGraph(page); }
+      gap.addEventListener('click', toggle);
+      gap.addEventListener('keydown', onKey(toggle));
+      ol.appendChild(gap);
+      drawn.push({lane: group.minor[0].lane, gap: true, hidden: expanded ? [] : group.minor});
+      if (expanded) group.minor.forEach(function (c) { addCommit(c, true); });
     });
-    if (commits.length) byId('git-graph').replaceChildren(graphSvg(commits, page.lanes), ol);
+    if (commits.length) byId('git-graph').replaceChildren(graphSvg(drawn, page.lanes), ol);
     else byId('git-graph').replaceChildren(el('p', 'muted', 'No commits yet.'));
     setHidden('btn-git-more', !page.more || gitLimit >= 5000 || gitTab !== 'graph');
   }
@@ -2592,9 +2748,10 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   function loadGitCommit(sha) {
     gitSelSha = sha;
     Object.keys(gitRowNodes).forEach(function (k) {
-      setClass(gitRowNodes[k], k === sha ? 'git-row selected' : 'git-row');
+      setClass(gitRowNodes[k], 'git-row' + (gitRowNodes[k].className.indexOf('git-minor') !== -1 ? ' git-minor' : '') + (k === sha ? ' selected' : ''));
     });
     gitGet('/api/git/commit/' + encodeURIComponent(sha), renderGitCommit);
+    byId('git-detail').scrollTop = 0;
   }
   function loadGitChanges() {
     gitGet('/api/git/status', renderGitChanges);
@@ -2868,6 +3025,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       byId('git-tab-' + n).classList.toggle('selected', n === name);
       byId('git-tab-' + n).setAttribute('aria-selected', n === name ? 'true' : 'false');
     });
+    setHidden('git-graph-note', name !== 'graph');
     setHidden('btn-git-more', true);
     setHidden('git-commit-box', name !== 'changes');
     setHidden('git-branch-box', name !== 'branches');
@@ -2878,6 +3036,29 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   }
 
   function wireGit() {
+    var divider = byId('git-divider'), body = byId('git-body');
+    function gitWidth(pct) {
+      pct = Math.max(30, Math.min(75, pct));
+      body.style.setProperty('--git-list-width', pct + '%');
+      divider.setAttribute('aria-valuenow', String(Math.round(pct)));
+    }
+    divider.addEventListener('pointerdown', function (ev) {
+      divider.setPointerCapture(ev.pointerId);
+      gitWidth((ev.clientX - body.getBoundingClientRect().left) / body.clientWidth * 100);
+    });
+    divider.addEventListener('pointermove', function (ev) {
+      if (divider.hasPointerCapture(ev.pointerId)) {
+        gitWidth((ev.clientX - body.getBoundingClientRect().left) / body.clientWidth * 100);
+      }
+    });
+    divider.addEventListener('pointerup', function (ev) { divider.releasePointerCapture(ev.pointerId); });
+    divider.addEventListener('pointercancel', function (ev) { divider.releasePointerCapture(ev.pointerId); });
+    divider.addEventListener('dblclick', function () { gitWidth(54); });
+    divider.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      ev.preventDefault();
+      gitWidth(Number(divider.getAttribute('aria-valuenow')) + (ev.key === 'ArrowRight' ? 5 : -5));
+    });
     byId('btn-git').addEventListener('click', function () { showMain('git-view'); gitShowTab(gitTab); loadGitRemotes(); });
     byId('btn-git-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
     GIT_TABS.forEach(function (n) {
@@ -3133,6 +3314,28 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }
     return info;
   }
+  function phasePill(v) {
+    // {cls, text} for #phase: the phase while running or stopped, the outcome once ended
+    if (v.phase === 'running' || v.phase === 'stopped') {
+      return {cls: 'phase phase-' + v.phase, text: v.phase};
+    }
+    if (v.outcome === 'completed' || v.outcome === 'needs_attention') {
+      var cls = v.outcome === 'completed' ? 'outcome-completed' : 'outcome-attention';
+      return {cls: 'phase ' + cls, text: String(v.outcome_text || v.outcome)};
+    }
+    return {cls: 'phase phase-ended', text: 'ended'};
+  }
+  function progressSuffix(v, info) {
+    // the end of #run-progress-text after "<done> of <total> tasks"
+    if (v.phase === 'stopped') return ' \u00b7 stopped';
+    if (v.phase === 'ended') {
+      if (v.outcome === 'completed') return ' \u00b7 completed';
+      if (v.outcome === 'needs_attention') return ' \u00b7 needs attention';
+      return ' \u00b7 ended';
+    }
+    if (info.eta !== null) return ' \u00b7 ' + fmtEta(info.eta) + ' left';
+    return '';
+  }
   function renderProgress(v) {
     var info = progressInfo(v);
     setHidden('run-progress-box', info.total === 0);
@@ -3141,9 +3344,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     bar.setAttribute('aria-valuenow', String(info.pct));
     bar.className = (v.phase === 'running' && info.active > 0) ? 'active' : '';
     var text = info.done + ' of ' + info.total + ' tasks';
-    if (v.phase === 'finished') text += ' \u00b7 finished';
-    else if (v.phase === 'stopped') text += ' \u00b7 stopped';
-    else if (info.eta !== null) text += ' \u00b7 ' + fmtEta(info.eta) + ' left';
+    text += progressSuffix(v, info);
     byId('run-progress-text').textContent = text;
   }
 
@@ -3151,8 +3352,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     stopped = v.stopped_reason || null;
     idle = (typeof v.idle_minutes === 'number') ? v.idle_minutes : null;
     var ph = document.getElementById('phase');
-    ph.className = 'phase phase-' + str(v.phase);
-    ph.textContent = str(v.phase);
+    var pill = phasePill(v); ph.className = pill.cls; ph.textContent = pill.text;
     renderProgress(v);
 
     var rows = [];

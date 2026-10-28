@@ -22,6 +22,7 @@ from harness.ui.view import (
     build_view,
     command_summary,
     list_runs,
+    outcome_of,
     progress_text,
     step_text,
 )
@@ -236,14 +237,50 @@ def test_capped_view(tmp_path: Path) -> None:
     assert "cost cap reached: $1.2000 of $1.0000" in [e.text for e in view.events]
 
 
-def test_finished_views_have_no_stop_or_activity(tmp_path: Path) -> None:
+def test_ended_views_have_no_stop_or_activity(tmp_path: Path) -> None:
     write_happy_run(tmp_path)
     write_blocked_run(tmp_path)
     for run_id in ("happy1", "blocked1"):
         view = build_view(tmp_path, run_id)
-        assert view.phase == "finished"
+        assert view.phase == "ended"
         assert view.stopped_reason is None
         assert all(t.activity is None for t in view.tasks)
+
+
+def test_outcome_of() -> None:
+    assert outcome_of([]) == ("completed", "completed")
+    assert outcome_of(["done", "done"]) == ("completed", "completed")
+    assert outcome_of(["blocked", "failed", "blocked", "done"]) == (
+        "needs_attention",
+        "needs attention: 1 failed, 2 blocked",
+    )
+    assert outcome_of(["done", "pending", "paused"]) == (
+        "needs_attention",
+        "needs attention: 1 paused, 1 pending",
+    )
+
+
+def test_view_outcomes(tmp_path: Path) -> None:
+    write_happy_run(tmp_path)
+    write_blocked_run(tmp_path)
+    write_capped_run(tmp_path)
+    write_running_run(tmp_path)
+    view = build_view(tmp_path, "happy1")
+    assert (view.phase, view.outcome, view.outcome_text) == ("ended", "completed", "completed")
+    view = build_view(tmp_path, "blocked1")
+    assert (view.phase, view.outcome, view.outcome_text) == (
+        "ended",
+        "needs_attention",
+        "needs attention: 3 blocked",
+    )
+    view = build_view(tmp_path, "capped1")
+    assert (view.phase, view.outcome, view.outcome_text) == (
+        "stopped",
+        "needs_attention",
+        "needs attention: 2 pending",
+    )
+    view = build_view(tmp_path, "running1")
+    assert (view.phase, view.outcome, view.outcome_text) == ("running", None, "")
 
 
 def test_running_activity(tmp_path: Path) -> None:

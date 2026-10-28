@@ -65,6 +65,18 @@ def test_stage_dot_skips_harness(tmp_path):
     assert status(repo) == "A  b.txt\n?? .harness/\n"
 
 
+def test_stage_dot_when_harness_is_ignored(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".harness/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "ignore harness")
+    (repo / ".harness").mkdir()
+    (repo / ".harness" / "x").write_text("x\n")
+    (repo / "b.txt").write_text("b\n")
+    stage(repo, ["."])
+    assert status(repo) == "A  b.txt\n"
+
+
 @pytest.mark.parametrize(
     ("paths", "message"),
     [

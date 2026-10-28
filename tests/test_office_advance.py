@@ -83,6 +83,30 @@ def test_auto_advance_off_stays_idle(tmp_path, make_office, ids):
     assert _types(tmp_path).count("planner_started") == 1
 
 
+def test_blocked_run_offers_no_next_stage(tmp_path, make_office, ids):
+    office, _ = launched(make_office, auto_advance=False)
+    finish(tmp_path, "run1", ["blocked", "blocked"])
+    wait_for(state_is(office, "idle"))
+    assert office.view().next_stage is None
+    assert _types(tmp_path).count("planner_started") == 1
+
+
+def test_mixed_run_offers_no_next_stage(tmp_path, make_office, ids):
+    office, _ = launched(make_office, auto_advance=False)
+    finish(tmp_path, "run1", ["done", "failed"])
+    wait_for(state_is(office, "idle"))
+    assert office.view().next_stage is None
+    assert _types(tmp_path).count("planner_started") == 1
+
+
+def test_paused_run_offers_no_next_stage(tmp_path, make_office, ids):
+    office, _ = launched(make_office, auto_advance=False)
+    finish(tmp_path, "run1", ["done", "paused"])
+    wait_for(state_is(office, "idle"))
+    assert office.view().next_stage is None
+    assert _types(tmp_path).count("planner_started") == 1
+
+
 def test_stopped_stage_reports_counts_and_is_resumable(tmp_path, make_office, ids):
     office, launches = launched(make_office)
     finish(tmp_path, "run1", ["done", "failed", "blocked", "paused"])
