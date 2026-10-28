@@ -100,9 +100,10 @@ def test_start_ask_message_ready(tmp_path, make_office):
     office.message("my answers")
     wait_for(state_is(office, "ready"))
     v = office.view()
-    assert "Draft written" in (v.reply or "")
+    assert "3 orders" in (v.reply or "")
     assert v.plan_exists and v.plan_status == "draft"
-    assert v.cost_usd == pytest.approx(0.02)
+    assert (tmp_path / ".harness/plans/stage-1/plan.json").is_file()
+    assert v.cost_usd == pytest.approx(0.03)
     types = _types(tmp_path)
     assert types[0] == "planner_started"
     assert types.count("plan_ready") == 1
@@ -628,7 +629,7 @@ def test_transcript_follows_the_conversation(tmp_path, make_office):
     office.message("  my answers \n")
     wait_for(state_is(office, "ready"))
     tr = office.view().transcript
-    assert [m.role for m in tr] == ["user", "opus", "user", "opus"]
+    assert [m.role for m in tr] == ["user", "opus", "user", "opus", "opus"]
     assert tr[0].text == "a demo project"
     assert tr[2].text == "my answers"
     assert all(m.blocks == [] for m in tr if m.role == "user")

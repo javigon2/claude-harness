@@ -123,10 +123,10 @@ async def test_auto_no_route_falls_back_to_project(
         [
             step("Questions?", 0.1),
             step("Draft.", 0.1, lambda: write_project(repo, "draft")),
-            step("Approved.", 0.1, lambda: write_project(repo, "approved 2026-10-14")),
             step(
                 "Stage.", 0.1, lambda: write_plan(repo / STAGE_PLAN_DIR / "plan.json", VALID_PLAN)
             ),
+            step("Approved.", 0.1, lambda: write_project(repo, "approved 2026-10-14")),
         ]
     )
     ask, _ = asker(["defaults", "approve"])

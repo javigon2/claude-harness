@@ -13,7 +13,9 @@ from claude_agent_sdk import (
 
 from harness.config import MODEL_IDS
 from harness.models import Usage
+from harness.plan import load_plan
 from harness.planner import (
+    DRAFT_STAGE_PROMPT,
     FIX_PROMPT,
     HARNESS_ROOT,
     PLANNER_APPEND,
@@ -357,8 +359,8 @@ def happy_steps(repo: Path) -> list:
     return [
         step("Some questions?", 0.1),
         step("Draft plan written. Approve?", 0.2, lambda: write_project(repo, "draft")),
-        step("Approved.", 0.3, lambda: write_project(repo, "approved 2026-10-14")),
-        step("Stage plan written.", 0.4, lambda: write_stage(repo, VALID_PLAN)),
+        step("Stage plan written.", 0.3, lambda: write_stage(repo, VALID_PLAN)),
+        step("Approved.", 0.4, lambda: write_project(repo, "approved 2026-10-14")),
     ]
 
 
@@ -375,37 +377,80 @@ async def test_run_planner_happy_path(tmp_path: Path) -> None:
     assert session.sent[0] == PROJECT_PROMPT.format(
         repo=repo, project_plan=repo / PROJECT_PLAN_FILE, description="build a thing"
     )
-    assert session.sent[1:3] == ["defaults", "approve"]
-    assert session.sent[3] == STAGE_PROMPT.format(
+    assert session.sent[1] == "defaults"
+    assert session.sent[2] == DRAFT_STAGE_PROMPT.format(
         project_plan=repo / PROJECT_PLAN_FILE, stage=1, stage_dir=repo / STAGE_PLAN_DIR
     )
+    assert session.sent[3] == "approve"
     assert said == [
         "Some questions?",
         "Draft plan written. Approve?",
-        "Approved.",
         "Stage plan written.",
+        "Approved.",
     ]
     assert asked == ["> ", "> "]
     assert session.closed
 
 
-async def test_run_planner_fixes_invalid_plan(tmp_path: Path) -> None:
+async def test_draft_revision_rewrites_orders_before_approval(tmp_path: Path) -> None:
+    def revise() -> None:
+        write_project(tmp_path, "draft", "new scope")
+
     steps = happy_steps(tmp_path)[:3] + [
+        step("Revised draft.", 0.4, revise),
+        step("New orders.", 0.5, lambda: write_stage(tmp_path, {**VALID_PLAN, "stage": "new"})),
+        step("Approved.", 0.6, lambda: write_project(tmp_path, "approved 2026-10-14", "new scope")),
+    ]
+    session = FakePlannerSession(steps)
+    ask, _ = asker(["defaults", "revise", "approve"])
+    result = await run_planner("d", tmp_path, session, ask, lambda _t: None)
+    assert session.sent[2] == session.sent[4]
+    assert session.sent[3] == "revise"
+    assert result.rounds == 6
+    assert load_plan(result.plan_path).stage == "new"
+
+
+async def test_approval_after_out_of_band_edit_regenerates_orders(tmp_path: Path) -> None:
+    def edited_approval() -> None:
+        write_project(tmp_path, "approved 2026-10-14", "changed after draft")
+
+    session = FakePlannerSession(
+        happy_steps(tmp_path)[:3]
+        + [
+            step("Approved.", 0.4, edited_approval),
+            step(
+                "Updated.",
+                0.5,
+                lambda: write_stage(tmp_path, {**VALID_PLAN, "stage": "updated"}),
+            ),
+        ]
+    )
+    ask, _ = asker(["defaults", "approve"])
+    result = await run_planner("d", tmp_path, session, ask, lambda _t: None)
+    assert session.sent[4] == STAGE_PROMPT.format(
+        project_plan=result.project_plan, stage=1, stage_dir=result.plan_path.parent
+    )
+    assert load_plan(result.plan_path).stage == "updated"
+
+
+async def test_run_planner_fixes_invalid_plan(tmp_path: Path) -> None:
+    steps = happy_steps(tmp_path)[:2] + [
         step("bad", 0.4, lambda: write_stage(tmp_path, INVALID_PLAN)),
         step("fixed", 0.5, lambda: write_stage(tmp_path, VALID_PLAN)),
+        step("Approved.", 0.6, lambda: write_project(tmp_path, "approved 2026-10-14")),
     ]
     session = FakePlannerSession(steps)
     ask, _ = asker(["defaults", "approve"])
     result = await run_planner("d", tmp_path, session, ask, lambda _t: None)
     plan_path = tmp_path.resolve() / STAGE_PLAN_DIR / "plan.json"
-    fix = session.sent[4]
+    fix = session.sent[3]
     assert fix.startswith(FIX_PROMPT.split("{plan_path}")[0])
     assert "unknown dependency: a depends on zz" in fix
     assert fix == FIX_PROMPT.format(
         plan_path=plan_path, error="unknown dependency: a depends on zz"
     )
     assert result.rounds == 5
-    assert result.usage.cost_usd == pytest.approx(0.5)
+    assert result.usage.cost_usd == pytest.approx(0.6)
     assert session.closed
 
 
@@ -413,7 +458,7 @@ async def test_run_planner_still_invalid(tmp_path: Path) -> None:
     def bad(n: int):
         return step(f"bad {n}", 0.1, lambda: write_stage(tmp_path, "{not json" + "x" * n))
 
-    steps = happy_steps(tmp_path)[:3] + [bad(1), bad(2), bad(3)]
+    steps = happy_steps(tmp_path)[:2] + [bad(1), bad(2), bad(3)]
     session = FakePlannerSession(steps)
     ask, _ = asker(["defaults", "approve"])
     with pytest.raises(PlannerError, match="still invalid after 2 fixes"):
@@ -478,20 +523,20 @@ async def test_run_planner_preexisting_approved_plan_needs_rewrite(tmp_path: Pat
 
 async def test_run_planner_ignores_stale_plan_json(tmp_path: Path) -> None:
     write_stage(tmp_path, VALID_PLAN)
-    steps = happy_steps(tmp_path)[:3] + [
-        step("Which tiers?", 0.4),
+    steps = happy_steps(tmp_path)[:2] + [
         step(
             "Written.",
             0.5,
             lambda: write_stage(tmp_path, {**VALID_PLAN, "stage": "new"}),
         ),
+        step("Approved.", 0.6, lambda: write_project(tmp_path, "approved 2026-10-14")),
     ]
     session = FakePlannerSession(steps)
-    ask, _ = asker(["defaults", "approve", "sonnet"])
+    ask, _ = asker(["defaults", "approve"])
     result = await run_planner("d", tmp_path, session, ask, lambda _t: None)
-    assert result.rounds == 5
-    assert session.sent[4] == "sonnet"
-    assert result.usage.cost_usd == pytest.approx(0.5)
+    assert result.rounds == 4
+    assert session.sent[2].startswith(str(tmp_path.resolve() / PROJECT_PLAN_FILE))
+    assert result.usage.cost_usd == pytest.approx(0.6)
 
 
 def test_stage_plan_dir() -> None:
@@ -622,14 +667,14 @@ async def test_run_planner_reports_session_init_once(tmp_path: Path) -> None:
     def first(_msg: str) -> PlannerTurn:
         return PlannerTurn(text="Some questions?", usage=Usage(cost_usd=0.1), session_init=FACTS)
 
-    def third(_msg: str) -> PlannerTurn:
+    def fourth(_msg: str) -> PlannerTurn:
         write_project(tmp_path, "approved 2026-10-14")
         return PlannerTurn(
             text="Approved.", usage=Usage(cost_usd=0.3), session_init={**FACTS, "model": "x"}
         )
 
     steps[0] = first
-    steps[2] = third
+    steps[3] = fourth
     session = FakePlannerSession(steps)
     ask, _ = asker(["defaults", "approve"])
     said: list[str] = []
@@ -638,8 +683,8 @@ async def test_run_planner_reports_session_init_once(tmp_path: Path) -> None:
     assert said[1:] == [
         "Some questions?",
         "Draft plan written. Approve?",
-        "Approved.",
         "Stage plan written.",
+        "Approved.",
     ]
     saved = tmp_path.resolve() / PLANNER_INIT_FILE
     assert json.loads(saved.read_text(encoding="utf-8")) == FACTS

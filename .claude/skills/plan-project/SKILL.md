@@ -19,7 +19,8 @@ your replies as plain terminal text and answers by typing. So:
 - ask questions and request approval **in your reply text**, never through a question
   or form tool;
 - after asking, **end your turn** and wait for the answer;
-- never run `plan-stage`, write code, or create project files other than the plan.
+- write only the project plan in this skill; the harness will invoke `plan-stage`
+  on stage 1 before it asks the user for approval. Never write implementation code.
 
 ## Inputs
 

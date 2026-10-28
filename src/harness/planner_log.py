@@ -128,7 +128,7 @@ class ObservedSession:
         changed = after not in (None, before)
         self._own_cost = turn.usage.cost_usd
         self.reply_text = turn.text
-        self.ready = False
+        self.ready = self.ready and self._phase() == "project" and not self._approved()
         self._log.emit(
             "planner_reply",
             {"text": turn.text, "plan_changed": changed, "cost_usd": self.cost_usd},

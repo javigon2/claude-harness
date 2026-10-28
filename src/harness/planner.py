@@ -1,6 +1,6 @@
-"""Planner behind `harness plan`: one interactive Opus session that runs the plan-project
-skill until the user approves PROJECT_PLAN.md, then plan-stage on stage N until it writes a
-plan.json that load_plan accepts. Every file goes under <repo>/.harness/plans/. run_planner can
+"""Planner behind `harness plan`: one interactive Opus session that writes the project
+plan and stage 1 orders before asking for approval. Later stages use plan-stage on demand.
+Every file goes under <repo>/.harness/plans/. run_planner can
 also triage a request (direct, quick or project) in a separate one-turn Sonnet session with
 read-only tools, and write a quick one-stage plan under .harness/plans/quick-<stamp>/."""
 
@@ -75,6 +75,14 @@ STAGE_PROMPT = (
     "{project_plan} is approved. Now use the plan-stage skill on stage {stage} of "
     "{project_plan}. Write plan.json and plan.md to {stage_dir}/ (exactly this "
     "directory). Run the skill's validation snippet before you finish."
+)
+
+DRAFT_STAGE_PROMPT = (
+    "{project_plan} is a draft. Use the plan-stage skill on stage {stage} now, "
+    "before asking for approval, so the user can review the plan and work orders together. "
+    "Write plan.json and plan.md to {stage_dir}/ (exactly this directory). "
+    "Run the skill's validation snippet before you finish. "
+    "Do not approve the project plan or start implementation."
 )
 
 FIX_PROMPT = (
@@ -284,6 +292,11 @@ def _fingerprint(path: Path) -> str | None:
     except FileNotFoundError:
         return None
     return hashlib.sha256(data).hexdigest()
+
+
+def _approval_neutral_plan(text: str) -> str:
+    """Ignore only the status transition when checking if draft orders are current."""
+    return APPROVED_RE.sub("Status: draft", text)
 
 
 class SdkPlannerSession:
@@ -541,9 +554,11 @@ async def run_planner(
     async def plan_turn(msg: str, plan_path: Path) -> bool:
         nonlocal plan_fp, fixes
         while True:
+            before_mtime = plan_path.stat().st_mtime_ns if plan_path.is_file() else None
             await turn(msg)
             fp = _fingerprint(plan_path)
-            if fp is None or fp == plan_fp:
+            after_mtime = plan_path.stat().st_mtime_ns if plan_path.is_file() else None
+            if fp is None or (fp == plan_fp and before_mtime == after_mtime):
                 return False
             plan_fp = fp
             try:
@@ -618,15 +633,37 @@ async def run_planner(
 
         if stage == 1 and not staging_only:
             start_fp = _fingerprint(project_plan)
+            draft_source: str | None = None
             msg = PROJECT_PROMPT.format(
                 repo=repo, project_plan=project_plan, description=description.strip()
             )
             while True:
                 await turn(msg)
-                if _fingerprint(project_plan) not in (None, start_fp) and is_approved(
-                    project_plan.read_text(encoding="utf-8")
-                ):
-                    break
+                changed = _fingerprint(project_plan)
+                if changed is not None and changed != start_fp:
+                    text = project_plan.read_text(encoding="utf-8")
+                    if is_approved(text):
+                        if (
+                            draft_source is not None
+                            and _approval_neutral_plan(text) == draft_source
+                        ):
+                            try:
+                                load_plan(plan_path)
+                            except (PlanError, ValueError, OSError):
+                                pass
+                            else:
+                                return result(plan_path, "project", triage)
+                        break
+                    if text != draft_source:
+                        plan_fp = _fingerprint(plan_path)
+                        if not await plan_turn(
+                            DRAFT_STAGE_PROMPT.format(
+                                project_plan=project_plan, stage=stage, stage_dir=stage_dir
+                            ),
+                            plan_path,
+                        ):
+                            raise PlannerError(f"planner did not write work orders to {plan_path}")
+                        draft_source = text
                 msg = await answer()
         elif not project_plan.is_file() or not is_approved(
             project_plan.read_text(encoding="utf-8")

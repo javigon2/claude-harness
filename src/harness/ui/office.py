@@ -40,6 +40,7 @@ from harness.planner import (
     Triage,
     quick_plan_dir,
     run_planner,
+    stage_plan_dir,
 )
 from harness.planner_log import (
     ObservedSession,
@@ -1060,7 +1061,13 @@ class Office:
                             "plan_ready", {"path": rel, "cost_usd": self._current_cost()}
                         )
             else:
-                self._state = "ready" if observed is not None and observed.ready else "asking"
+                ready = observed is not None and observed.ready
+                if self._phase == "project" and plan_status(self.repo) == "draft":
+                    try:
+                        load_plan(self.repo / stage_plan_dir(1) / "plan.json")
+                    except (PlanError, OSError, ValueError):
+                        ready = False
+                self._state = "ready" if ready else "asking"
             self._waiting = True
             self._last_activity = self._clock()
         poll = min(1.0, max(0.05, self.idle_timeout_s / 4))
