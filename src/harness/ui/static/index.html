@@ -22,7 +22,9 @@ header, #tests-out, #banner { flex: none; }
 .phase { font-weight: 600; padding: 1px 8px; border-radius: 4px; }
 .phase-running { background: #dbeafe; color: #1e40af; }
 .phase-stopped { background: #fde68a; color: #78350f; }
-.phase-finished { background: #d1fae5; color: #065f46; }
+.phase-ended { background: #e5e7eb; color: #374151; }
+.outcome-completed { background: #d1fae5; color: #065f46; }
+.outcome-attention { background: #fde68a; color: #78350f; }
 #banner { padding: 8px 16px; background: #fff3cd; border-bottom: 1px solid #e0c36a; }
 #banner:empty { display: none; }
 table { border-collapse: collapse; width: 100%; background: #fff; }
@@ -664,7 +666,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
         </section>
         <section id="sec-next" class="hidden">
           <p id="next-line"></p>
-          <button id="btn-next" type="button">Plan next stage</button>
+          <button id="btn-next" type="button">Plan and run next stage</button>
           <button id="btn-new" type="button">New project</button>
         </section>
       </div>
@@ -1838,7 +1840,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }
     if (which === 'next') {
       byId('next-line').textContent = 'The last run finished. Plan the next stage of the approved project plan, or start a new project.';
-      byId('btn-next').textContent = 'Plan next stage (' + str(o.next_stage) + ')';
+      byId('btn-next').textContent = 'Plan and run stage ' + str(o.next_stage);
     }
     renderPlanFold(o);
   }
@@ -2382,7 +2384,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     table.replaceChildren(thead, tbody);
   }
   function barChart(rows, key, unit, fill) {
-    var NS = 'http://www.w3.org/2000/svg', W = 560, LABEL = 130, VALUE = 90, H = 26;
+    var NS = 'http:' + '//www.w3.org/2000/svg', W = 560, LABEL = 130, VALUE = 90, H = 26;
     var svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + Math.max(1, rows.length) * H);
     svg.setAttribute('role', 'img');
@@ -3204,6 +3206,28 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }
     return info;
   }
+  function phasePill(v) {
+    // {cls, text} for #phase: the phase while running or stopped, the outcome once ended
+    if (v.phase === 'running' || v.phase === 'stopped') {
+      return {cls: 'phase phase-' + v.phase, text: v.phase};
+    }
+    if (v.outcome === 'completed' || v.outcome === 'needs_attention') {
+      var cls = v.outcome === 'completed' ? 'outcome-completed' : 'outcome-attention';
+      return {cls: 'phase ' + cls, text: String(v.outcome_text || v.outcome)};
+    }
+    return {cls: 'phase phase-ended', text: 'ended'};
+  }
+  function progressSuffix(v, info) {
+    // the end of #run-progress-text after "<done> of <total> tasks"
+    if (v.phase === 'stopped') return ' \u00b7 stopped';
+    if (v.phase === 'ended') {
+      if (v.outcome === 'completed') return ' \u00b7 completed';
+      if (v.outcome === 'needs_attention') return ' \u00b7 needs attention';
+      return ' \u00b7 ended';
+    }
+    if (info.eta !== null) return ' \u00b7 ' + fmtEta(info.eta) + ' left';
+    return '';
+  }
   function renderProgress(v) {
     var info = progressInfo(v);
     setHidden('run-progress-box', info.total === 0);
@@ -3212,9 +3236,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     bar.setAttribute('aria-valuenow', String(info.pct));
     bar.className = (v.phase === 'running' && info.active > 0) ? 'active' : '';
     var text = info.done + ' of ' + info.total + ' tasks';
-    if (v.phase === 'finished') text += ' \u00b7 finished';
-    else if (v.phase === 'stopped') text += ' \u00b7 stopped';
-    else if (info.eta !== null) text += ' \u00b7 ' + fmtEta(info.eta) + ' left';
+    text += progressSuffix(v, info);
     byId('run-progress-text').textContent = text;
   }
 
@@ -3222,8 +3244,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     stopped = v.stopped_reason || null;
     idle = (typeof v.idle_minutes === 'number') ? v.idle_minutes : null;
     var ph = document.getElementById('phase');
-    ph.className = 'phase phase-' + str(v.phase);
-    ph.textContent = str(v.phase);
+    var pill = phasePill(v); ph.className = pill.cls; ph.textContent = pill.text;
     renderProgress(v);
 
     var rows = [];

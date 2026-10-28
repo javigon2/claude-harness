@@ -16,8 +16,8 @@ from harness.ui.server import make_server
 PAGE = Path(harness.ui.__file__).parent / "static" / "index.html"
 STATUSES = ["pending", "running", "verifying", "done", "failed", "blocked", "paused"]
 RUN_KEYS = [
-    "stage", "phase", "stopped_reason", "idle_minutes", "wave", "waves_total", "cost_usd",
-    "tiers", "tasks", "events",
+    "stage", "phase", "outcome", "outcome_text", "stopped_reason", "idle_minutes", "wave",
+    "waves_total", "cost_usd", "tiers", "tasks", "events",
 ]  # fmt: skip
 TASK_KEYS = [
     "task_id", "title", "status", "tier", "attempt", "max_attempts", "escalated", "cost_usd",
@@ -72,7 +72,7 @@ def test_mentions():
 
 
 @pytest.mark.parametrize("cls", [f"status-{s}" for s in STATUSES] + [
-    "phase-running", "phase-stopped", "phase-finished",
+    "phase-running", "phase-stopped", "phase-ended", "outcome-completed", "outcome-attention",
 ])  # fmt: skip
 def test_css_rules(cls):
     assert re.search(rf"\.{cls}\s*\{{", _text())
@@ -1330,6 +1330,7 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
 
 # ---------------------------------------------------------------- the Orchestrator composer
 
+
 def test_orchestrator_composer_markup():
     text = _text()
     assert '<div id="orch-composer" class="hidden">' in text
@@ -1794,7 +1795,7 @@ function run(phase, statuses) {
 var out = [
   progressInfo(run('running', ['done', 'running', 'pending', 'pending'])),
   progressInfo(run('running', ['pending', 'pending'])),
-  progressInfo(run('finished', ['done', 'done'])),
+  progressInfo(run('ended', ['done', 'done'])),
   progressInfo({phase: 'running', tasks: [], events: []}),
   [fmtEta(20000), fmtEta(5 * 60000), fmtEta(125 * 60000)],
 ];
