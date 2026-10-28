@@ -32,7 +32,7 @@ from harness.planner import PROJECT_PLAN_FILE
 from harness.report import report_data, report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
 from harness.ui.chat import CHAT_TIERS, ChatConflict
-from harness.ui.git_routes import git_get
+from harness.ui.git_routes import GIT_POST_ROUTES, BadGitBody, check_git_body, git_get, git_post
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
 from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
@@ -502,6 +502,9 @@ def make_handler(
                 kind, route, known = "upload", "", True
             elif path == "/api/tests/run":
                 kind, route, known = "tests", "run", True
+            elif path.startswith("/api/git/"):
+                kind, route = "git", path[len("/api/git/") :]
+                known = route in GIT_POST_ROUTES
             else:
                 known = False
             if not known:
@@ -544,10 +547,13 @@ def make_handler(
                     body = _check_orch_body(route, parsed)
                 elif kind in ("project", "server"):
                     body = _check_project_body(route, parsed)
+                elif kind == "git":
+                    body = check_git_body(route, parsed)
                 else:
                     body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
-                self._json(400, {"error": str(err) if isinstance(err, _BadBody) else "bad JSON"})
+                bad = isinstance(err, (_BadBody, BadGitBody))
+                self._json(400, {"error": str(err) if bad else "bad JSON"})
                 return
             if kind in ("project", "server"):
                 assert host is not None
@@ -563,6 +569,13 @@ def make_handler(
                     self._json(409, {"error": str(err)})
                     return
                 self._json(200, {"ok": True, "tests": started})
+                return
+            if kind == "git":
+                if self._no_project:
+                    self._json(409, {"error": NO_PROJECT})
+                    return
+                code, reply = git_post(self._repo, route, body, self._git_busy())
+                self._json(code, reply)
                 return
             office = self._office
             if office is None:
@@ -625,6 +638,14 @@ def make_handler(
                 self._json(409, {"error": str(err)})
                 return
             self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
+
+        def _git_busy(self) -> str | None:
+            """Why git writes are refused now, or None: the Host's busy reason, else a run
+            still going in the project."""
+            reason = host.busy() if host is not None else None
+            if reason is None and (live := live_run(self._repo)) is not None:
+                reason = f"a run is active ({live}); wait for it to finish"
+            return reason
 
         def _project_post(self, host: Host, route: str, body: dict) -> None:
             """The /api/project/* and /api/server/restart routes. ProjectError answers 400;
