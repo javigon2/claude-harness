@@ -519,6 +519,11 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 .git-file { display: flex; gap: 8px; }
 .git-st { font-family: ui-monospace, Menlo, Consolas, monospace; width: 2em; flex: none; }
 .git-msg-body { white-space: pre-wrap; }
+.git-group { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #345c71; margin: 14px 0 4px; }
+.git-branch-list { list-style: none; margin: 0; padding: 0; }
+.git-branch, #git-changes .git-file { display: flex; gap: 10px; align-items: center; padding: 4px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+.git-branch:hover, #git-changes .git-file:hover { background: #f4f7f9; }
+.git-branch.current .git-name { font-weight: 700; }
 </style>
 </head>
 <body>
@@ -2556,10 +2561,97 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     gitGet('/api/git/commit/' + encodeURIComponent(sha), renderGitCommit);
   }
   function loadGitChanges() {
-    // the Changes tab: filled in with the working-tree status
+    gitGet('/api/git/status', renderGitChanges);
   }
   function loadGitBranches() {
-    // the Branches tab: filled in with the branch list
+    gitGet('/api/git/branches' + (byId('git-show-harness').checked ? '?harness=1' : ''), renderGitBranches);
+  }
+
+  function gitTrack(b) {
+    var parts = [];
+    if (b.upstream) parts.push('↑' + b.ahead + ' ↓' + b.behind + ' vs ' + b.upstream);
+    if (b.base) parts.push('↑' + b.base_ahead + ' ↓' + b.base_behind + ' vs base ' + b.base);
+    return parts.join(' · ');
+  }
+
+  function renderGitBranches(list) {
+    if (Array.isArray(list.remotes)) gitRemotes = list.remotes;
+    var parts = [];
+    if (list.detached) parts.push(el('p', 'muted', 'HEAD is detached.'));
+    var all = Array.isArray(list.branches) ? list.branches : [];
+    [['local', 'Local'], ['remote', 'Remote']].forEach(function (k) {
+      var rows = all.filter(function (b) { return b.kind === k[0]; });
+      if (!rows.length) return;
+      parts.push(el('h3', 'git-group', k[1]));
+      var ul = el('ul', 'git-branch-list');
+      rows.forEach(function (b) {
+        var li = el('li', b.current ? 'git-branch current' : 'git-branch');
+        li.setAttribute('role', 'button');
+        li.tabIndex = 0;
+        li.appendChild(el('span', 'git-name mono', str(b.name)));
+        li.appendChild(el('span', 'git-track muted', gitTrack(b)));
+        li.appendChild(el('span', 'git-subject', str(b.subject)));
+        li.appendChild(el('span', 'git-when muted', relTime(b.time, Math.floor(Date.now() / 1000))));
+        li.addEventListener('click', function () { loadGitCommit(b.sha); });
+        li.addEventListener('keydown', onKey(function () { loadGitCommit(b.sha); }));
+        ul.appendChild(li);
+      });
+      parts.push(ul);
+    });
+    if (!all.length) parts.push(el('p', 'muted', 'No branches yet.'));
+    var box = byId('git-branches');
+    box.replaceChildren.apply(box, parts);
+  }
+
+  function gitDiff(path, staged) {
+    gitGet('/api/git/diff?path=' + encodeURIComponent(path) + (staged ? '&staged=1' : ''), renderGitDiff);
+  }
+
+  function renderGitDiff(d) {
+    var box = byId('git-detail');
+    var parts = [el('h3', null, str(d.path) + (d.staged ? ' (staged)' : ''))];
+    if (d.binary) parts.push(el('p', 'muted', 'Binary file; no text diff.'));
+    else if (d.patch === '') parts.push(el('p', 'muted', 'No changes.'));
+    else parts.push(patchHtml(d.patch, d.truncated));
+    box.replaceChildren.apply(box, parts);
+  }
+
+  function renderGitChanges(st) {
+    var where = st.branch ? 'On ' + st.branch : (st.detached ? 'HEAD is detached' : 'No commit yet');
+    if (st.merging) where += ' · merge in progress';
+    var parts = [el('p', 'git-where', where)];
+    var entries = Array.isArray(st.entries) ? st.entries : [];
+    var groups = [
+      ['Conflicted', function (e) { return e.conflicted; },
+        function (e) { return e.staged + e.unstaged; }, false],
+      ['Staged', function (e) { return !e.conflicted && !e.untracked && e.staged !== ' '; },
+        function (e) { return e.staged; }, true],
+      ['Unstaged', function (e) { return !e.conflicted && !e.untracked && e.unstaged !== ' '; },
+        function (e) { return e.unstaged; }, false],
+      ['Untracked', function (e) { return e.untracked; }, function () { return '?'; }, false]
+    ];
+    var any = false;
+    groups.forEach(function (g) {
+      var rows = entries.filter(g[1]);
+      if (!rows.length) return;
+      any = true;
+      parts.push(el('h3', 'git-group', g[0] + ' (' + rows.length + ')'));
+      var ul = el('ul', 'git-files');
+      rows.forEach(function (e) {
+        var li = el('li', 'git-file');
+        li.setAttribute('role', 'button');
+        li.tabIndex = 0;
+        li.appendChild(el('span', 'git-st', g[2](e)));
+        li.appendChild(el('span', 'git-path', e.old_path ? e.old_path + ' → ' + e.path : e.path));
+        li.addEventListener('click', function () { gitDiff(e.path, g[3]); });
+        li.addEventListener('keydown', onKey(function () { gitDiff(e.path, g[3]); }));
+        ul.appendChild(li);
+      });
+      parts.push(ul);
+    });
+    if (!any) parts.push(el('p', 'muted', 'Nothing to commit: the working tree is clean.'));
+    var box = byId('git-changes');
+    box.replaceChildren.apply(box, parts);
   }
 
   function gitLoad() {
