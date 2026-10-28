@@ -27,9 +27,11 @@ from harness.planner import PlannerSession, SdkPlannerSession
 from harness.state import StateError, load_state, new_run_id, run_dir
 from harness.ui.chat_git import changed_paths, chat_commit_message, commit_paths, dirty_snapshot
 from harness.ui.demo import DemoChatSession
+from harness.ui.gitops import GitOpError
 from harness.ui.markdown import parse_markdown
 from harness.ui.uploads import attachment_note, image_ids
 from harness.ui.view import progress_text
+from harness.ui.work_branch import WORK_PREFIX, current_branch, ensure_work_branch
 from harness.worker import WORKER_ENV, WORKER_TOOLS, ProgressFn
 from harness.worktree import WorktreeError
 
@@ -338,7 +340,9 @@ class ChatManager:
     """Owns the open chats of one `harness ui` server: at most one per tier in CHAT_TIERS.
 
     Each chat runs on its own daemon thread with its own asyncio loop; messages cross over
-    `_Chat.inbox`. `busy_fn()` returns a sentence while chats must not edit the repo (a run
+    `_Chat.inbox`. `live_fn()` returns the id of a live run (default: office.live_run), and
+    while one is live a chat commits only when it is already on a work branch.
+    `busy_fn()` returns a sentence while chats must not edit the repo (a run
     is live, or the office is staging) and None otherwise; it is always called before
     taking `_lock`, never while holding it. `fake` swaps in DemoChatSession;
     `session_factory(repo, tier, progress)` overrides both."""
@@ -351,6 +355,7 @@ class ChatManager:
         fake_delay: float = 2.0,
         session_factory: ChatSessionFactory | None = None,
         busy_fn: Callable[[], str | None] = lambda: None,
+        live_fn: Callable[[], str | None] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         """self.repo = Path(repo).resolve(); keep busy_fn and clock; the factory is
@@ -359,6 +364,14 @@ class ChatManager:
         self._lock = threading.Lock(); self._chats: dict[str, _Chat] = {}."""
         self.repo = Path(repo).resolve()
         self._busy_fn = busy_fn
+        if live_fn is None:
+
+            def live_fn() -> str | None:
+                from harness.ui.office import live_run
+
+                return live_run(self.repo)
+
+        self._live_fn = live_fn
         self._clock = clock
         if session_factory is not None:
             self._factory: ChatSessionFactory = session_factory
@@ -376,6 +389,21 @@ class ChatManager:
             self._factory = sdk_factory
         self._lock = threading.Lock()
         self._chats: dict[str, _Chat] = {}
+
+    def _prepare_branch(self) -> str | None:
+        """A note when this turn must not commit, else None; on the way, put the repo on a
+        work branch."""
+        try:
+            if self._live_fn() is not None:
+                branch = current_branch(self.repo)
+                if branch is None or not branch.startswith(WORK_PREFIX):
+                    return f"a run is active on {branch or 'HEAD'}; chat changes are not committed"
+                return None
+            label = "chat-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(self._clock()))
+            ensure_work_branch(self.repo, label)
+        except GitOpError as err:
+            return f"commit failed: {err}"
+        return None
 
     def _refuse_if_busy(self) -> None:
         reason = self._busy_fn()
@@ -573,11 +601,16 @@ class ChatManager:
     async def _turn(self, chat: _Chat, session: PlannerSession, text: str) -> bool:
         note: str | None = None
         before: dict[str, str | None] | None
-        try:
-            before = await asyncio.to_thread(dirty_snapshot, self.repo)
-        except (WorktreeError, OSError) as err:
+        blocked = await asyncio.to_thread(self._prepare_branch)
+        if blocked is not None:
             before = None
-            note = f"commit failed: {err}"
+            note = blocked
+        else:
+            try:
+                before = await asyncio.to_thread(dirty_snapshot, self.repo)
+            except (WorktreeError, OSError) as err:
+                before = None
+                note = f"commit failed: {err}"
         turn = await session.send(text)
         if before is not None:
             try:
