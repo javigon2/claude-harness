@@ -158,6 +158,10 @@ def run(
             help="Stop starting new attempts once the estimated cost passes this many USD.",
         ),
     ] = None,
+    branch: Annotated[
+        str,
+        typer.Option("--branch", help="Branch to merge the work into (it must be checked out)."),
+    ] = "main",
     repo: RepoOpt = Path("."),
 ) -> None:
     """Run a plan."""
@@ -187,6 +191,7 @@ def run(
         review_tier=cast(Tier, review_tier),
         timeout_s=timeout,
         max_cost_usd=max_cost,
+        integration_branch=branch,
     )
     try:
         state = asyncio.run(_run_until_stopped(scheduler, resume))
@@ -198,6 +203,8 @@ def run(
     stopped = paused.error if paused is not None else scheduler.stop_reason
     if paused is not None or stopped is not None:
         hint = f"harness run {plan} --repo {repo_path} --resume"
+        if branch != "main":
+            hint += f" --branch {branch}"
         if review:
             hint += " --review"
         typer.echo(f"Run stopped: {stopped}. Resume with: {hint}")
