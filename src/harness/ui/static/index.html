@@ -496,6 +496,19 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 #git-msg:empty { display: none; }
 #git-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-top: 12px; }
 #git-list, #git-detail { min-width: 0; }
+.git-svg { flex: none; display: block; }
+.refs .ref { display: inline-block; margin-right: 4px; padding: 0 6px; border-radius: 8px; font-size: 12px; border: 1px solid #c9cdd2; background: #f4f5f7; }
+.ref-head { background: #deffd9; border-color: #1e7a34; font-weight: 700; }
+.ref-remote { background: #c2e6ff; border-color: #1b6e94; }
+.ref-tag { background: #fef3c7; border-color: #d97706; }
+.ref-work { background: #ede9fe; border-color: #7661ff; }
+pre.patch { margin: 8px 0 0; padding: 8px 0; background: #f8fafb; border: 1px solid #c9cdd2; border-radius: 4px; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; }
+pre.patch span { display: block; min-height: 1.5em; padding: 0 10px; }
+pre.patch .add { background: #e6ffed; color: #1e7a34; }
+pre.patch .del { background: #ffeef0; color: #b91c1c; }
+pre.patch .hunk { color: #1b6e94; background: #f1f8ff; }
+pre.patch .meta { color: #6b7280; font-weight: 600; }
+pre.patch .cut { color: #92400e; font-style: italic; }
 </style>
 </head>
 <body>
@@ -2369,6 +2382,90 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
       if (!byId('report-view').classList.contains('hidden')) loadReport();
       if (!byId('dashboard-view').classList.contains('hidden')) loadDashboard();
     }, 2000);
+  }
+
+  // ---- Git view helpers: pure, so the tests run them in node
+  var LANE_COLORS = ['#1b6e94', '#1e7a34', '#7661ff', '#d97706', '#d64545', '#0891b2', '#a21caf', '#4d7c0f'];
+  var GIT_ROW = 28, GIT_LANE = 14;
+  var SVG_NS = 'http:' + '//www.w3.org/2000/svg';  // split so the page holds no literal URL
+
+  function svgEl(tag, attrs) {
+    var e = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs).forEach(function (k) { e.setAttribute(k, String(attrs[k])); });
+    return e;
+  }
+
+  function graphSvg(commits, lanes) {
+    var width = Math.max(lanes, 1) * GIT_LANE, height = commits.length * GIT_ROW;
+    var svg = svgEl('svg', {'class': 'git-svg', width: width, height: height,
+      viewBox: '0 0 ' + width + ' ' + height, 'aria-hidden': 'true'});
+    function x(l) { return l * GIT_LANE + GIT_LANE / 2; }
+    commits.forEach(function (c, r) {
+      var y1 = r * GIT_ROW + GIT_ROW / 2, y2 = y1 + GIT_ROW, mid = y1 + GIT_ROW / 2;
+      (c.edges || []).forEach(function (edge) {
+        var a = edge[0], b = edge[1];
+        var colour = LANE_COLORS[(a === c.lane ? b : a) % 8];
+        if (a === b) {
+          svg.appendChild(svgEl('line', {x1: x(a), y1: y1, x2: x(b), y2: y2,
+            stroke: colour, 'stroke-width': 2}));
+        } else {
+          svg.appendChild(svgEl('path', {
+            d: 'M' + x(a) + ' ' + y1 + ' C' + x(a) + ' ' + mid + ' ' + x(b) + ' ' + mid + ' ' + x(b) + ' ' + y2,
+            stroke: colour, 'stroke-width': 2, fill: 'none'}));
+        }
+      });
+    });
+    commits.forEach(function (c, r) {
+      svg.appendChild(svgEl('circle', {cx: x(c.lane), cy: r * GIT_ROW + GIT_ROW / 2, r: 4,
+        fill: LANE_COLORS[c.lane % 8]}));
+    });
+    return svg;
+  }
+
+  function patchHtml(patch, truncated) {
+    var pre = el('pre', 'patch');
+    var lines = String(patch || '').split('\n');
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    var inHunk = false;
+    lines.forEach(function (line) {
+      var cls;
+      if (line.indexOf('diff ') === 0) { inHunk = false; cls = 'meta'; }
+      else if (line.indexOf('@@') === 0) { inHunk = true; cls = 'hunk'; }
+      else if (!inHunk) cls = 'meta';
+      else if (line.charAt(0) === '+') cls = 'add';
+      else if (line.charAt(0) === '-') cls = 'del';
+      else if (line.charAt(0) === '\\') cls = 'meta';
+      else cls = null;
+      pre.appendChild(el('span', cls, line));
+    });
+    if (truncated) pre.appendChild(el('span', 'cut', 'The patch is too large to show in full; it stops here.'));
+    return pre;
+  }
+
+  function refBadges(refs, remotes) {
+    var box = el('span', 'refs');
+    var rems = Array.isArray(remotes) ? remotes : ['origin'];
+    (Array.isArray(refs) ? refs : []).forEach(function (ref) {
+      var kind, name = ref;
+      if (ref.indexOf('HEAD -> ') === 0) { kind = 'ref-head'; name = ref.slice(8); }
+      else if (ref === 'HEAD') kind = 'ref-head';
+      else if (ref.indexOf('tag: ') === 0) { kind = 'ref-tag'; name = ref.slice(5); }
+      else if (rems.some(function (r) { return ref.indexOf(r + '/') === 0; })) kind = 'ref-remote';
+      else if (ref.indexOf('work/') === 0) kind = 'ref-work';
+      else kind = 'ref-branch';
+      box.appendChild(el('span', 'ref ' + kind, name));
+    });
+    return box;
+  }
+
+  function relTime(t, now) {
+    if (typeof t !== 'number' || typeof now !== 'number' || isNaN(t) || isNaN(now)) return '?';
+    var d = now - t;
+    if (d < 60) return 'just now';
+    if (d < 3600) return Math.floor(d / 60) + ' min ago';
+    if (d < 86400) return Math.floor(d / 3600) + ' h ago';
+    if (d < 30 * 86400) return Math.floor(d / 86400) + ' d ago';
+    return new Date(t * 1000).toISOString().slice(0, 10);
   }
 
   // ---- the Git view: read-only tabs over GET /api/git/* for the open project
