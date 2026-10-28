@@ -61,6 +61,21 @@ def test_graph_subjects_and_refs(repo):
     assert page.head == git(repo, "rev-parse", "HEAD")
 
 
+def test_graph_shows_two_lanes_when_branches_diverge(tmp_path):
+    repo = init_repo(tmp_path / "diverged")
+    git(repo, "switch", "-q", "-c", "scratch/graph-test")
+    commit(repo, "branch.txt", "branch commit")
+    git(repo, "switch", "-q", "main")
+    commit(repo, "main.txt", "main commit")
+
+    page = read_graph(repo)
+    tips = by_subject(page)
+    assert page.lanes == 2
+    assert tips["main commit"].refs == ["HEAD -> main"]
+    assert tips["branch commit"].refs == ["scratch/graph-test"]
+    assert tips["main commit"].parents == tips["branch commit"].parents
+
+
 def test_graph_harness_flag(repo):
     s = by_subject(read_graph(repo, harness=True))
     assert s["w1"].refs == ["work/x", "harness/r1/t1"]
