@@ -34,27 +34,30 @@ def test_graph_svg_example(tmp_path):
     )
     got = _eval(tmp_path, ("svgEl", "graphSvg"), expr)
     assert got["attrs"] == {
-        "class": "git-svg", "width": "28", "height": "84",
-        "viewBox": "0 0 28 84", "aria-hidden": "true",
+        "class": "git-svg", "width": "44", "height": "168",
+        "viewBox": "0 0 44 168", "aria-hidden": "true",
     }  # fmt: skip
     kids = got["kids"]
     assert [k[0] for k in kids] == ["line", "path", "line", "path", "circle", "circle", "circle"]
     assert kids[0][1] == {
-        "x1": "7", "y1": "14", "x2": "7", "y2": "42",
-        "stroke": "#1b6e94", "stroke-width": "2",
+        "x1": "11", "y1": "28", "x2": "11", "y2": "84",
+        "stroke": "#1b6e94", "stroke-width": "3.5", "stroke-linecap": "round",
     }  # fmt: skip
     assert kids[1][1] == {
-        "d": "M7 14 C7 28 21 28 21 42", "stroke": "#1e7a34",
-        "stroke-width": "2", "fill": "none",
+        "d": "M11 28 C11 56 33 56 33 84", "stroke": "#1e7a34",
+        "stroke-width": "3.5", "stroke-linecap": "round", "fill": "none",
     }  # fmt: skip
-    assert kids[2][1]["y1"] == "42" and kids[2][1]["y2"] == "70"
+    assert kids[2][1]["y1"] == "84" and kids[2][1]["y2"] == "140"
     assert kids[2][1]["stroke"] == "#1b6e94"
-    assert kids[3][1]["d"] == "M21 42 C21 56 7 56 7 70"
+    assert kids[3][1]["d"] == "M33 84 C33 112 11 112 11 140"
     assert kids[3][1]["stroke"] == "#1b6e94"
-    assert kids[4][1] == {"cx": "7", "cy": "14", "r": "4", "fill": "#1b6e94"}
-    assert kids[5][1]["cx"] == "21" and kids[5][1]["cy"] == "42"
+    assert kids[4][1] == {
+        "cx": "11", "cy": "28", "r": "7", "fill": "#1b6e94",
+        "stroke": "#1b6e94", "stroke-width": "0",
+    }  # fmt: skip
+    assert kids[5][1]["cx"] == "33" and kids[5][1]["cy"] == "84"
     assert kids[5][1]["fill"] == "#1e7a34"
-    assert kids[6][1]["cx"] == "7" and kids[6][1]["cy"] == "70"
+    assert kids[6][1]["cx"] == "11" and kids[6][1]["cy"] == "140"
 
 
 def test_graph_svg_lane_nine_and_empty(tmp_path):
@@ -63,13 +66,13 @@ def test_graph_svg_lane_nine_and_empty(tmp_path):
         "(function () { var s = graphSvg([{lane: 9, edges: []}], 10);"
         " return [s.attrs.width, s.children[0].attrs.fill]; })()",
     )  # fmt: skip
-    assert got == ["140", "#1e7a34"]
+    assert got == ["220", "#1e7a34"]
     got = _eval(
         tmp_path, ("svgEl", "graphSvg"),
         "(function () { var s = graphSvg([], 0);"
         " return [s.attrs.width, s.attrs.height, s.children.length]; })()",
     )  # fmt: skip
-    assert got == ["14", "0", 0]
+    assert got == ["22", "0", 0]
 
 
 PATCH = (

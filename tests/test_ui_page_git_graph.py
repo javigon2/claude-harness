@@ -14,12 +14,13 @@ function setHidden(id, h) { hidden[id] = h; }
 function byId(id) { return document.getElementById(id); }
 function setClass(n, c) { n.className = c; }
 var gitTab = 'graph', gitLimit = 500, gitSelSha = null, gitRowNodes = {}, gitRemotes = ['origin'];
+var gitExpanded = {};
 function out(x) { console.log(JSON.stringify(x)); }
 """
 
 NAMES = (
     "svgEl", "graphSvg", "refBadges", "relTime", "patchHtml", "onKey", "gitFiles",
-    "renderGitGraph", "renderGitCommit", "loadGitCommit", "loadGitGraph",
+    "gitHighlights", "renderGitGraph", "renderGitCommit", "loadGitCommit", "loadGitGraph",
 )  # fmt: skip
 
 PAGE = """
@@ -75,7 +76,7 @@ out([g.children.length, g.children[0].tag, ol.className, ol.children.map(functio
 """
     r = _run(tmp_path, body)[0]
     assert r[0] == 2 and r[1] == "svg" and r[2] == "git-rows"
-    assert r[3][0][0] == "git-row" and r[3][1][0] == "git-row selected"
+    assert r[3][0][0] == "git-row" and r[3][1][0] == "git-row git-gap"
     assert r[3][0][1] == "a1"
     assert r[3][0][2][:2] == ["First", "Ann"] and r[3][0][2][3] == "a1"
     assert r[3][0][2][2] == "1970-01-01"
@@ -106,10 +107,63 @@ def test_click_selects_row(tmp_path):
     body = """
 renderGitGraph(page);
 gitRowNodes['a1'].on.click();
-out([calls, gitRowNodes['a1'].className, gitRowNodes['b2'].className]);
+out([calls, gitRowNodes['a1'].className, gitRowNodes['b2'].className,
+  byId('git-graph').children[1].children[1].attrs['aria-expanded']]);
 """
     r = _run(tmp_path, body)[0]
-    assert r == [["/api/git/commit/a1"], "git-row selected", "git-row"]
+    assert r == [["/api/git/commit/a1"], "git-row selected", "git-row git-minor", "true"]
+
+
+def test_highlights_keep_refs_merges_and_regular_checkpoints(tmp_path):
+    body = """
+var commits = Array.from({length: 23}, function (_, i) {
+  return {sha: String(i), parents: i === 5 ? ['a', 'b'] : ['a'],
+    refs: i === 3 ? ['main'] : []};
+});
+out(gitHighlights(commits).map(function (g) {
+  return [g.main.sha, g.minor.map(function (c) { return c.sha; })];
+}));
+"""
+    assert _run(tmp_path, body)[0] == [
+        ["0", ["1", "2"]], ["3", ["4"]], ["5", ["6", "7", "8", "9"]],
+        ["10", ["11", "12", "13", "14", "15", "16", "17", "18", "19"]],
+        ["20", ["21", "22"]],
+    ]
+
+
+def test_expand_minor_commits_and_select_them(tmp_path):
+    body = """
+renderGitGraph(page);
+var rows = byId('git-graph').children[1];
+rows.children[1].on.click();
+out([rows.children.length, byId('git-graph').children[1].children.length,
+  gitRowNodes['b2'].className]);
+gitRowNodes['b2'].on.click();
+out([calls, gitRowNodes['b2'].className]);
+"""
+    assert _run(tmp_path, body) == [
+        [2, 3, "git-row git-minor"],
+        [["/api/git/commit/b2"], "git-row git-minor selected"],
+    ]
+
+
+def test_collapsing_does_not_replace_real_graph_edges(tmp_path):
+    body = """
+renderGitGraph(page);
+var svg = byId('git-graph').children[0];
+out([svg.attrs.height, svg.children.filter(function (n) { return n.tag === 'line'; }).length,
+  svg.children.filter(function (n) { return n.tag === 'circle'; }).length]);
+"""
+    assert _run(tmp_path, body)[0] == ["112", 1, 2]
+
+
+def test_git_panes_have_separate_scroll_and_resize():
+    text = _text()
+    assert 'id="git-divider" role="separator"' in text
+    assert "grid-template-columns: minmax(0, var(--git-list-width))" in text
+    assert "#git-list, #git-detail { min-width: 0; overflow: auto;" in text
+    assert "divider.addEventListener('pointermove'" in text
+    assert "divider.addEventListener('keydown'" in text
 
 
 def test_render_commit(tmp_path):
