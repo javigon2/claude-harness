@@ -18,7 +18,7 @@ def _script(body: str) -> str:
     text = _text()
     names = (
         "gitTrack", "renderGitBranches", "gitDiff", "renderGitDiff", "renderGitChanges",
-        "loadGitBranches", "loadGitChanges", "patchHtml", "relTime", "onKey",
+        "loadGitBranches", "loadGitChanges", "patchHtml", "relTime", "onKey", "gitAct",
     )  # fmt: skip
     return _page_helpers(text) + STUBS + _functions(text, *names) + body
 
@@ -128,8 +128,7 @@ console.log(kids('git-changes')[0].text);
 """
     out = _run_node(tmp_path, _script(body))
     assert out[0] == (
-        "On main · merge in progress,Conflicted (1),,Staged (2),,Unstaged (1),,"
-        "Untracked (1),"
+        "On main · merge in progress,Conflicted (1),,Staged (2),,Unstaged (1),,Untracked (1),"
     )
     assert out[1] == "UU c.txt"
     assert out[2] == "M a b.txt;R old.txt → new.txt"

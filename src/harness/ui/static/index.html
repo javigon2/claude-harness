@@ -524,6 +524,11 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 .git-branch, #git-changes .git-file { display: flex; gap: 10px; align-items: center; padding: 4px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; }
 .git-branch:hover, #git-changes .git-file:hover { background: #f4f7f9; }
 .git-branch.current .git-name { font-weight: 700; }
+#git-note { color: var(--sn-green-dark); margin: 8px 0 0; }
+#git-note:empty { display: none; }
+#git-commit-box:not(.hidden) { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+#git-commit-msg { flex: 1 1 auto; min-width: 0; font: inherit; }
+#git-view button.git-act { padding: 0 8px; font-size: 12px; font-weight: 400; }
 </style>
 </head>
 <body>
@@ -790,9 +795,14 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     <label><input id="git-show-harness" type="checkbox"> Show harness/ branches</label>
   </div>
   <p id="git-msg" role="alert"></p>
+  <p id="git-note" role="status"></p>
   <div id="git-body">
     <div id="git-list">
       <div id="git-graph" role="tabpanel"></div>
+      <div id="git-commit-box" class="hidden">
+        <textarea id="git-commit-msg" rows="3" placeholder="Commit message" aria-label="Commit message"></textarea>
+        <button id="btn-git-commit" type="button">Commit staged</button>
+      </div>
       <div id="git-changes" role="tabpanel" class="hidden"></div>
       <div id="git-branches" role="tabpanel" class="hidden"></div>
       <button id="btn-git-more" type="button" class="hidden">Load more</button>
@@ -2502,6 +2512,25 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       done(res.data);
     }).catch(function () { msg.textContent = 'Connection lost; try again.'; });
   }
+  function gitPost(path, body, done) {
+    // POST one /api/git/ route: done(data) then a reload on success, else the error goes to git-msg
+    var msg = byId('git-msg');
+    msg.textContent = '';
+    byId('git-note').textContent = '';
+    api(path, body).then(function (res) {
+      if (!res.ok) { msg.textContent = errorOf(res); return; }
+      if (done) done(res.data);
+      gitLoad();
+    }).catch(function () { msg.textContent = 'Connection lost; try again.'; });
+  }
+  function gitAct(label, fn) {
+    // a small button inside a clickable row: its clicks and keys do not reach the row
+    var b = el('button', 'git-act', label);
+    b.type = 'button';
+    b.addEventListener('click', function (ev) { ev.stopPropagation(); fn(); });
+    b.addEventListener('keydown', function (ev) { ev.stopPropagation(); });
+    return b;
+  }
 
   function loadGitGraph() {
     gitGet('/api/git/graph?limit=' + gitLimit + (byId('git-show-harness').checked ? '&harness=1' : ''), renderGitGraph);
@@ -2623,19 +2652,25 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     var entries = Array.isArray(st.entries) ? st.entries : [];
     var groups = [
       ['Conflicted', function (e) { return e.conflicted; },
-        function (e) { return e.staged + e.unstaged; }, false],
+        function (e) { return e.staged + e.unstaged; }, false, false],
       ['Staged', function (e) { return !e.conflicted && !e.untracked && e.staged !== ' '; },
-        function (e) { return e.staged; }, true],
+        function (e) { return e.staged; }, true, true],
       ['Unstaged', function (e) { return !e.conflicted && !e.untracked && e.unstaged !== ' '; },
-        function (e) { return e.unstaged; }, false],
-      ['Untracked', function (e) { return e.untracked; }, function () { return '?'; }, false]
+        function (e) { return e.unstaged; }, false, false],
+      ['Untracked', function (e) { return e.untracked; }, function () { return '?'; }, false, false]
     ];
     var any = false;
     groups.forEach(function (g) {
       var rows = entries.filter(g[1]);
       if (!rows.length) return;
       any = true;
-      parts.push(el('h3', 'git-group', g[0] + ' (' + rows.length + ')'));
+      var h3 = el('h3', 'git-group', g[0] + ' (' + rows.length + ')');
+      h3.appendChild(gitAct(g[4] ? 'Unstage all' : 'Stage all', function () {
+        var all = [];
+        rows.forEach(function (e) { all = all.concat(gitPathsOf(e, g[4])); });
+        gitStage(all, g[4]);
+      }));
+      parts.push(h3);
       var ul = el('ul', 'git-files');
       rows.forEach(function (e) {
         var li = el('li', 'git-file');
@@ -2643,6 +2678,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
         li.tabIndex = 0;
         li.appendChild(el('span', 'git-st', g[2](e)));
         li.appendChild(el('span', 'git-path', e.old_path ? e.old_path + ' → ' + e.path : e.path));
+        li.appendChild(gitAct(g[4] ? 'Unstage' : 'Stage', function () { gitStage(gitPathsOf(e, g[4]), g[4]); }));
         li.addEventListener('click', function () { gitDiff(e.path, g[3]); });
         li.addEventListener('keydown', onKey(function () { gitDiff(e.path, g[3]); }));
         ul.appendChild(li);
@@ -2652,6 +2688,22 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     if (!any) parts.push(el('p', 'muted', 'Nothing to commit: the working tree is clean.'));
     var box = byId('git-changes');
     box.replaceChildren.apply(box, parts);
+  }
+
+  function gitPathsOf(e, unstage) {
+    // a staged rename is unstaged on both sides
+    return (unstage && e.old_path) ? [e.old_path, e.path] : [e.path];
+  }
+  function gitStage(paths, unstage) {
+    gitPost(unstage ? '/api/git/unstage' : '/api/git/stage', {paths: paths});
+  }
+  function gitCommit() {
+    var text = byId('git-commit-msg').value;
+    if (String(text).trim() === '') { byId('git-msg').textContent = 'Write a commit message first.'; return; }
+    gitPost('/api/git/commit', {message: text}, function (d) {
+      byId('git-commit-msg').value = '';
+      byId('git-note').textContent = 'Committed ' + str(d.sha) + '.';
+    });
   }
 
   function gitLoad() {
@@ -2670,7 +2722,9 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       byId('git-tab-' + n).setAttribute('aria-selected', n === name ? 'true' : 'false');
     });
     setHidden('btn-git-more', true);
+    setHidden('git-commit-box', name !== 'changes');
     byId('git-msg').textContent = '';
+    byId('git-note').textContent = '';
     byId('git-detail').replaceChildren();
     gitLoad();
   }
@@ -2683,6 +2737,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
     byId('git-show-harness').addEventListener('change', gitLoad);
     byId('btn-git-more').addEventListener('click', function () { gitLimit = Math.min(gitLimit + 500, 5000); loadGitGraph(); });
+    byId('btn-git-commit').addEventListener('click', gitCommit);
   }
 
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
