@@ -19,6 +19,7 @@ from harness.ui.git_write import (
     unstage,
 )
 from harness.ui.gitops import GitOpError
+from harness.ui.work_branch import approve
 
 LIMIT_MAX = 5000
 GIT_POST_ROUTES = (
@@ -31,6 +32,7 @@ GIT_POST_ROUTES = (
     "delete-branch",
     "fetch",
     "push",
+    "approve",
 )
 NETWORK_ROUTES = ("fetch", "push")
 PATHS_MAX = 500
@@ -47,6 +49,7 @@ _KEYS = {
     "delete-branch": ("name",),
     "fetch": ("remote",),
     "push": ("remote", "branch"),
+    "approve": ("name",),
 }
 
 
@@ -103,7 +106,7 @@ def check_git_body(route: str, body: object) -> dict:
     """The body of a POST to /api/git/<route> (one of GIT_POST_ROUTES), or BadGitBody.
     Exactly the allowed keys: stage and unstage {paths}; commit {message}; branch
     {name, start}; switch, merge and delete-branch {name}; fetch {remote};
-    push {remote, branch}."""
+    push {remote, branch}; approve {name}."""
     if not isinstance(body, dict):
         raise BadGitBody("body must be a JSON object")
     keys = _KEYS[route]
@@ -152,6 +155,8 @@ def git_post(repo: Path, route: str, body: dict, busy: str | None) -> tuple[int,
             delete_branch(repo, body["name"])
         elif route == "fetch":
             return 200, {"ok": True, "output": fetch(repo, body["remote"])}
+        elif route == "approve":
+            return 200, {"ok": True, "sha": approve(repo, body["name"])}
         else:
             return 200, {"ok": True, "output": push(repo, body["remote"], body["branch"])}
         return 200, {"ok": True}
