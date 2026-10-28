@@ -509,6 +509,16 @@ pre.patch .del { background: #ffeef0; color: #b91c1c; }
 pre.patch .hunk { color: #1b6e94; background: #f1f8ff; }
 pre.patch .meta { color: #6b7280; font-weight: 600; }
 pre.patch .cut { color: #92400e; font-style: italic; }
+#git-graph:not(.hidden) { display: flex; align-items: flex-start; }
+.git-rows { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-width: 0; }
+.git-row { height: 28px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 8px; white-space: nowrap; overflow: hidden; cursor: pointer; }
+.git-row:hover { background: #f4f7f9; }
+.git-row.selected { background: #dce8ef; }
+.git-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.git-files { list-style: none; padding: 0; margin: 8px 0; font-size: 13px; }
+.git-file { display: flex; gap: 8px; }
+.git-st { font-family: ui-monospace, Menlo, Consolas, monospace; width: 2em; flex: none; }
+.git-msg-body { white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -2470,7 +2480,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 
   // ---- the Git view: read-only tabs over GET /api/git/* for the open project
   var GIT_TABS = ['graph', 'changes', 'branches'];
-  var gitTab = 'graph', gitRemotes = ['origin'];
+  var gitTab = 'graph', gitRemotes = ['origin'], gitLimit = 500, gitSelSha = null, gitRowNodes = {};
 
   function gitGet(path, done) {
     // GET one /api/git/ route: done(data) on success, else the error sentence goes to git-msg
@@ -2489,7 +2499,61 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   }
 
   function loadGitGraph() {
-    // the Graph tab: filled in with the graph rows
+    gitGet('/api/git/graph?limit=' + gitLimit + (byId('git-show-harness').checked ? '&harness=1' : ''), renderGitGraph);
+  }
+  function renderGitGraph(page) {
+    var commits = (page && Array.isArray(page.commits)) ? page.commits : [];
+    var now = Math.floor(Date.now() / 1000);
+    gitRowNodes = {};
+    var ol = el('ol', 'git-rows');
+    commits.forEach(function (c) {
+      var li = el('li', c.sha === gitSelSha ? 'git-row selected' : 'git-row');
+      li.setAttribute('data-sha', c.sha);
+      li.setAttribute('role', 'button');
+      li.tabIndex = 0;
+      li.appendChild(refBadges(c.refs, gitRemotes));
+      li.appendChild(el('span', 'git-subject', str(c.subject)));
+      li.appendChild(el('span', 'git-author muted', str(c.author)));
+      li.appendChild(el('span', 'git-when muted', relTime(c.time, now)));
+      li.appendChild(el('span', 'git-sha mono', str(c.short)));
+      li.addEventListener('click', function () { loadGitCommit(c.sha); });
+      li.addEventListener('keydown', onKey(function () { loadGitCommit(c.sha); }));
+      gitRowNodes[c.sha] = li;
+      ol.appendChild(li);
+    });
+    if (commits.length) byId('git-graph').replaceChildren(graphSvg(commits, page.lanes), ol);
+    else byId('git-graph').replaceChildren(el('p', 'muted', 'No commits yet.'));
+    setHidden('btn-git-more', !page.more || gitLimit >= 5000 || gitTab !== 'graph');
+  }
+  function gitFiles(files) {
+    var ul = el('ul', 'git-files');
+    (Array.isArray(files) ? files : []).forEach(function (f) {
+      var li = el('li', 'git-file');
+      li.appendChild(el('span', 'git-st', str(f.status)));
+      li.appendChild(el('span', 'git-path', f.old_path ? f.old_path + ' → ' + f.path : str(f.path)));
+      li.appendChild(el('span', 'git-count muted', f.added === null || f.added === undefined ? 'binary' : '+' + f.added + ' -' + f.deleted));
+      ul.appendChild(li);
+    });
+    return ul;
+  }
+  function renderGitCommit(d) {
+    var parts = [
+      el('h3', null, str(d.subject)),
+      el('p', 'muted', str(d.short) + ' · ' + str(d.author) + ' <' + str(d.email) + '> · ' + relTime(d.time, Math.floor(Date.now() / 1000))),
+      refBadges(d.refs, gitRemotes)
+    ];
+    if (String(d.body || '').trim() !== '') parts.push(el('pre', 'git-msg-body', d.body));
+    parts.push(gitFiles(d.files));
+    parts.push(patchHtml(d.patch, d.truncated));
+    var node = byId('git-detail');
+    node.replaceChildren.apply(node, parts);
+  }
+  function loadGitCommit(sha) {
+    gitSelSha = sha;
+    Object.keys(gitRowNodes).forEach(function (k) {
+      setClass(gitRowNodes[k], k === sha ? 'git-row selected' : 'git-row');
+    });
+    gitGet('/api/git/commit/' + encodeURIComponent(sha), renderGitCommit);
   }
   function loadGitChanges() {
     // the Changes tab: filled in with the working-tree status
@@ -2526,6 +2590,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       byId('git-tab-' + n).addEventListener('click', function () { gitShowTab(n); });
     });
     byId('git-show-harness').addEventListener('change', gitLoad);
+    byId('btn-git-more').addEventListener('click', function () { gitLimit = Math.min(gitLimit + 500, 5000); loadGitGraph(); });
   }
 
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
