@@ -1,6 +1,7 @@
 """The run viewer's view model: what the page shows, built from a run's files. Read-only."""
 
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +13,29 @@ from harness.models import Event, TaskStatus
 from harness.plan import load_plan
 from harness.report import money, tier_totals
 from harness.state import STATE_FILE, load_state, run_dir, runs_root
+
+Phase = Literal["running", "stopped", "ended"]
+Outcome = Literal["completed", "needs_attention"]
+
+# statuses named in a "needs attention" text, in this order
+_ATTENTION_ORDER: tuple[TaskStatus, ...] = (
+    "failed",
+    "blocked",
+    "paused",
+    "pending",
+    "running",
+    "verifying",
+)  # fmt: skip
+
+
+def outcome_of(statuses: Sequence[TaskStatus]) -> tuple[Outcome, str]:
+    """("completed", "completed") when every status is "done" (also for no tasks); else
+    ("needs_attention", "needs attention: " + the non-zero counts as "<n> <status>" in
+    _ATTENTION_ORDER, joined ", "), e.g. "needs attention: 1 failed, 2 blocked"."""
+    if all(s == "done" for s in statuses):
+        return "completed", "completed"
+    counts = [f"{statuses.count(s)} {s}" for s in _ATTENTION_ORDER if statuses.count(s)]
+    return "needs_attention", "needs attention: " + ", ".join(counts)
 
 
 class StepView(BaseModel):
@@ -76,7 +100,9 @@ class RunView(BaseModel):
     run_id: str
     stage: str
     finished: bool
-    phase: Literal["running", "stopped", "finished"]
+    phase: Phase
+    outcome: Outcome | None = None
+    outcome_text: str = ""
     stopped_reason: str | None
     idle_minutes: int | None
     wave: int
@@ -429,11 +455,15 @@ def build_view(
         if isinstance(value, str) and value:
             stopped_reason = value
     if not state.finished:
-        phase: Literal["running", "stopped", "finished"] = "running"
+        phase: Phase = "running"
     elif stopped_reason is not None or any(t.status == "paused" for t in tasks):
         phase = "stopped"
     else:
-        phase = "finished"
+        phase = "ended"
+    outcome: Outcome | None = None
+    outcome_text = ""
+    if phase != "running":
+        outcome, outcome_text = outcome_of([t.status for t in tasks])
 
     idle_minutes: int | None = None
     if phase == "running":
@@ -451,6 +481,8 @@ def build_view(
         stage=state.stage,
         finished=state.finished,
         phase=phase,
+        outcome=outcome,
+        outcome_text=outcome_text,
         stopped_reason=stopped_reason,
         idle_minutes=idle_minutes,
         wave=wave,
