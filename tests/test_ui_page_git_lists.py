@@ -19,6 +19,7 @@ def _script(body: str) -> str:
     names = (
         "gitTrack", "renderGitBranches", "gitDiff", "renderGitDiff", "renderGitChanges",
         "loadGitBranches", "loadGitChanges", "patchHtml", "relTime", "onKey", "gitAct",
+        "fillGitRemotes", "gitBranchActs",
     )  # fmt: skip
     return _page_helpers(text) + STUBS + _functions(text, *names) + body
 

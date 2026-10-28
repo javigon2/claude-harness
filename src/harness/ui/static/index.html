@@ -529,6 +529,8 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 #git-commit-box:not(.hidden) { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
 #git-commit-msg { flex: 1 1 auto; min-width: 0; font: inherit; }
 #git-view button.git-act { padding: 0 8px; font-size: 12px; font-weight: 400; }
+#git-branch-box:not(.hidden) { margin-bottom: 8px; }
+#git-remote { font: inherit; padding: 3px 6px; }
 </style>
 </head>
 <body>
@@ -793,6 +795,9 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       <button id="git-tab-branches" type="button" role="tab" aria-selected="false">Branches</button>
     </div>
     <label><input id="git-show-harness" type="checkbox"> Show harness/ branches</label>
+    <select id="git-remote" aria-label="Remote"></select>
+    <button id="btn-git-fetch" type="button">Fetch</button>
+    <button id="btn-git-push" type="button">Push</button>
   </div>
   <p id="git-msg" role="alert"></p>
   <p id="git-note" role="status"></p>
@@ -804,6 +809,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
         <button id="btn-git-commit" type="button">Commit staged</button>
       </div>
       <div id="git-changes" role="tabpanel" class="hidden"></div>
+      <div id="git-branch-box" class="hidden"><button id="btn-git-new-branch" type="button">New branch</button></div>
       <div id="git-branches" role="tabpanel" class="hidden"></div>
       <button id="btn-git-more" type="button" class="hidden">Load more</button>
     </div>
@@ -2605,6 +2611,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 
   function renderGitBranches(list) {
     if (Array.isArray(list.remotes)) gitRemotes = list.remotes;
+    fillGitRemotes();
     var parts = [];
     if (list.detached) parts.push(el('p', 'muted', 'HEAD is detached.'));
     var all = Array.isArray(list.branches) ? list.branches : [];
@@ -2621,6 +2628,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
         li.appendChild(el('span', 'git-track muted', gitTrack(b)));
         li.appendChild(el('span', 'git-subject', str(b.subject)));
         li.appendChild(el('span', 'git-when muted', relTime(b.time, Math.floor(Date.now() / 1000))));
+        gitBranchActs(b, list.current).forEach(function (a) { li.appendChild(a); });
         li.addEventListener('click', function () { loadGitCommit(b.sha); });
         li.addEventListener('keydown', onKey(function () { loadGitCommit(b.sha); }));
         ul.appendChild(li);
@@ -2630,6 +2638,58 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     if (!all.length) parts.push(el('p', 'muted', 'No branches yet.'));
     var box = byId('git-branches');
     box.replaceChildren.apply(box, parts);
+  }
+  function fillGitRemotes() {
+    var sel = byId('git-remote');
+    var keep = sel.value;
+    var opts = gitRemotes.map(function (r) {
+      var o = el('option', null, r);
+      o.value = r;
+      return o;
+    });
+    sel.replaceChildren.apply(sel, opts);
+    if (gitRemotes.indexOf(keep) >= 0) sel.value = keep;
+    else sel.value = gitRemotes.length ? gitRemotes[0] : '';
+  }
+  function loadGitRemotes() {
+    gitGet('/api/git/branches', function (list) {
+      if (Array.isArray(list.remotes)) gitRemotes = list.remotes;
+      fillGitRemotes();
+    });
+  }
+  function gitBranchActs(b, current) {
+    var acts = [];
+    if (b.current || String(b.name).indexOf('harness/') === 0) return acts;
+    var hasCur = typeof current === 'string' && current !== '';
+    var merge = function () {
+      return gitAct('Merge', function () {
+        if (window.confirm('Merge ' + b.name + ' into ' + current + '?')) {
+          gitPost('/api/git/merge', {name: b.name}, function (d) {
+            byId('git-note').textContent = 'Merged ' + b.name + ' into ' + current + ': ' + str(d.sha) + '.';
+          });
+        }
+      });
+    };
+    if (b.kind === 'local') {
+      acts.push(gitAct('Switch', function () {
+        if (window.confirm('Switch to ' + b.name + '?')) {
+          gitPost('/api/git/switch', {name: b.name}, function () {
+            byId('git-note').textContent = 'Switched to ' + b.name + '.';
+          });
+        }
+      }));
+      if (hasCur) acts.push(merge());
+      acts.push(gitAct('Delete', function () {
+        if (window.confirm('Delete branch ' + b.name + '?\n\nOnly a fully merged branch can be deleted.')) {
+          gitPost('/api/git/delete-branch', {name: b.name}, function () {
+            byId('git-note').textContent = 'Deleted ' + b.name + '.';
+          });
+        }
+      }));
+    } else if (hasCur) {
+      acts.push(merge());
+    }
+    return acts;
   }
 
   function gitDiff(path, staged) {
@@ -2706,6 +2766,35 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
   }
 
+  function gitNewBranch() {
+    var name = window.prompt('New branch name (it starts at HEAD and is checked out):', '');
+    if (name === null) return;
+    name = String(name).trim();
+    if (name === '') return;
+    gitPost('/api/git/branch', {name: name, start: 'HEAD'}, function () {
+      byId('git-note').textContent = 'Created and switched to ' + name + '.';
+    });
+  }
+  function gitFetch() {
+    var r = byId('git-remote').value || '';
+    if (r === '') { byId('git-msg').textContent = 'This project has no remote.'; return; }
+    gitPost('/api/git/fetch', {remote: r}, function (d) {
+      byId('git-note').textContent = 'Fetched ' + r + ': ' + str(d.output);
+    });
+  }
+  function gitPush() {
+    var r = byId('git-remote').value || '';
+    if (r === '') { byId('git-msg').textContent = 'This project has no remote.'; return; }
+    gitGet('/api/git/status', function (st) {
+      if (!st.branch) { byId('git-msg').textContent = 'Check out a branch first.'; return; }
+      if (window.confirm('Push ' + st.branch + ' to ' + r + '?')) {
+        gitPost('/api/git/push', {remote: r, branch: st.branch}, function (d) {
+          byId('git-note').textContent = 'Pushed ' + st.branch + ' to ' + r + ': ' + str(d.output);
+        });
+      }
+    });
+  }
+
   function gitLoad() {
     // (re)load the tab that is showing
     if (gitTab === 'graph') loadGitGraph();
@@ -2723,6 +2812,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
     setHidden('btn-git-more', true);
     setHidden('git-commit-box', name !== 'changes');
+    setHidden('git-branch-box', name !== 'branches');
     byId('git-msg').textContent = '';
     byId('git-note').textContent = '';
     byId('git-detail').replaceChildren();
@@ -2730,7 +2820,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   }
 
   function wireGit() {
-    byId('btn-git').addEventListener('click', function () { showMain('git-view'); gitShowTab(gitTab); });
+    byId('btn-git').addEventListener('click', function () { showMain('git-view'); gitShowTab(gitTab); loadGitRemotes(); });
     byId('btn-git-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
     GIT_TABS.forEach(function (n) {
       byId('git-tab-' + n).addEventListener('click', function () { gitShowTab(n); });
@@ -2738,6 +2828,9 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     byId('git-show-harness').addEventListener('change', gitLoad);
     byId('btn-git-more').addEventListener('click', function () { gitLimit = Math.min(gitLimit + 500, 5000); loadGitGraph(); });
     byId('btn-git-commit').addEventListener('click', gitCommit);
+    byId('btn-git-new-branch').addEventListener('click', gitNewBranch);
+    byId('btn-git-fetch').addEventListener('click', gitFetch);
+    byId('btn-git-push').addEventListener('click', gitPush);
   }
 
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
