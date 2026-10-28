@@ -485,6 +485,17 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 #img-view { padding: 8px; border: 0; border-radius: 8px; }
 #img-view img { display: block; max-width: 90vw; max-height: 80vh; }
 #img-view::backdrop { background: rgba(3, 45, 66, 0.6); }
+/* the Git view: tabs over a list pane and a detail pane */
+#git-view { padding: 12px 16px; box-sizing: border-box; }
+#git-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+#git-bar h2 { margin: 0 8px 0 0; font-size: 18px; }
+#git-tabs { display: flex; gap: 4px; }
+#git-view button { font: inherit; padding: 4px 12px; cursor: pointer; background: #fff; color: var(--sn-btn); border: 1px solid var(--sn-btn); border-radius: 4px; font-weight: 600; }
+#git-tabs button.selected { background: var(--sn-btn); color: #fff; }
+#git-msg { color: #b91c1c; margin: 8px 0 0; }
+#git-msg:empty { display: none; }
+#git-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin-top: 12px; }
+#git-list, #git-detail { min-width: 0; }
 </style>
 </head>
 <body>
@@ -494,6 +505,7 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
   <button id="btn-plans" type="button" class="hidden">Plans</button>
   <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-dashboard" type="button" class="hidden">Dashboard</button>
+  <button id="btn-git" type="button" class="hidden">Git</button>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
   <button id="btn-run-tests" type="button" class="hidden" title="Run the project's whole test suite now">Run tests</button>
   <span id="tests-status" class="chip hidden"></span>
@@ -737,6 +749,28 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
     <pre id="report-status"></pre>
     <pre id="report-text"></pre>
   </details>
+</section>
+<section id="git-view" class="hidden">
+  <div id="git-bar">
+    <button id="btn-git-back" type="button">Back</button>
+    <h2>Git</h2>
+    <div id="git-tabs" role="tablist">
+      <button id="git-tab-graph" type="button" role="tab" aria-selected="true" class="selected">Graph</button>
+      <button id="git-tab-changes" type="button" role="tab" aria-selected="false">Changes</button>
+      <button id="git-tab-branches" type="button" role="tab" aria-selected="false">Branches</button>
+    </div>
+    <label><input id="git-show-harness" type="checkbox"> Show harness/ branches</label>
+  </div>
+  <p id="git-msg" role="alert"></p>
+  <div id="git-body">
+    <div id="git-list">
+      <div id="git-graph" role="tabpanel"></div>
+      <div id="git-changes" role="tabpanel" class="hidden"></div>
+      <div id="git-branches" role="tabpanel" class="hidden"></div>
+      <button id="btn-git-more" type="button" class="hidden">Load more</button>
+    </div>
+    <div id="git-detail" aria-label="Details"></div>
+  </div>
 </section>
 <dialog id="img-view"><img id="img-view-img" alt="attached image"><form method="dialog"><button type="submit">Close</button></form></dialog>
 <script>
@@ -2337,6 +2371,66 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
     }, 2000);
   }
 
+  // ---- the Git view: read-only tabs over GET /api/git/* for the open project
+  var GIT_TABS = ['graph', 'changes', 'branches'];
+  var gitTab = 'graph', gitRemotes = ['origin'];
+
+  function gitGet(path, done) {
+    // GET one /api/git/ route: done(data) on success, else the error sentence goes to git-msg
+    var msg = byId('git-msg');
+    fetch(path).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = JSON.parse(t); } catch (e) { data = null; }
+        return {ok: r.ok, status: r.status, data: data};
+      });
+    }).then(function (res) {
+      if (!res.ok) { msg.textContent = errorOf(res); return; }
+      msg.textContent = '';
+      done(res.data);
+    }).catch(function () { msg.textContent = 'Connection lost; try again.'; });
+  }
+
+  function loadGitGraph() {
+    // the Graph tab: filled in with the graph rows
+  }
+  function loadGitChanges() {
+    // the Changes tab: filled in with the working-tree status
+  }
+  function loadGitBranches() {
+    // the Branches tab: filled in with the branch list
+  }
+
+  function gitLoad() {
+    // (re)load the tab that is showing
+    if (gitTab === 'graph') loadGitGraph();
+    else if (gitTab === 'changes') loadGitChanges();
+    else loadGitBranches();
+  }
+
+  function gitShowTab(name) {
+    // one tab and its pane show; the detail pane and the message start empty
+    gitTab = name;
+    GIT_TABS.forEach(function (n) {
+      setHidden('git-' + n, n !== name);
+      byId('git-tab-' + n).classList.toggle('selected', n === name);
+      byId('git-tab-' + n).setAttribute('aria-selected', n === name ? 'true' : 'false');
+    });
+    setHidden('btn-git-more', true);
+    byId('git-msg').textContent = '';
+    byId('git-detail').replaceChildren();
+    gitLoad();
+  }
+
+  function wireGit() {
+    byId('btn-git').addEventListener('click', function () { showMain('git-view'); gitShowTab(gitTab); });
+    byId('btn-git-back').addEventListener('click', function () { showMain('layout'); selectTask(null); });
+    GIT_TABS.forEach(function (n) {
+      byId('git-tab-' + n).addEventListener('click', function () { gitShowTab(n); });
+    });
+    byId('git-show-harness').addEventListener('change', gitLoad);
+  }
+
   // ---- the launcher: the open project and the folder browser (agent-orchestrator only)
   function projectSummary(p) {
     // one line about the open folder, from GET /api/project
@@ -2351,7 +2445,7 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
     return str(p.name) + ' \u00b7 ' + str(p.path) + ' \u00b7 ' + bits.join(', ');
   }
 
-  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view', 'dashboard-view'];
+  var MAIN_VIEWS = ['layout', 'project-view', 'plans-view', 'report-view', 'dashboard-view', 'git-view'];
   function showMain(name) {
     // the page shows exactly one of the two panels and the launcher's views
     MAIN_VIEWS.forEach(function (id) { setHidden(id, id !== name); });
@@ -2459,6 +2553,7 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
     byId('project-name').setAttribute('title', project ? str(project.path) : '');
     setHidden('project-name', false);
     setHidden('btn-switch-project', !project);
+    setHidden('btn-git', !project);
     setHidden('btn-project-back', !project);
     byId('project-info').textContent = projectSummary(project);
     var acts = projectActions(project);
@@ -2946,6 +3041,7 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
   wireOptions();
   wireTests();
   wirePlans();
+  wireGit();
   byId('btn-why-close').addEventListener('click', hideWhy);
   byId('btn-back-opus').addEventListener('click', function () { selectTask(null); });
   byId('btn-convo-back').addEventListener('click', function () { selectTask(null); });
