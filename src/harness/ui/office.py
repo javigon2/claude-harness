@@ -53,6 +53,8 @@ from harness.titles import ensure_request_title, ensure_title
 from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.explain import ErrorExplainer
+from harness.ui.git_cmd import NoRepoError
+from harness.ui.gitops import GitOpError
 from harness.ui.markdown import parse_markdown
 from harness.ui.orchestrator import (
     HandoffRefused,
@@ -70,6 +72,7 @@ from harness.ui.runs import (
 )
 from harness.ui.uploads import attachment_note, image_ids
 from harness.ui.view import IDLE_MINUTES, list_runs, progress_text
+from harness.ui.work_branch import current_branch, ensure_work_branch
 from harness.worker import ProgressFn
 
 LOCK_FILE = Path(".harness") / "office.lock"
@@ -1195,16 +1198,17 @@ class Office:
                 return
             try:
                 self._launch(shown)
-            except (PlanError, OSError, ValueError) as err:
+            except (PlanError, OSError, ValueError, OfficeConflict) as err:
                 reason = f"could not start the run: {err}"
                 self._state = "failed"
                 self._error = reason
                 if self._log is not None:
                     self._log.emit("planner_failed", {"reason": reason, "cost_usd": self._cost})
 
-    def run_argv(self, rel_plan: str, run_id: str) -> list[str]:
+    def run_argv(self, rel_plan: str, run_id: str, branch: str | None = None) -> list[str]:
         """The `harness run` command line. Built only from server-side values: the stored run
-        options add their flags when they differ from `harness run`'s defaults."""
+        options add their flags when they differ from `harness run`'s defaults.
+        `branch` adds --branch <branch>."""
         argv = [
             sys.executable, "-m", "harness", "run", rel_plan,
             "--repo", str(self.repo), "--run-id", run_id,
@@ -1218,6 +1222,8 @@ class Office:
             argv += ["--max-parallel", str(options.max_parallel)]
         if options.max_cost is not None:
             argv += ["--max-cost", str(options.max_cost)]
+        if branch is not None:
+            argv += ["--branch", branch]
         return argv
 
     def explain_error(self, who: str) -> dict[str, str]:
@@ -1242,13 +1248,20 @@ class Office:
         """Validate the stage plan again, then start `harness run` as a detached process
         (own session, so Ctrl-C on the UI leaves it running; output to
         .harness/office/run-<id>.log). With `resume` it adds --resume for `run_id` and
-        appends to the log. Caller holds the lock."""
+        appends to the log. A new run gets a work branch (ensure_work_branch with the run id);
+        a resume keeps the checked-out branch. Caller holds the lock."""
         load_plan(self.repo / rel_plan)
         rid = run_id or new_run_id()
+        try:
+            branch = current_branch(self.repo) if resume else ensure_work_branch(self.repo, rid)
+        except NoRepoError:
+            branch = None
+        except GitOpError as err:
+            raise OfficeConflict(f"cannot start a work branch: {err}") from err
         log_dir = self.repo / OFFICE_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         launcher = self._launcher or subprocess.Popen
-        argv = self.run_argv(rel_plan, rid) + (["--resume"] if resume else [])
+        argv = self.run_argv(rel_plan, rid, branch) + (["--resume"] if resume else [])
         self._resume_stamp = None
         if resume:
             try:
@@ -1277,6 +1290,7 @@ class Office:
                     "pid": getattr(popen, "pid", None),
                     "fake": self.fake,
                     "resume": resume,
+                    **({"branch": branch} if branch is not None else {}),
                 },
             )
         if self._titler is not None and not resume:
