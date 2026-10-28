@@ -429,6 +429,8 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 #room-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 0 10px; }
 #room-bar:not(:has(*:not(.hidden):not(:empty))) { padding: 0; }
 #btn-sidebar-open, #sidebar-scrim { display: none; }
+/* an id rule that sets display would beat the plain .hidden */
+#sidebar button.hidden, #run-progress-box.hidden, #run-options.hidden { display: none; }
 @media (min-width: 901px) {
   #layout.collapsed #sidebar { align-items: center; padding: 12px 6px; }
   #layout.collapsed #sidebar .brand, #layout.collapsed #sidebar-search, #layout.collapsed #chat-list, #layout.collapsed #sidebar-foot, #layout.collapsed #sidebar .lbl { display: none; }
@@ -476,7 +478,7 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 .thumb { position: relative; }
 .thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid #d5dee4; display: block; }
 #orch-composer .thumb-x, #composer .thumb-x, #chat-view .thumb-x { position: absolute; top: -6px; right: -6px; padding: 0 6px !important; line-height: 1.4; border-radius: 10px; }
-textarea.drop-over { outline: 2px dashed #52b8ff; }
+textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 .msg-images:not(.hidden) { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .msg-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; cursor: zoom-in; }
 .msg-thumb.big { width: auto; height: auto; max-width: 100%; cursor: zoom-out; }
@@ -532,7 +534,6 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       <p id="orch-line" class="muted"></p>
       <div id="orch-composer" class="hidden">
         <p id="orch-msg" role="alert"></p>
-        <div class="composer-actions"><button id="btn-orch-new" type="button">New request</button></div>
         <div class="composer-box" data-for="orch-text">
           <div class="composer-grip" data-for="orch-text" role="separator" aria-orientation="horizontal" aria-label="Resize the message box" title="Drag to resize, double-click to reset"></div>
           <ul id="orch-text-thumbs" class="thumbs hidden"></ul>
@@ -545,7 +546,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       </div>
     </div>
     <div id="past-view">
-      <div id="past-banner"><strong>Past request, read only</strong><button id="btn-past-new" type="button" class="hidden">New request</button></div>
+      <div id="past-banner"><strong>Past request, read only</strong></div>
       <p id="past-title" class="muted"></p>
       <p id="past-msg" role="alert"></p>
       <ol id="past-transcript"></ol>
@@ -926,15 +927,17 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
         input.value = '';
       });
       byId(id + '-attach').addEventListener('click', function () { input.click(); });
-      if ('ondrop' in area) {
-        area.addEventListener('dragover', function (e) {
+      // the textarea is one line high, so the whole rounded box takes drops
+      var drop = document.querySelector('.composer-box[data-for="' + id + '"]') || area;
+      if ('ondrop' in drop) {
+        drop.addEventListener('dragover', function (e) {
           e.preventDefault();
-          area.classList.add('drop-over');
+          drop.classList.add('drop-over');
         });
-        area.addEventListener('dragleave', function () { area.classList.remove('drop-over'); });
-        area.addEventListener('drop', function (e) {
+        drop.addEventListener('dragleave', function () { drop.classList.remove('drop-over'); });
+        drop.addEventListener('drop', function (e) {
           e.preventDefault();
-          area.classList.remove('drop-over');
+          drop.classList.remove('drop-over');
           addFiles(id, e.dataTransfer ? e.dataTransfer.files : null);
         });
       }
@@ -1034,6 +1037,20 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       composerChanged(id);
     });
     window.addEventListener('resize', function () { Object.keys(SENDS).forEach(fitComposer); });
+  }
+
+  function keepAtBottom(id) {
+    // a transcript that was at its bottom stays there when its box changes size (the
+    // composer appearing, a taller composer, a view being shown); scrolled up stays put
+    var list = byId(id);
+    var stuck = true;
+    list.addEventListener('scroll', function () {
+      stuck = list.scrollHeight - list.scrollTop - list.clientHeight <= 40;
+    });
+    if (typeof window.ResizeObserver !== 'function') return;
+    new window.ResizeObserver(function () {
+      if (stuck) list.scrollTop = list.scrollHeight;
+    }).observe(list);
   }
 
   function uploadWait(id, msgId) {
@@ -1570,12 +1587,6 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
       act('/api/orchestrator/message', withImages({text: text}, idsOf('orch-text')), function () {
         clearComposer('orch-text');
       }, 'orch-msg');
-    });
-    byId('btn-orch-new').addEventListener('click', function () {
-      act('/api/orchestrator/new', {}, startNew, 'orch-msg');
-    });
-    byId('btn-past-new').addEventListener('click', function () {
-      act('/api/orchestrator/new', {}, startNew, 'past-msg');
     });
   }
 
@@ -2715,7 +2726,6 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
 
   function renderPast(req) {
     var id = isPast(req, liveIds()) ? req.id : null;
-    setHidden('btn-past-new', !interactive);
     if (id === pastId) return;
     pastId = id;
     byId('left').classList.toggle('past', id !== null);
@@ -2777,6 +2787,9 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     renderPast(sel.request);
     if (sel.run !== current) open(sel.run);
     renderPickers(sel);
+    // opening a run resets the left panel, so a chat picked from the list is shown after it
+    showLive(wantPanel);
+    wantPanel = null;
     var none = !sel.run;
     byId('empty').textContent = emptyText(requests);
     document.getElementById('empty').className = none ? '' : 'hidden';
@@ -2784,7 +2797,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   }
 
   // ---- the chat list in the sidebar: the same requests the picker holds, grouped by recency
-  var chatQuery = '', chatSel = null, chatSig = '', chatRows = {};
+  var chatQuery = '', chatSel = null, chatSig = '', chatRows = {}, wantPanel = null;
 
   function chatGroup(startedAt, nowMs) {
     // the recency group of a request: Today, Yesterday, Previous 7 days, Previous 30 days, then its month
@@ -2826,7 +2839,16 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
     // what choosing it in the run picker does: a new request, or the hash of that request or run
     sidebarOpen(false);
     if (value === '') { startNew(); return; }
+    // the live planner session opens in the Opus panel, the live thread in the Orchestrator's
+    var ids = liveIds();
+    var want = value === ids.session ? 'opus' : (value === ids.thread ? 'orch' : null);
+    if (hashId() === value) { showLive(want); return; }
+    wantPanel = want;
     location.hash = '#' + encodeURIComponent(value);
+  }
+  function showLive(want) {
+    if (want === 'opus') showOpus();
+    else if (want === 'orch') selectTask(null);
   }
 
   function markChat() {
@@ -2918,6 +2940,7 @@ textarea.drop-over { outline: 2px dashed #52b8ff; }
   wireOrch();
   wireAttach();
   wireComposers();
+  ['transcript', 'orch-transcript', 'chat-transcript', 'timeline'].forEach(keepAtBottom);
   wireSidebar();
   wireProject();
   wireOptions();

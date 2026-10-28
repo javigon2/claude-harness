@@ -69,3 +69,45 @@ def test_narrow_windows_use_an_overlay_sidebar_and_stack_the_columns():
 def test_page_still_self_contained():
     text = _text()
     assert "http://" not in text and "https://" not in text
+
+
+def test_hidden_wins_over_id_rules_that_set_display():
+    # an id rule that sets display beats the plain .hidden: the empty progress bar and the
+    # run options showed in read-only mode, and the sidebar buttons would have too
+    text = _text()
+    after = text[text.index("#btn-sidebar-open, #sidebar-scrim") :]
+    m = re.search(r"\n(#sidebar button\.hidden[^{]*)\{ display: none; \}", after)
+    assert m
+    rule = m.group(1)
+    for sel in ("#sidebar button.hidden", "#run-progress-box.hidden", "#run-options.hidden"):
+        assert sel in rule, sel
+    for sel in ("#run-progress-box", "#run-options"):
+        assert re.search(rf"\n{sel} \{{[^}}]*display: flex", text), sel
+
+
+def test_transcripts_stay_at_the_bottom_when_their_box_resizes():
+    text = _text()
+    m = re.search(r"  function keepAtBottom\(id\) \{.*?\n  \}\n", text, re.S)
+    assert m
+    body = m.group(0)
+    assert "ResizeObserver" in body and "scrollTop = list.scrollHeight" in body
+    assert "addEventListener('scroll'" in body
+    call = re.search(r"\[([^\]]*)\]\.forEach\(keepAtBottom\)", text)
+    assert call
+    for i in ("transcript", "orch-transcript", "chat-transcript", "timeline"):
+        assert f"'{i}'" in call.group(1), i
+
+
+def test_picking_the_live_planner_or_thread_shows_its_panel_after_the_run_opens():
+    text = _text()
+    pick = re.search(r"  function pickChat\(value\) \{.*?\n  \}\n", text, re.S)
+    assert pick
+    body = pick.group(0)
+    assert "'opus'" in body and "'orch'" in body and "wantPanel = want" in body
+    show = re.search(r"  function showLive\(want\) \{.*?\n  \}\n", text, re.S)
+    assert show and "showOpus()" in show.group(0) and "selectTask(null)" in show.group(0)
+    # open() resets the left panel, so choose() applies the pick after it
+    choose = re.search(r"  function choose\(\) \{.*?\n  \}\n", text, re.S)
+    assert choose
+    c = choose.group(0)
+    assert c.index("open(sel.run)") < c.index("showLive(wantPanel)")

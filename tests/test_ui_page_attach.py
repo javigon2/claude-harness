@@ -158,3 +158,16 @@ def test_attach_helpers_in_node(tmp_path):
     assert out["noFetch"] is False
     assert out["noDoc"] is False
     assert out["nul"] is False
+
+
+def test_the_whole_composer_box_takes_drops():
+    # the textarea is one line high, so only dropping on the box makes sense
+    text = _text()
+    m = re.search(r"  function wireAttach\(\) \{.*?\n  \}\n", text, re.S)
+    assert m
+    body = m.group(0)
+    assert "document.querySelector('.composer-box[data-for=\"' + id + '\"]')" in body
+    for ev in ("dragover", "dragleave", "'drop'"):
+        assert f"drop.addEventListener({ev if ev.startswith(chr(39)) else repr(ev)}" in body, ev
+    assert "area.addEventListener('paste'" in body
+    assert ".composer-box.drop-over" in text

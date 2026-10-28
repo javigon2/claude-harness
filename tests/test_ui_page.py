@@ -1333,12 +1333,12 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
 def test_orchestrator_composer_markup():
     text = _text()
     assert '<div id="orch-composer" class="hidden">' in text
-    ids = ["orch-view", "orch-line", "orch-composer", "orch-msg", "btn-orch-new",
+    ids = ["orch-view", "orch-line", "orch-composer", "orch-msg",
            "orch-text-thumbs", "orch-text", "orch-text-attach", "btn-orch-send",
            "convo"]  # fmt: skip
     places = [text.index(f'id="{id_}"') for id_ in ids]
     assert places == sorted(places)
-    assert '<button id="btn-orch-new" type="button">New request</button>' in text
+    assert "btn-orch-new" not in text and "btn-past-new" not in text  # New chat is in the sidebar
     assert re.search(r"#orch-msg:empty \{ display: none; \}", text)
     for word in [
         "'/api/orchestrator/message'", "'/api/orchestrator/new'", "wireOrch();",
@@ -1357,7 +1357,7 @@ def test_orchestrator_send_always_posts_to_the_orchestrator():
     text = _text()
     m = re.search(r"  function wireOrch\(\) \{.*?\n  \}", text, re.S)
     assert m
-    handler = m.group(0).split("btn-orch-new")[0]
+    handler = m.group(0)
     post = "act('/api/orchestrator/message', withImages({text: text}, idsOf('orch-text'))"
     assert post in handler
     assert "/api/planner/start" not in handler
@@ -1865,11 +1865,10 @@ def test_request_picker_and_past_view_markup():
     assert re.search(
         r'<select id="run-sub-picker" class="hidden" aria-label="[^"]+"></select>', text
     )
-    ids = ["orch-view", "past-view", "past-banner", "btn-past-new", "past-transcript", "convo"]
+    ids = ["orch-view", "past-view", "past-banner", "past-transcript", "convo"]
     places = [text.index(f'id="{i}"') for i in ids]
     assert places == sorted(places)
     assert "Past request, read only" in text
-    assert '<button id="btn-past-new" type="button" class="hidden">New request</button>' in text
     assert "/api/orchestrator/thread/" in text
     assert "No run yet for this request" in text
     assert "<a " not in text

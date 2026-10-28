@@ -73,7 +73,10 @@ var requests = [
   {id: 'b', title: 'Done one', first_message: 'x', started_at: new Date(nowMs - 1000).toISOString(),
    state: 'done', runs: []}
 ];
-var location = {};
+var location = {}, wantPanel = null, live = {thread: 't1', session: null}, shown = [];
+function liveIds() { return live; }
+function hashId() { return ''; }
+function showLive(w) { shown.push(w); }
 function sidebarOpen(on) { if (!on) sidebarClosed++; }
 function startNew() { started++; }
 function byId(id) { return document.getElementById(id); }
@@ -104,6 +107,14 @@ pendingNew = false; chatQuery = 'zzz'; renderChatList();
 out.push(info());
 requests = []; runs = []; chatQuery = ''; renderChatList();
 out.push(info());
+requests = [{id: 'a', title: 'A', first_message: 'a', started_at: new Date(nowMs).toISOString(),
+  state: 'done', runs: []}];
+live = {thread: null, session: 'a'}; chatQuery = ''; chatSig = ''; renderChatList();
+rows()[1].on.click();
+out.push([wantPanel, location.hash]);
+wantPanel = null; location.hash = '#a'; hashId = function () { return 'a'; };
+rows()[1].on.click();
+out.push([wantPanel, shown]);
 console.log(JSON.stringify(out));
 """
 
@@ -114,7 +125,7 @@ def test_chat_list_renders_and_selects_in_place(tmp_path):
         _page_helpers(text)
         + "function setClass(n, c) { if (n.className !== c) n.className = c; }\n"
         + "function runsOf(r) { return (r && Array.isArray(r.runs)) ? r.runs : []; }\n"
-        + _funcs() + _functions(text, "pickChat", "markChat", "renderChatList")
+        + _funcs() + _functions(text, "pickChat", "showLive", "markChat", "renderChatList")
         + RENDER
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
@@ -133,6 +144,10 @@ def test_chat_list_renders_and_selects_in_place(tmp_path):
     assert out[6] == 1
     assert out[7] == ["chat-empty muted|No matching chats"]
     assert out[8] == ["chat-empty muted|No chats yet"]
+    # the live planner session shows in the Opus panel once the run has opened; picking the
+    # request that is already selected has no hash change to wait for, so it shows at once
+    assert out[9] == ["opus", "#a"]
+    assert out[10] == [None, ["opus"]]
 
 
 def test_sidebar_markup_and_wiring():
