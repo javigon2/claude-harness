@@ -1,5 +1,6 @@
 """Router: run one order through worker attempts and verification, escalating up the tiers."""
 
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -161,6 +162,7 @@ class Router:
             await self._changed(state)
             await emit("verify_started", {"attempt": n})
 
+            verify_start = time.monotonic()
             vr = await verify(
                 order,
                 cwd,
@@ -169,9 +171,11 @@ class Router:
                 reviewer=self.reviewer,
                 review_tier=self.review_tier,
             )
+            verify_ms = round((time.monotonic() - verify_start) * 1000)
             review_usage = vr.review.usage if vr.review is not None else Usage()
             if vr.review is not None and vr.review.rate_limited:
                 state.usage = state.usage.plus(review_usage)
+                await emit("verify_paused", {"attempt": n, "duration_ms": verify_ms})
                 return await pause(
                     rate_limit_reason(vr.review.rate_limit_resets_at),
                     vr.review.rate_limit_resets_at,
@@ -197,6 +201,15 @@ class Router:
                     "scope_error": vr.scope_error,
                     "review_verdict": vr.review.verdict if vr.review is not None else None,
                     "review_reasons": vr.review.reasons if vr.review is not None else [],
+                    "duration_ms": verify_ms,
+                    "commands": [
+                        {
+                            "cmd": c.cmd,
+                            "duration_ms": round(c.duration_s * 1000),
+                            "passed": c.passed,
+                        }
+                        for c in vr.commands
+                    ],
                 },
             )
 

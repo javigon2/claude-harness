@@ -2,6 +2,7 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import harness.cli
@@ -126,12 +127,28 @@ async def test_plan_ready_only_when_the_file_changed_during_the_turn(tmp_path):
     assert [e.type for e in events].count("plan_ready") == 1
     replies = [e.payload for e in events if e.type == "planner_reply"]
     assert [r["plan_changed"] for r in replies] == [False, True, False, False]
+    assert all(r["phase"] == "project" and r["duration_ms"] >= 0 for r in replies)
     messages = [e.payload for e in events if e.type == "planner_message"]
     assert [m["chars"] for m in messages] == [5, 6, 4, 5]
     ready = next(e for e in events if e.type == "plan_ready")
     assert ready.payload["path"] == ".harness/plans/PROJECT_PLAN.md"
     await s.close()
     assert inner.closed
+
+
+async def test_planner_turn_exception_is_timed(tmp_path):
+    def fail(_text: str) -> PlannerTurn:
+        raise RuntimeError("boom")
+
+    session = ObservedSession(
+        FakePlannerSession([fail]), tmp_path, PlannerLog(tmp_path, "planner-1")
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        await session.send("hello")
+    failed = read_planner_events(tmp_path)[-1]
+    assert failed.type == "planner_turn_failed"
+    assert failed.payload["duration_ms"] >= 0
+    assert failed.payload["phase"] == "project"
 
 
 async def test_no_plan_ready_once_approved_or_outside_project_phase(tmp_path):
@@ -164,7 +181,7 @@ def test_harness_plan_logs_a_terminal_session(tmp_path, monkeypatch):
 
     def approve(_: str) -> PlannerTurn:
         project_plan.write_text("# Plan\n\nStatus: approved 2026-10-16\n", encoding="utf-8")
-        return PlannerTurn(text="Approved.")
+        return PlannerTurn(text="Approved.", usage=Usage(cost_usd=0.4))
 
     def stage(_: str) -> PlannerTurn:
         d = tmp_path / STAGE_PLAN_DIR
@@ -172,7 +189,7 @@ def test_harness_plan_logs_a_terminal_session(tmp_path, monkeypatch):
         (d / "plan.json").write_text(json.dumps(_one_order_plan()), encoding="utf-8")
         return PlannerTurn(text="Stage plan written.", usage=Usage(cost_usd=0.4))
 
-    session = FakePlannerSession([draft, approve, stage])
+    session = FakePlannerSession([draft, stage, approve])
     monkeypatch.setattr(harness.cli, "check_skills", lambda *a, **k: None)
     monkeypatch.setattr(harness.cli, "_make_planner_session", lambda repo: session)
     result = runner.invoke(

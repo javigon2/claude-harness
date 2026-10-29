@@ -7,6 +7,7 @@ session runs from its `planner_started` event to its `planner_done` or `planner_
 a view reads only the last one."""
 
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from harness.planner import (
     PROJECT_PLAN_FILE,
     PlannerSession,
     PlannerTurn,
+    SdkPlannerSession,
     _fingerprint,
     is_approved,
 )
@@ -109,6 +111,10 @@ class ObservedSession:
         self._phase = phase_fn
         self.reply_text: str | None = None
         self.ready = False
+        if isinstance(inner, SdkPlannerSession):
+            inner.tool_event = lambda event, payload: log.emit(
+                event, {**payload, "phase": self._phase()}
+            )
 
     @property
     def cost_usd(self) -> float:
@@ -123,7 +129,20 @@ class ObservedSession:
     async def send(self, text: str) -> PlannerTurn:
         self._log.emit("planner_message", {"chars": len(text), "phase": self._phase()})
         before = _fingerprint(self._plan)
-        turn = await self._inner.send(text)
+        start = time.monotonic()
+        try:
+            turn = await self._inner.send(text)
+        except Exception as err:
+            self._log.emit(
+                "planner_turn_failed",
+                {
+                    "phase": self._phase(),
+                    "duration_ms": round((time.monotonic() - start) * 1000),
+                    "error": f"{type(err).__name__}: {err}"[:2000],
+                },
+            )
+            raise
+        duration_ms = round((time.monotonic() - start) * 1000)
         after = _fingerprint(self._plan)
         changed = after not in (None, before)
         self._own_cost = turn.usage.cost_usd
@@ -131,7 +150,13 @@ class ObservedSession:
         self.ready = self.ready and self._phase() == "project" and not self._approved()
         self._log.emit(
             "planner_reply",
-            {"text": turn.text, "plan_changed": changed, "cost_usd": self.cost_usd},
+            {
+                "text": turn.text,
+                "plan_changed": changed,
+                "cost_usd": self.cost_usd,
+                "duration_ms": duration_ms,
+                "phase": self._phase(),
+            },
         )
         if changed and self._phase() == "project" and not self._approved():
             self.ready = True

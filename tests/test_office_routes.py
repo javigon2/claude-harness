@@ -7,7 +7,13 @@ from test_office import Launches, wait_for
 from test_planner import VALID_PLAN
 
 from harness.models import Usage
-from harness.planner import PROJECT_PLAN_FILE, FakePlannerSession, PlannerTurn, quick_plan_dir
+from harness.planner import (
+    PROJECT_PLAN_FILE,
+    STAGE_PLAN_DIR,
+    FakePlannerSession,
+    PlannerTurn,
+    quick_plan_dir,
+)
 from harness.planner_log import read_planner_events
 from harness.ui.office import Office, OfficeConflict, office_view_from_log
 
@@ -38,6 +44,16 @@ def write_draft(root: Path, cost: float = 0.0):
         (root / PROJECT_PLAN_FILE).parent.mkdir(parents=True, exist_ok=True)
         (root / PROJECT_PLAN_FILE).write_text("# P\n\nStatus: draft\n", encoding="utf-8")
         return PlannerTurn(text="draft written", usage=Usage(cost_usd=cost))
+
+    return step
+
+
+def write_draft_orders(root: Path, cost: float = 0.0):
+    def step(_text: str) -> PlannerTurn:
+        target = root / STAGE_PLAN_DIR / "plan.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(VALID_PLAN), encoding="utf-8")
+        return PlannerTurn(text="stage 1 orders written", usage=Usage(cost_usd=cost))
 
     return step
 
@@ -171,7 +187,9 @@ def test_auto_to_quick(repo, make):
 
 
 def test_auto_to_project(repo, make):
-    office, session, _l = make([write_draft(repo)], [triage("project", "sonnet", "big")])
+    office, session, _l = make(
+        [write_draft(repo), write_draft_orders(repo)], [triage("project", "sonnet", "big")]
+    )
     office.start("build an app", route="auto")
     wait_for(state_is(office, "ready"))
     view = office.view()
@@ -181,15 +199,18 @@ def test_auto_to_project(repo, make):
 
 
 def test_planner_cost_includes_the_triage_turn(repo, make):
-    office, _s, _l = make([write_draft(repo, 0.25)], [triage("project", "sonnet", "big", 0.03)])
+    office, _s, _l = make(
+        [write_draft(repo, 0.25), write_draft_orders(repo, 0.25)],
+        [triage("project", "sonnet", "big", 0.03)],
+    )
     office.start("build an app", route="auto")
     wait_for(state_is(office, "ready"))
     assert office.view().cost_usd == pytest.approx(0.28)
     events = read_planner_events(repo)
     replies = [e.payload for e in events if e.type == "planner_reply"]
-    assert [r["cost_usd"] for r in replies] == pytest.approx([0.03, 0.28])
+    assert [r["cost_usd"] for r in replies] == pytest.approx([0.03, 0.28, 0.28])
     phases = [e.payload["phase"] for e in events if e.type == "planner_message"]
-    assert phases == ["triage", "project"]
+    assert phases == ["triage", "project", "project"]
     assert office_view_from_log(repo).cost_usd == pytest.approx(0.28)
 
 

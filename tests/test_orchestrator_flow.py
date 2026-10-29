@@ -7,7 +7,7 @@ import pytest
 from git_helpers import init_repo
 
 from harness.models import Usage
-from harness.planner import FakePlannerSession, PlannerTurn
+from harness.planner import FakePlannerSession, PlannerTurn, SdkRoutingSession
 from harness.planner_log import read_planner_events
 from harness.ui.chat import ChatManager
 from harness.ui.orchestrator import (
@@ -104,6 +104,7 @@ def test_new_message_to_haiku(env):
     (turn,) = env.turns()
     p = turn.payload
     assert p["action"] == "start" and p["target_kind"] == "chat" and p["to"] == "haiku"
+    assert p["routing_ms"] >= 0
     assert p["cost_usd"] == 0.02
     assert p["text"] == "Sent to haiku: mechanical"
     (session,) = env.sessions
@@ -127,6 +128,25 @@ def test_new_message_to_opus_quick(env):
     assert env.opus.started == [("big job", "quick")]
     assert env.turns()[0].payload["text"] == "Sent to opus (quick plan): hard"
     assert env.orch.view().holder == "opus"
+
+
+def test_opus_without_plan_defaults_to_quick(env):
+    body = json.dumps({"to": "opus", "reason": "parallel one-stage work"})
+    env.say("one stage", PlannerTurn(text=f"```json\n{body}\n```"))
+    assert env.opus.started == [("one stage", "quick")]
+    assert env.turns()[0].payload["plan"] == "quick"
+
+
+def test_default_orchestrator_uses_lightweight_router(tmp_path):
+    chats = ChatManager(tmp_path, fake=True, fake_delay=0)
+    orch = Orchestrator(tmp_path, chats, StubOpus())
+    try:
+        session = orch._factory(tmp_path, lambda _info: None)
+        assert isinstance(session, SdkRoutingSession)
+        assert session.options().max_turns == 1
+    finally:
+        orch.close()
+        chats.close()
 
 
 def test_follow_up_forwarded_to_holder(env):

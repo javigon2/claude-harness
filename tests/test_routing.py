@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from harness.planner import ORCHESTRATOR_PROMPT, Routing, parse_routing
+from harness.config import MODEL_IDS
+from harness.planner import ORCHESTRATOR_PROMPT, Routing, SdkRoutingSession, parse_routing
 from harness.ui.demo import DemoPlannerSession
 
 
@@ -29,7 +30,8 @@ def test_parse_routing_cases() -> None:
     )
     assert parse_routing(block(valid) + block({"to": "gpt"})) is None
     assert parse_routing(block({"to": "haiku"})) == Routing(to="haiku")
-    assert Routing(to="haiku").plan == "project"
+    assert Routing(to="haiku").plan == "quick"
+    assert parse_routing(block({"to": "opus"})) == Routing(to="opus", plan="quick")
     assert Routing(to="haiku").reason == ""
 
 
@@ -41,6 +43,21 @@ def test_orchestrator_prompt_shape() -> None:
     assert '{"to": "haiku" | "sonnet" | "opus"' in prompt
     assert "Holder: nobody (new work)." in prompt
     assert prompt.endswith("Conversation so far:\n(none)\n\nMessage:\n\nfix x")
+    assert "Default to a direct chat" in prompt
+    assert "even across several files" in prompt
+    assert "2-8 separable work orders" in prompt
+    assert "only for multiple stages or choices only the user can make" in prompt
+    assert "without reading the repo" in prompt
+
+
+def test_office_router_is_one_tool_free_sonnet_turn(tmp_path: Path) -> None:
+    options = SdkRoutingSession(tmp_path).options()
+    assert options.model == MODEL_IDS["sonnet"]
+    assert options.max_turns == 1
+    assert options.tools == []
+    assert options.allowed_tools == []
+    assert options.skills == []
+    assert options.setting_sources == []
 
 
 async def test_demo_orchestrator_routes_by_first_word(tmp_path: Path) -> None:

@@ -168,6 +168,12 @@ async def test_pass_on_first_try(env: _Env):
         "verify_finished",
         "task_done",
     ]
+    finished = env.events("verify_finished")[0]
+    assert finished["duration_ms"] >= 0
+    assert len(finished["commands"]) == 1
+    assert finished["commands"][0]["cmd"] == "test -f done.txt"
+    assert finished["commands"][0]["passed"] is True
+    assert finished["commands"][0]["duration_ms"] >= 0
     assert env.statuses == ["running", "verifying", "done"]
 
 

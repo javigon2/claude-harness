@@ -20,7 +20,9 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,7 +76,8 @@ PROJECT_PROMPT = (
 STAGE_PROMPT = (
     "{project_plan} is approved. Now use the plan-stage skill on stage {stage} of "
     "{project_plan}. Write plan.json and plan.md to {stage_dir}/ (exactly this "
-    "directory). Run the skill's validation snippet before you finish."
+    "directory). Run the skill's validation snippet before you finish. "
+    "Invoke the skill and write the files in this turn; do not just describe the next step."
 )
 
 DRAFT_STAGE_PROMPT = (
@@ -82,6 +85,7 @@ DRAFT_STAGE_PROMPT = (
     "before asking for approval, so the user can review the plan and work orders together. "
     "Write plan.json and plan.md to {stage_dir}/ (exactly this directory). "
     "Run the skill's validation snippet before you finish. "
+    "Invoke the skill and write the files in this turn; do not just describe the next step. "
     "Do not approve the project plan or start implementation."
 )
 
@@ -100,12 +104,15 @@ APPROVE_QUICK = "\x00approve-quick"
 
 TRIAGE_PROMPT = (
     "Decide how much planning this request needs. Target repo: {repo}\n"
-    "Read only what you need and write no file. End with a ```json block: "
+    "Read only what you need and write no file. Prefer direct when one agent can "
+    "finish the change, even across several files; use quick only when 2-8 independent "
+    "work orders would actually help. End with a ```json block: "
     '{{"route": "direct" | "quick" | "project", "tier": "haiku" | "sonnet", '
     '"reason": "<one line>"}}.\n'
-    "direct: one agent in a short chat (1-3 files); haiku if mechanical, else sonnet. "
+    "direct: one agent in a short chat; haiku if mechanical, else sonnet. "
     "quick: one stage of 2-8 work orders, no open question. "
-    "project: several stages or user choices.\n\nRequest:\n\n{description}"
+    "project: several stages or a choice only the user can make. "
+    "Do not infer complexity from the number of files alone.\n\nRequest:\n\n{description}"
 )
 
 QUICK_PROMPT = (
@@ -151,10 +158,14 @@ def parse_triage(text: str) -> Triage | None:
 ORCHESTRATOR_PROMPT = (
     "Route this message in the harness office; never answer it or edit a file. "
     "Target repo: {repo}\n"
-    "Pick who takes the work by difficulty: haiku for a mechanical edit, sonnet for an "
-    "ordinary change in a short chat, opus for hard, multi-file or multi-stage work. Opus "
-    "plans it: plan quick for one stage of work orders, project for several stages or open "
-    "questions. Read only what you need.\n"
+    "Default to a direct chat with one agent when it can finish the request: haiku for "
+    "a clearly specified mechanical edit, sonnet for ordinary coding or investigation, "
+    "even across several files. Do not route to opus merely because a change touches "
+    "multiple files or sounds difficult. Use opus with a quick plan only when 2-8 "
+    "separable work orders in one stage would save time; use a project plan only for "
+    "multiple stages or choices only the user can make. When unsure between direct "
+    "and planning, choose sonnet; between quick and project, choose quick. "
+    "Route from the request without reading the repo.\n"
     "Holder: {holder}. A follow-up stays with the holder unless it is clearly beyond the "
     "holder; never pick a lower tier than the holder.\n"
     'End with a ```json block: {{"to": "haiku" | "sonnet" | "opus", '
@@ -169,7 +180,7 @@ class Routing(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     to: Tier
-    plan: Literal["quick", "project"] = "project"
+    plan: Literal["quick", "project"] = "quick"
     reason: str = ""
 
 
@@ -324,6 +335,14 @@ class SdkPlannerSession:
         self._factory = client_factory or ClaudeSDKClient
         self._client: Any = None
         self._usage = Usage()
+        self.tool_event: Callable[[str, dict[str, Any]], None] | None = None
+
+    def _emit_tool(self, event: str, payload: dict[str, Any]) -> None:
+        if self.tool_event is not None:
+            try:
+                self.tool_event(event, payload)
+            except Exception:
+                pass
 
     def options(self) -> ClaudeAgentOptions:
         """The exact options; values in the `decision: planner SDK options` context item."""
@@ -361,15 +380,22 @@ class SdkPlannerSession:
         session_init: dict[str, Any] | None = None
         last_tool: str | None = None
         last_report = 0.0
+        pending_tools: dict[str, tuple[str, float]] = {}
         try:
             await self._client.query(text)
             async for message in self._client.receive_response():
                 if isinstance(message, AssistantMessage):
                     if message.parent_tool_use_id is None:
-                        if self._progress is not None:
-                            for b in message.content:
-                                if not isinstance(b, ToolUseBlock):
-                                    continue
+                        for b in message.content:
+                            if not isinstance(b, ToolUseBlock):
+                                continue
+                            pending_tools[b.id] = (b.name, time.monotonic())
+                            info = describe_tool(b.name, b.input, self.repo)
+                            self._emit_tool(
+                                "planner_tool_started",
+                                {"tool_id": b.id, "tool": b.name, "detail": info["detail"]},
+                            )
+                            if self._progress is not None:
                                 now = time.monotonic()
                                 if (
                                     b.name != last_tool
@@ -377,9 +403,7 @@ class SdkPlannerSession:
                                 ):
                                     last_tool, last_report = b.name, now
                                     try:
-                                        await self._progress(
-                                            describe_tool(b.name, b.input, self.repo)
-                                        )
+                                        await self._progress(info)
                                     except Exception:  # a broken callback must not end the turn
                                         pass
                         joined = "".join(
@@ -387,6 +411,22 @@ class SdkPlannerSession:
                         )
                         if joined.strip():
                             last_text = joined
+                elif isinstance(message, UserMessage) and isinstance(message.content, list):
+                    for b in message.content:
+                        if not isinstance(b, ToolResultBlock):
+                            continue
+                        pending = pending_tools.pop(b.tool_use_id, None)
+                        if pending is not None:
+                            name, started = pending
+                            self._emit_tool(
+                                "planner_tool_finished",
+                                {
+                                    "tool_id": b.tool_use_id,
+                                    "tool": name,
+                                    "duration_ms": round((time.monotonic() - started) * 1000),
+                                    "status": "error" if b.is_error else "ok",
+                                },
+                            )
                 elif isinstance(message, SystemMessage):
                     if session_init is None:
                         session_init = session_init_facts(message)
@@ -394,6 +434,16 @@ class SdkPlannerSession:
                     result_msg = message
         except Exception as err:
             error = f"{type(err).__name__}: {err}"[:2000]
+        for tool_id, (name, started) in pending_tools.items():
+            self._emit_tool(
+                "planner_tool_finished",
+                {
+                    "tool_id": tool_id,
+                    "tool": name,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "status": "missing_result",
+                },
+            )
 
         if (
             result_msg is not None
@@ -443,6 +493,25 @@ class SdkTriageSession(SdkPlannerSession):
             permission_mode="default",
             cwd=str(self.repo),
             max_turns=TRIAGE_MAX_TURNS,
+            strict_mcp_config=True,
+            env=dict(WORKER_ENV),
+        )
+
+
+class SdkRoutingSession(SdkTriageSession):
+    """The office router only classifies the request; it never explores the repo."""
+
+    def options(self) -> ClaudeAgentOptions:
+        return ClaudeAgentOptions(
+            model=MODEL_IDS["sonnet"],
+            system_prompt="Route the request. Reply only with the requested JSON block.",
+            tools=[],
+            allowed_tools=[],
+            skills=[],
+            setting_sources=[],
+            permission_mode="default",
+            cwd=str(self.repo),
+            max_turns=1,
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
         )
@@ -674,8 +743,10 @@ async def run_planner(
 
         plan_fp = _fingerprint(plan_path)
         msg = STAGE_PROMPT.format(project_plan=project_plan, stage=stage, stage_dir=stage_dir)
-        while not await plan_turn(msg, plan_path):
-            msg = await answer()
+        if not await plan_turn(msg, plan_path):
+            msg = f"Write plan.json and plan.md to {stage_dir} now. Invoke plan-stage; do not ask."
+            while not await plan_turn(msg, plan_path):
+                msg = await answer()
         return result(plan_path, "project", triage)
     finally:
         if triage_session is not None:

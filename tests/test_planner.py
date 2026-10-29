@@ -8,7 +8,9 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from harness.config import MODEL_IDS
@@ -39,6 +41,7 @@ from harness.planner import (
     run_planner,
     stage_plan_dir,
 )
+from harness.planner_log import ObservedSession, PlannerLog, read_planner_events
 from harness.worker import WORKER_ENV
 
 # ---------------------------------------------------------------- helpers
@@ -252,6 +255,40 @@ async def test_send_connects_once_and_returns_result(tmp_path: Path) -> None:
     assert t2.usage.output_tokens == 7
     assert t2.usage.cache_read_tokens == 11
     assert t2.usage.cache_creation_tokens == 13
+
+
+async def test_planner_tool_timing_tracks_results_and_missing_results(tmp_path: Path) -> None:
+    make, _ = factory(
+        scripts=[
+            [
+                tool_msg(
+                    ("Read", {"file_path": str(tmp_path / "a.py")}),
+                    ("Bash", {"command": "false"}),
+                ),
+                UserMessage(
+                    content=[ToolResultBlock(tool_use_id="t0", content="ok", is_error=False)]
+                ),
+                result_msg(),
+            ]
+        ]
+    )
+    inner = SdkPlannerSession(tmp_path, client_factory=make)
+    session = ObservedSession(inner, tmp_path, PlannerLog(tmp_path, "planner-1"))
+    await session.send("x")
+    events = read_planner_events(tmp_path)
+    starts = [e.payload for e in events if e.type == "planner_tool_started"]
+    ends = [e.payload for e in events if e.type == "planner_tool_finished"]
+    assert [(p["tool_id"], p["tool"], p["phase"]) for p in starts] == [
+        ("t0", "Read", "project"),
+        ("t1", "Bash", "project"),
+    ]
+    assert starts[0]["detail"] == "a.py"
+    assert [(p["tool_id"], p["status"]) for p in ends] == [
+        ("t0", "ok"),
+        ("t1", "missing_result"),
+    ]
+    assert all(p["duration_ms"] >= 0 for p in ends)
+    await session.close()
 
 
 async def test_send_falls_back_to_last_top_level_text(tmp_path: Path) -> None:
@@ -574,6 +611,22 @@ async def test_run_planner_stage_2(tmp_path: Path) -> None:
     assert result.rounds == 1
     assert said == ["Stage 2 written."]
     assert session.closed
+
+
+async def test_stage_prompt_next_step_reply_retries_without_asking(tmp_path: Path) -> None:
+    write_project(tmp_path, "approved 2026-10-14")
+    session = FakePlannerSession(
+        [
+            step("Next step: write work orders.", 0.1),
+            step("Done.", 0.2, lambda: write_stage_n(tmp_path, 2, VALID_PLAN)),
+        ]
+    )
+    ask, asked = asker([])
+    result = await run_planner("", tmp_path, session, ask, lambda _t: None, stage=2)
+    assert result.plan_path == tmp_path.resolve() / stage_plan_dir(2) / "plan.json"
+    assert len(session.sent) == 2
+    assert "Write plan.json and plan.md" in session.sent[1]
+    assert asked == []
 
 
 @pytest.mark.parametrize("status", [None, "draft"])

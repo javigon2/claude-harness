@@ -8,6 +8,7 @@ a restart or a read-only page rebuilds the thread with `orchestrator_view_from_l
 import asyncio
 import os
 import threading
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +23,7 @@ from harness.planner import (
     PlannerSession,
     PlannerTurn,
     Routing,
-    SdkTriageSession,
+    SdkRoutingSession,
     parse_routing,
 )
 from harness.planner_log import PlannerLog, last_session, read_planner_events
@@ -373,7 +374,7 @@ class Orchestrator:
         else:
 
             def sdk_factory(repo: Path, progress: ProgressFn) -> PlannerSession:
-                return SdkTriageSession(repo, progress=progress)
+                return SdkRoutingSession(repo, progress=progress)
 
             self._factory = sdk_factory
         self._lock = threading.Lock()
@@ -568,11 +569,16 @@ class Orchestrator:
 
     # -- the routing thread -------------------------------------------------------------
 
-    def _fail(self, log: PlannerLog, reason: str, cost: float) -> None:
+    def _fail(
+        self, log: PlannerLog, reason: str, cost: float, routing_ms: int | None = None
+    ) -> None:
         with self._lock:
             if self._closed:
                 return
-            log.emit("orchestrator_failed", {"reason": reason, "cost_usd": cost})
+            payload: dict[str, Any] = {"reason": reason, "cost_usd": cost}
+            if routing_ms is not None:
+                payload["routing_ms"] = routing_ms
+            log.emit("orchestrator_failed", payload)
             self._state = "failed"
             self._error = reason
             self._progress = []
@@ -626,6 +632,7 @@ class Orchestrator:
             with self._lock:
                 self._progress = [*self._progress, _progress_line(info)][-PROGRESS_LINES:]
 
+        started = time.monotonic()
         session = self._factory(self.repo, progress_cb)
         try:
             try:
@@ -637,9 +644,10 @@ class Orchestrator:
                 await session.close()
             except Exception:
                 pass
+        routing_ms = round((time.monotonic() - started) * 1000)
         cost = turn.usage.cost_usd
         if turn.error:
-            self._fail(log, f"orchestrator session failed: {turn.error}", cost)
+            self._fail(log, f"orchestrator session failed: {turn.error}", cost, routing_ms)
             return
         routing = parse_routing(turn.text)
         with self._lock:
@@ -673,7 +681,7 @@ class Orchestrator:
                     pass
                 target = self._start_target(to, routing.plan, brief, images)
         except (ChatConflict, HandoffRefused) as err:
-            self._fail(log, f"could not hand to {to}: {err}", cost)
+            self._fail(log, f"could not hand to {to}: {err}", cost, routing_ms)
             return
         with self._lock:
             if self._closed:
@@ -688,6 +696,7 @@ class Orchestrator:
                     "target_kind": target[1],
                     "target_id": target[2],
                     "cost_usd": cost,
+                    "routing_ms": routing_ms,
                     "text": routing_line(action, target[0], routing.plan, routing.reason),
                 },
             )
