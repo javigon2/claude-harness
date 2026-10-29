@@ -67,19 +67,30 @@ def test_three_cycle():
         validate_plan(plan)
 
 
-def test_overlap_in_same_wave():
+def test_overlap_without_ordering():
     plan = _plan(
         _order("a"),
         _order("b", ["a"], ["x.py"]),
         _order("c", ["a"], ["./x.py"]),
     )
-    with pytest.raises(PlanError, match=r"overlapping files_owned in wave 2: x\.py \(b, c\)"):
+    with pytest.raises(PlanError, match=r"overlapping files_owned: x\.py \(b, c\) are not ordered"):
         validate_plan(plan)
 
 
 def test_same_file_in_different_waves_allowed():
     plan = _plan(_order("a", owned=["x.py"]), _order("b", ["a"], ["x.py"]))
     assert validate_plan(plan) == [["a"], ["b"]]
+
+
+def test_overlap_across_waves_needs_a_dependency_path():
+    plan = _plan(_order("a", owned=["x.py"]), _order("b"), _order("c", ["b"], ["x.py"]))
+    with pytest.raises(PlanError, match=r"overlapping files_owned: x\.py \(a, c\)"):
+        validate_plan(plan)
+
+
+def test_overlap_ordered_transitively_allowed():
+    plan = _plan(_order("a", owned=["x.py"]), _order("b", ["a"]), _order("c", ["b"], ["x.py"]))
+    assert validate_plan(plan) == [["a"], ["b"], ["c"]]
 
 
 def test_load_plan_valid(tmp_path: Path):

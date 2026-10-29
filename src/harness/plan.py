@@ -59,17 +59,28 @@ def validate_plan(plan: Plan) -> list[list[str]]:
 
     waves = compute_waves(plan)
 
+    # Tasks start as soon as their dependencies are done, so two orders that own the same
+    # file must be ordered by a (transitive) depends_on path.
     by_id = {o.id: o for o in plan.orders}
-    for n, wave in enumerate(waves, start=1):
-        owners: dict[str, str] = {}
+    ancestors: dict[str, set[str]] = {}
+    for wave in waves:
         for oid in wave:
-            for p in by_id[oid].files_owned:
-                key = str(PurePosixPath(p))
-                if key in owners:
+            found: set[str] = set()
+            for dep in by_id[oid].depends_on:
+                found.add(dep)
+                found |= ancestors[dep]
+            ancestors[oid] = found
+    owners: dict[str, list[str]] = {}
+    for order in plan.orders:
+        for p in order.files_owned:
+            key = str(PurePosixPath(p))
+            for other in owners.setdefault(key, []):
+                if other not in ancestors[order.id] and order.id not in ancestors[other]:
                     raise PlanError(
-                        f"overlapping files_owned in wave {n}: {key} ({owners[key]}, {oid})"
+                        f"overlapping files_owned: {key} ({other}, {order.id}) "
+                        "are not ordered by depends_on"
                     )
-                owners[key] = oid
+            owners[key].append(order.id)
     return waves
 
 

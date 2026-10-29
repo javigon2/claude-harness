@@ -1,9 +1,10 @@
-"""Scheduler: run a plan's waves in order, tasks in a wave in parallel, each in its own
-worktree through the router, merging the ones that pass."""
+"""Scheduler: start each task as soon as its dependencies are done (at most max_parallel at
+once), each in its own worktree through the router, merging the ones that pass."""
 
 import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from harness.config import Tier
@@ -197,22 +198,38 @@ class Scheduler:
 
         sem = asyncio.Semaphore(self.max_parallel)
         lock = asyncio.Lock()
+        run_start = time.monotonic()
 
-        for i, wave in enumerate(waves, start=1):
-            await self._emit("wave_started", {"wave": i, "tasks": wave})
-            runnable: list[WorkOrder] = []
-            for tid in wave:
+        # Longest chain of orders that wait on each order: the critical path goes first.
+        height: dict[str, int] = {}
+
+        def chain(tid: str) -> int:
+            if tid not in height:
+                below = [chain(o.id) for o in self.plan.orders if tid in o.depends_on]
+                height[tid] = 1 + max(below, default=0)
+            return height[tid]
+
+        position = {o.id: n for n, o in enumerate(self.plan.orders)}
+        queue = sorted(by_id, key=lambda tid: (-chain(tid), position[tid]))
+        settled: set[str] = set()
+        running: dict[str, asyncio.Task] = {}
+        while True:
+            for tid in queue:
+                if tid in settled or tid in running:
+                    continue
                 ts = state.tasks[tid]
                 if ts.status == "done":
+                    settled.add(tid)
                     await self._emit(
                         "task_skipped", {"reason": "done in an earlier run"}, task_id=tid
                     )
                     continue
-                bad = next(
-                    (d for d in by_id[tid].depends_on if state.tasks[d].status != "done"),
-                    None,
-                )
+                deps = by_id[tid].depends_on
+                if self._stop_reason is not None or not all(d in settled for d in deps):
+                    continue
+                bad = next((d for d in deps if state.tasks[d].status != "done"), None)
                 if bad is not None:
+                    settled.add(tid)
                     ts.status = "blocked"
                     ts.error = f"dependency {bad} is {state.tasks[bad].status}"
                     await self._save()
@@ -220,15 +237,16 @@ class Scheduler:
                         "task_blocked", {"reason": ts.error, "dependency": bad}, task_id=tid
                     )
                     continue
-                runnable.append(by_id[tid])
-            await asyncio.gather(*(self._run_task(o, sem, lock) for o in runnable))
-            await self._emit(
-                "wave_finished",
-                {"wave": i, "statuses": {tid: state.tasks[tid].status for tid in wave}},
-            )
-            if self._stop_reason is not None:
-                await self._emit("run_stopping", {"reason": self._stop_reason})
+                running[tid] = asyncio.create_task(self._run_task(by_id[tid], sem, lock))
+            if not running:
                 break
+            finished, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+            for tid in [t for t, task in running.items() if task in finished]:
+                settled.add(tid)
+                running.pop(tid).result()
+        if self._stop_reason is not None:
+            await self._emit("run_stopping", {"reason": self._stop_reason})
+        run_ms = round((time.monotonic() - run_start) * 1000)
 
         state.finished = True
         await self._save()
@@ -241,6 +259,7 @@ class Scheduler:
                 "blocked": statuses.count("blocked"),
                 "paused": statuses.count("paused"),
                 "stopped_reason": self._stop_reason,
+                "duration_ms": run_ms,
                 "cost_usd": sum(t.usage.cost_usd for t in state.tasks.values()),
             },
         )
@@ -284,7 +303,9 @@ class Scheduler:
         """One task: worktree, router, commit and merge. Algorithm in the
         `decision: task algorithm` context item. Never raises except CancelledError."""
         assert self.state is not None
+        queued_at = time.monotonic()
         async with sem:
+            queue_wait_ms = round((time.monotonic() - queued_at) * 1000)
             if self._should_stop() is not None:
                 await self._flush_budget_event()
                 return
@@ -301,6 +322,7 @@ class Scheduler:
                     task_id=order.id,
                 )
 
+            worktree_start = time.monotonic()
             try:
                 async with lock:
                     path = await asyncio.to_thread(self.worktrees.create, order.id)
@@ -311,7 +333,14 @@ class Scheduler:
 
             await self._emit(
                 "task_started",
-                {"worktree": str(path), "branch": branch, "base": base, "tier": order.tier},
+                {
+                    "worktree": str(path),
+                    "branch": branch,
+                    "base": base,
+                    "tier": order.tier,
+                    "queue_wait_ms": queue_wait_ms,
+                    "worktree_ms": round((time.monotonic() - worktree_start) * 1000),
+                },
                 task_id=order.id,
             )
 

@@ -109,7 +109,7 @@ async def test_dag_with_failing_task(tmp_path: Path) -> None:
 
     types = _types(sched.run_dir)
     assert types[0] == ("run_started", None)
-    assert [t for t, _ in types].count("wave_started") == 3
+    assert "wave_started" not in [t for t, _ in types]
     assert {tid for t, tid in types if t == "merged"} == {"a", "b", "d"}
     assert {tid for t, tid in types if t == "task_blocked"} == {"e", "f"}
     events = read_events(sched.run_dir / "events.jsonl")
@@ -123,10 +123,27 @@ async def test_dag_with_failing_task(tmp_path: Path) -> None:
     assert started["waves"] == [["a", "b", "c"], ["d", "e"], ["f"]]
     assert started["plan_path"] == "plan.json"
     assert started["resume"] is False and started["review"] is False
+    assert finished[0].payload["duration_ms"] >= 0
+    task_starts = [e.payload for e in events if e.type == "task_started"]
+    assert all(p["queue_wait_ms"] >= 0 and p["worktree_ms"] >= 0 for p in task_starts)
 
     # merged worktrees removed, failed one kept
     assert not sched.worktrees.path("a").exists()
     assert sched.worktrees.path("c").exists()
+
+
+async def test_timings_expose_capacity_wait(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    plan = Plan(stage="two", orders=[_order("a"), _order("b")])
+    worker = FakeWorker(default=_write, delay_s=0.06)
+    sched = Scheduler(plan, repo, "timings", worker, max_parallel=1)
+    await sched.run()
+    events = read_events(sched.run_dir / "events.jsonl")
+    started = [e for e in events if e.type == "task_started"]
+    assert len(started) == 2
+    assert started[1].payload["queue_wait_ms"] >= 40
+    run = next(e for e in events if e.type == "run_finished")
+    assert run.payload["duration_ms"] >= started[1].payload["queue_wait_ms"]
 
 
 def _concurrency_worker(cap: int) -> tuple[FakeWorker, dict[str, int]]:
@@ -271,7 +288,7 @@ def test_max_parallel_zero(tmp_path: Path) -> None:
         Scheduler(_dag(), tmp_path, "r", FakeWorker(), max_parallel=0)
 
 
-async def test_rate_limit_stops_later_waves_and_resume_finishes(tmp_path: Path) -> None:
+async def test_rate_limit_stops_new_starts_and_resume_finishes(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
 
     def limited(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
@@ -287,16 +304,16 @@ async def test_rate_limit_stops_later_waves_and_resume_finishes(tmp_path: Path) 
     state = await sched.run()
 
     st = state.tasks
-    assert [st[t].status for t in "ab"] == ["done", "done"]
+    # critical path first: a (a-d-f) and c (c-e-f) before b
+    assert st["a"].status == "done"
     assert st["c"].status == "paused"
     assert st["c"].attempts == 0
-    assert [st[t].status for t in "def"] == ["pending"] * 3
-    assert sorted(c.order_id for c in worker.calls) == ["a", "b", "c"]
+    assert [st[t].status for t in "bdef"] == ["pending"] * 4
+    assert sorted(c.order_id for c in worker.calls) == ["a", "c"]
     events = list(read_events(sched.run_dir / "events.jsonl"))
     types = [e.type for e in events]
     assert types.count("run_stopping") == 1
-    assert types.index("run_stopping") > types.index("wave_finished")
-    assert "wave_started" in types and types.count("wave_started") == 1
+    assert types.index("run_stopping") > types.index("task_paused")
     finished = events[-1]
     assert finished.type == "run_finished"
     assert finished.payload["paused"] == 1
@@ -307,8 +324,40 @@ async def test_rate_limit_stops_later_waves_and_resume_finishes(tmp_path: Path) 
     second = Scheduler(_dag(), repo, "r1", worker2, max_parallel=1)
     state2 = await second.run(resume=True)
     assert all(t.status == "done" for t in state2.tasks.values())
-    assert sorted(c.order_id for c in worker2.calls) == ["c", "d", "e", "f"]
+    assert sorted(c.order_id for c in worker2.calls) == ["b", "c", "d", "e", "f"]
     assert state2.tasks["c"].attempts == 1
+
+
+async def test_dependent_starts_without_waiting_for_slow_sibling(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    plan = Plan(stage="test", orders=[_order("a"), _order("slow"), _order("b", ("a",))])
+
+    async def slow(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
+        await asyncio.sleep(2.0)
+        return _write(order, tier, cwd, fb)
+
+    worker = FakeWorker(script={"slow": [slow]}, default=_write)
+    sched = Scheduler(plan, repo, "nowaves", worker, max_parallel=4)
+    state = await sched.run()
+    assert all(t.status == "done" for t in state.tasks.values())
+    order = [e.task_id for e in read_events(sched.run_dir / "events.jsonl") if e.type == "merged"]
+    assert order.index("b") < order.index("slow")
+
+
+async def test_failed_dependency_blocks_dependents_at_once(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    plan = Plan(stage="test", orders=[_order("a"), _order("slow"), _order("b", ("a",))])
+
+    async def slow(order: WorkOrder, tier: Tier, cwd: Path, fb: str | None) -> WorkerResult:
+        await asyncio.sleep(2.0)
+        return _write(order, tier, cwd, fb)
+
+    worker = FakeWorker(script={"a": [_noop], "slow": [slow]}, default=_write)
+    sched = Scheduler(plan, repo, "blockfast", worker, max_parallel=4)
+    state = await sched.run()
+    assert state.tasks["b"].status == "blocked"
+    types = [(e.type, e.task_id) for e in read_events(sched.run_dir / "events.jsonl")]
+    assert types.index(("task_blocked", "b")) < types.index(("merged", "slow"))
 
 
 def _flat(*oids: str, attempts: int = 1) -> Plan:
