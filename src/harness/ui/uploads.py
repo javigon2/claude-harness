@@ -146,7 +146,7 @@ def store_attachment(repo: Path, data: bytes, name: str | None = None) -> str:
     if b"\0" in data:
         raise UploadError(415, NOT_TEXT)
     file_id = _write(repo, data, ext)
-    label = re.sub(r"[^\w.\- ]", "_", (name or "").replace("\\", "/").rsplit("/", 1)[-1])[:100]
+    label = clean_label(name)
     (Path(repo) / UPLOADS_DIR / f"{file_id}.name").write_text(label, encoding="utf-8")
     return file_id
 
@@ -167,6 +167,35 @@ def image_path(repo: Path, image_id: str) -> Path | None:
         return None
     path = Path(repo) / UPLOADS_DIR / image_id
     return path if path.is_file() else None
+
+
+def clean_label(name: str | None) -> str:
+    """The stored form of an attachment's file name (base name, odd characters as `_`)."""
+    return re.sub(r"[^\w.\- ]", "_", (name or "").replace("\\", "/").rsplit("/", 1)[-1])[:100]
+
+
+def find_upload_by_name(repo: Path, name: str) -> str | None:
+    """The id of the newest stored text upload whose original file name is `name` (compared
+    by its last path part), or None. Lets an agent's mention of an attached file open it."""
+    label = clean_label(name)
+    folder = Path(repo) / UPLOADS_DIR
+    if not label:
+        return None
+    best: tuple[float, str] | None = None
+    try:
+        for entry in folder.glob("*.name"):
+            try:
+                if entry.read_text(encoding="utf-8") != label:
+                    continue
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            file_id = entry.name[: -len(".name")]
+            if image_path(repo, file_id) is not None and (best is None or mtime > best[0]):
+                best = (mtime, file_id)
+    except OSError:
+        return None
+    return best[1] if best else None
 
 
 def preview_document(repo: Path, file_id: str) -> dict[str, Any] | None:

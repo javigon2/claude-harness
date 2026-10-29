@@ -196,6 +196,16 @@ def test_get_file_serves_repo_text_and_refuses_the_rest(site):
         assert site.request("GET", bad)[0] == 404
 
 
+def test_get_file_falls_back_to_an_attachment_by_its_name(site):
+    _upload_named(site, b"old\n", "findings.md")
+    status, up = _upload_named(site, b"# New\n", "/Users/me/findings.md")
+    assert status == 200
+    status, _, data = site.request("GET", "/api/file?path=findings.md")
+    doc = json.loads(data)
+    assert status == 200 and doc["id"] == up["id"] and doc["text"] == "# New\n"
+    assert site.request("GET", "/api/file?path=other.md")[0] == 404
+
+
 def _upload_named(site: Site, data: bytes, name: str):
     headers = {
         "Content-Type": "application/octet-stream",

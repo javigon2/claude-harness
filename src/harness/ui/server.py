@@ -60,6 +60,7 @@ from harness.ui.uploads import (
     UploadError,
     check_image_ids,
     file_name,
+    find_upload_by_name,
     image_path,
     preview_document,
     store_attachment,
@@ -762,7 +763,11 @@ def make_handler(
                 self._json(code, body)
                 return
             if path == "/api/file":
-                doc = read_repo_file(repo, parse_qs(urlsplit(self.path).query).get("path", [""])[0])
+                wanted = parse_qs(urlsplit(self.path).query).get("path", [""])[0]
+                doc = read_repo_file(repo, wanted)
+                if doc is None:  # a file the user attached, mentioned by its own name
+                    found = find_upload_by_name(repo, wanted)
+                    doc = preview_document(repo, found) if found else None
                 if doc is None:
                     self._json(404, {"error": "unknown file"})
                 else:
