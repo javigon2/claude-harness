@@ -163,6 +163,39 @@ def test_get_unknown(site, tail):
     assert status == 404
 
 
+def test_get_document_view(site):
+    status, up = _upload_named(site, b"# Title\n\nbody **bold**\n", "notes.md")
+    assert status == 200
+    status, hdrs, data = site.request("GET", f"{UPLOAD}/{up['id']}?view=doc")
+    doc = json.loads(data)
+    assert status == 200 and hdrs["content-type"].startswith("application/json")
+    assert (doc["name"], doc["ext"], doc["text"]) == (
+        "notes.md",
+        "md",
+        "# Title\n\nbody **bold**\n",
+    )
+    assert doc["blocks"][0]["type"] == "heading"
+
+    status, up = _upload_named(site, b"print(1)\n", "a.py")
+    doc = json.loads(site.request("GET", f"{UPLOAD}/{up['id']}?view=doc")[2])
+    assert doc["blocks"] is None and doc["text"] == "print(1)\n"
+
+
+def test_get_document_view_refuses_images_and_unknown(site):
+    image_id = store_image(site.repo, PNG)
+    assert site.request("GET", f"{UPLOAD}/{image_id}?view=doc")[0] == 404
+    assert site.request("GET", f"{UPLOAD}/{'0' * 64}.md?view=doc")[0] == 404
+
+
+def test_get_file_serves_repo_text_and_refuses_the_rest(site):
+    (site.repo / "notes.md").write_text("# Hi\n", encoding="utf-8")
+    status, _, data = site.request("GET", "/api/file?path=notes.md")
+    doc = json.loads(data)
+    assert status == 200 and doc["name"] == "notes.md" and doc["blocks"][0]["type"] == "heading"
+    for bad in ("/api/file?path=..%2Fx.md", "/api/file?path=nope.md", "/api/file"):
+        assert site.request("GET", bad)[0] == 404
+
+
 def _upload_named(site: Site, data: bytes, name: str):
     headers = {
         "Content-Type": "application/octet-stream",

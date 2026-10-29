@@ -89,10 +89,11 @@ console.log(JSON.stringify(thumb.classList.got));
     assert json.loads(lines[1]) == "big"
 
 
-def test_page_has_one_dialog_and_guards_hold():
+def test_page_has_the_image_and_reader_dialogs_and_guards_hold():
     text = _text()
     assert text.count('<dialog id="img-view">') == 1
-    assert text.count("<dialog") == 1
+    assert text.count('<dialog id="doc-view">') == 1
+    assert text.count("<dialog") == 2
     for bad in ["http://", "https://", "<a ", "innerHTML", "outerHTML", "eval(", "modal"]:
         assert bad not in text, bad
     assert text.count('<details class="fold">') == 2

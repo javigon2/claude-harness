@@ -190,7 +190,8 @@ def test_modal_ids_and_meta_tags():
         assert f'id="{id_}"' in text, id_
     assert '<meta name="harness-token" content="">' in text
     assert '<meta name="harness-mode" content="read-only">' in text
-    assert text.count("<dialog") == 1 and '<dialog id="img-view">' in text
+    assert text.count("<dialog") == 2
+    assert '<dialog id="img-view">' in text and '<dialog id="doc-view">' in text
 
 
 def test_composer_and_plan_fold_replace_the_modal():
@@ -273,6 +274,7 @@ function mk(tag) {
   return {
     tag: tag, className: '', text: '', children: [], frag: false,
     set textContent(v) { this.text = String(v); },
+    addEventListener: function () {},
     appendChild: function (c) {
       if (c.frag) { for (var i = 0; i < c.children.length; i++) this.children.push(c.children[i]); }
       else this.children.push(c);
@@ -308,7 +310,7 @@ def test_markdown_blocks_render_to_the_expected_dom(tmp_path):
     end = text.index("  function fill(")
     assert el and string
     md = (
-        "# T\n\nHi **b** `c` [l](u.html) <script>alert(1)</script>\n\n- a\n  - child\n- b\n\n"
+        "# T\n\nHi **b** `c` [l](u?x) see notes.md, `docs/A.md` [P](docs/P.md) <script>alert(1)</script>\n\n- a\n  - child\n- b\n\n"
         "| h | i |\n|---|---|\n| <x> | `y` |\n\n```\n<b>\n```\n\n> q\n\n---"
     )
     script = (
@@ -324,7 +326,10 @@ def test_markdown_blocks_render_to_the_expected_dom(tmp_path):
     assert empty == "0"
     assert html == (
         "<div><h1>T</h1>"
-        '<p>Hi <strong>b</strong> <code>c</code> l<span class="muted"> (u.html)</span>'
+        '<p>Hi <strong>b</strong> <code>c</code> l<span class="muted"> (u?x)</span>'
+        ' see <button class="file-link">notes.md</button>,'
+        ' <button class="file-link file-link-code">docs/A.md</button>'
+        ' <button class="file-link">P</button>'
         " <script>alert(1)</script></p>"
         "<ul><li><p>a</p><ul><li><p>child</p></li></ul></li><li><p>b</p></li></ul>"
         "<table><thead><tr><th>h</th><th>i</th></tr></thead>"

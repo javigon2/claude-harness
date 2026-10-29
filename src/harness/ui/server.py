@@ -48,6 +48,7 @@ from harness.ui.office import (
 )
 from harness.ui.orchestrator import OrchestratorConflict
 from harness.ui.projects import ProjectError, list_dir, load_recent, repo_info
+from harness.ui.repofile import read_repo_file
 from harness.ui.requests import list_requests, request_thread, request_title_of_run, run_titles
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.testrun import TestRunConflict, runner_for
@@ -60,6 +61,7 @@ from harness.ui.uploads import (
     check_image_ids,
     file_name,
     image_path,
+    preview_document,
     store_attachment,
 )
 from harness.ui.view import build_view, list_runs
@@ -474,6 +476,13 @@ def make_handler(
                 cache="private",
             )
 
+        def _document(self, image_id: str) -> None:
+            doc = preview_document(self._repo, image_id)
+            if doc is None:
+                self._json(404, {"error": "unknown document"})
+                return
+            self._json(200, doc, extra={"X-Content-Type-Options": "nosniff"})
+
         def _post(self) -> None:
             """Every safety rule in order; a request failing any of them changes nothing."""
             if not self._host_ok():
@@ -752,8 +761,19 @@ def make_handler(
                 code, body = git_get(repo, unquote(path[len("/api/git/") :]), query)
                 self._json(code, body)
                 return
+            if path == "/api/file":
+                doc = read_repo_file(repo, parse_qs(urlsplit(self.path).query).get("path", [""])[0])
+                if doc is None:
+                    self._json(404, {"error": "unknown file"})
+                else:
+                    self._json(200, doc, extra={"X-Content-Type-Options": "nosniff"})
+                return
             if path.startswith("/api/upload/"):
-                self._image(unquote(path[len("/api/upload/") :]))
+                upload_id = unquote(path[len("/api/upload/") :])
+                if parse_qs(urlsplit(self.path).query).get("view") == ["doc"]:
+                    self._document(upload_id)
+                else:
+                    self._image(upload_id)
                 return
             if path == "/api/tests":
                 self._json(200, runner_for(repo).view())

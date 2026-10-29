@@ -174,6 +174,9 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #past-view { display: none; }
 .file-chip, .msg-file { display: inline-block; padding: 4px 8px; border: 1px solid var(--sn-btn); border-radius: 4px; background: #fff; color: var(--sn-btn); font: 12px/1.3 monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg-file { cursor: pointer; margin-right: 6px; }
+.thumb .file-chip { cursor: pointer; }
+.file-link { font: inherit; padding: 0; border: 0; background: none; color: var(--sn-btn); text-decoration: underline; cursor: pointer; }
+.file-link-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em; background: #eaeff3; padding: 1px 5px; border-radius: 4px; text-decoration: none; }
 #why { border: 1px solid #dc2626; background: #fef2f2; border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
 #why p { margin: 6px 0; }
 #why-raw { font-size: 12px; overflow-wrap: anywhere; }
@@ -495,6 +498,16 @@ textarea.drop-over, .composer-box.drop-over { outline: 2px dashed #52b8ff; }
 #img-view { padding: 8px; border: 0; border-radius: 8px; }
 #img-view img { display: block; max-width: 90vw; max-height: 80vh; }
 #img-view::backdrop { background: rgba(3, 45, 66, 0.6); }
+#doc-view { padding: 0; border: 0; border-radius: 10px; width: min(900px, 92vw); max-height: 88vh; flex-direction: column; }
+#doc-view[open] { display: flex; }
+#doc-view.wide { width: 98vw; height: 96vh; max-height: 96vh; }
+#doc-view::backdrop { background: rgba(3, 45, 66, 0.6); }
+#doc-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #d5dee4; }
+#doc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#doc-head button { font: inherit; padding: 3px 10px; cursor: pointer; }
+#doc-body { overflow: auto; padding: 18px 28px 28px; flex: 1; }
+#doc-body .md { max-width: 760px; margin: 0 auto; font-size: 16px; line-height: 1.7; }
+#doc-body pre.doc-src { margin: 0 auto; max-width: 1100px; font: 13px/1.55 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Git has its own resizable, independently scrolling workspace. */
 #git-view { padding: 20px 24px; box-sizing: border-box; overflow: hidden; flex-direction: column; background: #f3f7f8; }
 #git-view:not(.hidden) { display: flex; }
@@ -866,6 +879,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     <div id="git-detail" aria-label="Details"><p class="muted">Select a commit to see its changes.</p></div>
   </div>
 </section>
+<dialog id="doc-view"><div id="doc-head"><strong id="doc-title"></strong><button type="button" id="doc-mode" class="hidden">Source</button><button type="button" id="doc-wide">Full screen</button><button type="button" id="doc-close">Close</button></div><div id="doc-body"></div></dialog>
 <dialog id="img-view"><img id="img-view-img" alt="attached image"><form method="dialog"><button type="submit">Close</button></form></dialog>
 <script>
 (function () {
@@ -1002,7 +1016,9 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       } else {
         img = document.createElement('span');
         img.className = 'file-chip';
+        img.title = 'Click to read';
         img.textContent = p.name;
+        img.addEventListener('click', function () { openDoc(p.id); });
       }
       var x = document.createElement('button');
       x.type = 'button';
@@ -1437,18 +1453,44 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   }
 
   // ---- markdown block tree -> DOM (textContent only; links are never anchors)
+  // a file name an agent mentions opens in the reader (buttons, never anchors)
+  var FILE_EXT = 'md|txt|json|jsonl|py|js|ts|tsx|jsx|html|css|yaml|yml|toml|sh|sql|csv|rst|ini|cfg';
+  var FILE_FULL = new RegExp('^(?:\\./|/)?(?:[\\w.\\-]+/)*[\\w\\-]+\\.(?:' + FILE_EXT + ')$');
+  var FILE_IN_TEXT = new RegExp('(^|[\\s(\\[\'"])((?:\\./|/)?(?:[\\w.\\-]+/)*[\\w\\-]+\\.(?:' + FILE_EXT + '))(?=$|[\\s).,;:!?\\]\'"])', 'g');
+  function fileLink(path, label, code) {
+    var b = el('button', 'file-link' + (code ? ' file-link-code' : ''), label);
+    b.type = 'button';
+    b.title = 'Preview ' + path;
+    b.addEventListener('click', function () { openFile(path); });
+    return b;
+  }
+  function textWithFiles(text) {
+    var f = document.createDocumentFragment(), last = 0, m;
+    FILE_IN_TEXT.lastIndex = 0;
+    while ((m = FILE_IN_TEXT.exec(text)) !== null) {
+      var start = m.index + m[1].length;
+      if (start > last) f.appendChild(document.createTextNode(text.slice(last, start)));
+      f.appendChild(fileLink(m[2], m[2], false));
+      last = start + m[2].length;
+    }
+    if (last === 0) return document.createTextNode(text);
+    if (last < text.length) f.appendChild(document.createTextNode(text.slice(last)));
+    return f;
+  }
   function inlineNode(sp) {
     var t = sp.t, text = (sp.text === null || sp.text === undefined) ? '' : String(sp.text);
     if (t === 'strong') return el('strong', null, text);
     if (t === 'em') return el('em', null, text);
-    if (t === 'code') return el('code', null, text);
+    if (t === 'code') return FILE_FULL.test(text) ? fileLink(text, text, true) : el('code', null, text);
     if (t === 'link') {
+      var href = str(sp.href);
+      if (FILE_FULL.test(href)) return fileLink(href, text, false);
       var f = document.createDocumentFragment();
       f.appendChild(document.createTextNode(text));
-      f.appendChild(el('span', 'muted', ' (' + str(sp.href) + ')'));
+      f.appendChild(el('span', 'muted', ' (' + href + ')'));
       return f;
     }
-    return document.createTextNode(text);
+    return textWithFiles(text);
   }
   function appendInline(parent, spans) {
     (Array.isArray(spans) ? spans : []).forEach(function (sp) { parent.appendChild(inlineNode(sp)); });
@@ -1614,7 +1656,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
           if (!/\.(png|jpg|gif|webp)$/.test(String(id))) {
             var chip = el('button', 'msg-file', '.' + String(id).split('.').pop() + ' file');
             chip.type = 'button';
-            chip.addEventListener('click', function () { window.open(src, '_blank', 'noopener'); });
+            chip.addEventListener('click', function () { openDoc(String(id)); });
             strip.appendChild(chip);
             return;
           }
@@ -1633,6 +1675,57 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     }
     return li;
   }
+
+  // ---- the reader for an attached text file: rendered Markdown or source, normal or full screen
+  var docShown = null;
+  function showDoc() {
+    var d = docShown, body = byId('doc-body');
+    if (!d) return;
+    byId('doc-title').textContent = d.name;
+    var rendered = d.blocks !== null && !d.source;
+    byId('doc-mode').classList.toggle('hidden', d.blocks === null);
+    byId('doc-mode').textContent = rendered ? 'Source' : 'Rendered';
+    if (rendered) {
+      var md = el('div', 'md');
+      md.appendChild(renderBlocks(d.blocks));
+      body.replaceChildren(md);
+    } else {
+      body.replaceChildren(el('pre', 'doc-src', d.text));
+    }
+  }
+  function loadDoc(url, label, rawUrl) {
+    var dlg = byId('doc-view');
+    if (!dlg || typeof dlg.showModal !== 'function') return;
+    fetch(url).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (d) {
+      if (!d) {
+        if (rawUrl) { window.open(rawUrl, '_blank', 'noopener'); return; }
+        docShown = {name: label, text: 'Could not open ' + label + ' (not found in this project, or not a text file under 256 KB).', blocks: null, source: true};
+      } else {
+        docShown = d;
+        d.source = false;
+      }
+      showDoc();
+      byId('doc-body').scrollTop = 0;
+      if (!dlg.open) dlg.showModal();
+    }).catch(function () {});
+  }
+  function openDoc(id) {
+    var u = '/api/upload/' + encodeURIComponent(id);
+    loadDoc(u + '?view=doc', id, u);
+  }
+  function openFile(path) {
+    loadDoc('/api/file?path=' + encodeURIComponent(path), path, null);
+  }
+  byId('doc-mode').addEventListener('click', function () {
+    if (docShown) { docShown.source = !docShown.source; showDoc(); }
+  });
+  byId('doc-wide').addEventListener('click', function () {
+    var on = byId('doc-view').classList.toggle('wide');
+    byId('doc-wide').textContent = on ? 'Exit full screen' : 'Full screen';
+  });
+  byId('doc-close').addEventListener('click', function () { byId('doc-view').close(); });
 
   function openImage(src, thumb) {
     // the large view: the native dialog when there is one, else the thumb grows in place

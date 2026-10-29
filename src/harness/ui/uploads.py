@@ -19,6 +19,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from harness.ui.markdown import parse_markdown
+
 UPLOADS_DIR = Path(".harness") / "uploads"
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -165,6 +167,29 @@ def image_path(repo: Path, image_id: str) -> Path | None:
         return None
     path = Path(repo) / UPLOADS_DIR / image_id
     return path if path.is_file() else None
+
+
+def preview_document(repo: Path, file_id: str) -> dict[str, Any] | None:
+    """What the page's reader shows for an uploaded text file: {id, name, ext, text, blocks},
+    where `blocks` is the parsed Markdown tree for a .md file and None for any other text
+    file. None for an image, an unknown id, or bytes that are not UTF-8. Never raises."""
+    path = image_path(repo, file_id)
+    if path is None:
+        return None
+    ext = path.name.rsplit(".", 1)[1]
+    if ext in IMAGE_TYPES:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return {
+        "id": file_id,
+        "name": file_name(repo, file_id) or file_id,
+        "ext": ext,
+        "text": text,
+        "blocks": parse_markdown(text) if ext == "md" else None,
+    }
 
 
 def check_image_ids(repo: Path, value: object) -> list[str]:
