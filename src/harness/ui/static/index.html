@@ -173,7 +173,8 @@ details.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 #orch-view button, #past-view button { font: inherit; padding: 4px 12px; margin-right: 8px; cursor: pointer; }
 #past-view { display: none; }
 .file-chip, .msg-file { display: inline-block; padding: 4px 8px; border: 1px solid var(--sn-btn); border-radius: 4px; background: #fff; color: var(--sn-btn); font: 12px/1.3 monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.msg-file { cursor: pointer; margin-right: 6px; }
+.msg-file { cursor: pointer; margin-right: 6px; padding: 0; border: 0; background: none; font-weight: 600; }
+.msg-file:hover { text-decoration: underline; }
 .thumb .file-chip { cursor: pointer; }
 .file-link { font: inherit; font-weight: 600; padding: 0; border: 0; background: none; color: var(--sn-btn); text-decoration: none; cursor: pointer; }
 .file-link:hover { text-decoration: underline; }
@@ -328,6 +329,14 @@ details.plain-fold > summary { cursor: pointer; font-weight: 600; font-size: 14p
 #ov-charts .bar-label { font-size: 11px; fill: var(--sn-text); }
 #ov-charts .bar-value { font-size: 11px; fill: var(--sn-slate); font-variant-numeric: tabular-nums; }
 #ov-charts .bar-track { fill: var(--sn-zebra); }
+#dash-tier-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+#dash-tier-row #dash-tiers { flex: 1 1 420px; width: auto; }
+#dash-pies { flex: 0 1 460px; display: flex; flex-wrap: wrap; gap: 12px; margin-left: auto; }
+#dash-pies figure { flex: 1 1 210px; margin: 0; background: #fff; border: 1px solid var(--sn-border); border-radius: 8px; padding: 10px 12px; }
+#dash-pies figcaption { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--sn-slate); margin-bottom: 6px; }
+#dash-pies svg { width: 100%; height: auto; display: block; }
+#dash-pies .pie-label { font-size: 11px; fill: var(--sn-text); }
+#dash-pies .pie-empty { font-size: 12px; fill: var(--sn-slate); }
 #dashboard-view td.num, #dashboard-view th.num, #report-view td.num, #report-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .delta-good { color: var(--sn-green-dark); font-weight: 600; }
 .delta-bad { color: #c23030; font-weight: 600; }
@@ -582,6 +591,14 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   #git-divider { display: none; }
   .git-row .git-sha { display: none; }
 }
+/* file names are plain bold text, never boxed buttons (beats the per-panel button styles above) */
+:is(#chat-view, #orch-view, #past-view, #composer, #plans-view, #report-view, #project-view, #dashboard-view, #doc-view) button:is(.file-link, .msg-file) {
+  background: none !important; border: 0 !important; border-radius: 0 !important; padding: 0 !important; margin: 0 6px 0 0 !important;
+  font: inherit; font-weight: 600; color: var(--sn-btn); cursor: pointer; text-decoration: none; opacity: 1;
+}
+:is(#chat-view, #orch-view, #past-view, #composer, #plans-view, #report-view, #project-view, #dashboard-view, #doc-view) button:is(.file-link, .msg-file):hover:not(:disabled) {
+  background: none !important; text-decoration: underline;
+}
 </style>
 </head>
 <body>
@@ -828,7 +845,13 @@ pre.patch .cut { color: #92400e; font-style: italic; }
   <h3>Totals against the average of other runs</h3>
   <table id="dash-metrics"></table>
   <h3>By tier</h3>
-  <table id="dash-tiers"></table>
+  <div id="dash-tier-row">
+    <table id="dash-tiers"></table>
+    <div id="dash-pies">
+      <figure><figcaption>Time by model</figcaption><div id="dash-pie-time"></div></figure>
+      <figure><figcaption>Cost by model</figcaption><div id="dash-pie-cost"></div></figure>
+    </div>
+  </div>
   <h3>By task</h3>
   <table id="dash-tasks"></table>
 </section>
@@ -2532,6 +2555,39 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     });
     return svg;
   }
+  var TIER_COLORS = {haiku: '#63df4e', sonnet: '#1b6e94', opus: '#7661ff'};
+  function pieChart(rows, key, unit) {
+    var NS = 'http:' + '//www.w3.org/2000/svg', R = 60, CX = 70, CY = 70;
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 140 ' + (150 + rows.length * 16));
+    svg.setAttribute('role', 'img');
+    function mk(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+    var total = rows.reduce(function (a, r) { return a + (r[key] || 0); }, 0);
+    if (!(total > 0)) { svg.appendChild(mk('text', { x: CX, y: CY, 'text-anchor': 'middle', 'class': 'pie-empty' }, 'no data')); return svg; }
+    var angle = -Math.PI / 2;
+    rows.forEach(function (r, i) {
+      var v = r[key] || 0, frac = v / total, color = TIER_COLORS[r.tier] || '#8a9199';
+      var title = mk('title', {}, r.tier + ': ' + fmtValue(v, unit) + ' (' + (frac * 100).toFixed(0) + '%)');
+      if (frac >= 0.9999) {
+        var c = mk('circle', { cx: CX, cy: CY, r: R, fill: color }); c.appendChild(title); svg.appendChild(c);
+      } else if (frac > 0) {
+        var a2 = angle + frac * 2 * Math.PI, large = frac > 0.5 ? 1 : 0;
+        var d = 'M' + CX + ' ' + CY + ' L' + (CX + R * Math.cos(angle)) + ' ' + (CY + R * Math.sin(angle)) +
+          ' A' + R + ' ' + R + ' 0 ' + large + ' 1 ' + (CX + R * Math.cos(a2)) + ' ' + (CY + R * Math.sin(a2)) + ' Z';
+        var path = mk('path', { d: d, fill: color, stroke: '#fff', 'stroke-width': 1 }); path.appendChild(title); svg.appendChild(path);
+        angle = a2;
+      }
+      var y = 150 + i * 16;
+      svg.appendChild(mk('rect', { x: 8, y: y - 9, width: 10, height: 10, rx: 2, fill: color }));
+      svg.appendChild(mk('text', { x: 24, y: y, 'class': 'pie-label' }, r.tier + ' · ' + (frac * 100).toFixed(0) + '% · ' + fmtValue(v, unit)));
+    });
+    return svg;
+  }
   function renderOverview(o) {
     byId('ov-sub').textContent = o.total_runs + ' real run' + (o.total_runs === 1 ? '' : 's') + ' across ' + o.projects.length + ' project' + (o.projects.length === 1 ? '' : 's') + ' · cost = workers and reviews plus planning and chats · fake runs are left out';
     var cards = [
@@ -2581,6 +2637,9 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     fillTable('dash-tiers', ['Tier', 'Attempts', 'Cost', 'Tokens', 'Avg attempt', 'Avg latency', 'Avg verify'], d.tiers.map(function (t) {
       return [t.tier, String(t.attempts), fmtValue(t.cost_usd, 'usd'), fmtValue(t.tokens, 'count'), fmtDuration(t.avg_attempt_s), fmtDuration(t.avg_latency_s), fmtDuration(t.avg_verify_s)];
     }));
+    var tierTime = d.tiers.map(function (t) { return {tier: t.tier, time_s: (t.avg_attempt_s || 0) * t.attempts, cost_usd: t.cost_usd}; });
+    byId('dash-pie-time').replaceChildren(pieChart(tierTime, 'time_s', 's'));
+    byId('dash-pie-cost').replaceChildren(pieChart(tierTime, 'cost_usd', 'usd'));
     fillTable('dash-tasks', ['Task', 'Status', 'Tier', 'Attempts', 'Cost', 'Tokens', 'Worker time', 'Latency', 'Verify'], d.tasks.map(function (t) {
       var st = el('td'); st.appendChild(el('span', 'status status-' + str(t.status), str(t.status)));
       return [t.task_id, st, t.tier || '-', String(t.attempts), fmtValue(t.cost_usd, 'usd'), fmtValue(t.tokens, 'count'), fmtDuration(t.active_s), fmtDuration(t.latency_s), fmtDuration(t.verify_s)];
