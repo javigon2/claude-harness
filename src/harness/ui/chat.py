@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -40,6 +41,7 @@ CHAT_TIERS: tuple[Tier, ...] = ("haiku", "sonnet")
 CHAT_MAX_TURNS = 40
 CHAT_MAX_CHARS = 20_000
 CHAT_KEEP_CLOSED = 5
+RESUME_WINDOW_S = 2 * 24 * 3600  # a closed chat can be picked up again for this long
 CHAT_PROGRESS_LINES = 8
 CHAT_JOIN_TIMEOUT_S = 10.0
 CHAT_APPEND = (
@@ -89,6 +91,8 @@ class ChatView(BaseModel):
     cost_usd: float = 0.0
     commits: list[str] = Field(default_factory=list)
     error: str | None = None
+    session_id: str | None = None
+    updated_at: str | None = None
 
 
 class ChatLog:
@@ -174,6 +178,8 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
     error: str | None = None
     ended: str | None = None
     last_user = False
+    pid = started.get("pid")
+    session_id: str | None = None
     for e in events[1:]:
         p = e.payload
         text = p.get("text")
@@ -190,6 +196,13 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
             progress = []
             cost = _num(p.get("cost_usd"), 0.0)
             last_user = False
+            sid = p.get("session_id")
+            if isinstance(sid, str) and sid:
+                session_id = sid
+        elif e.type == "chat_resumed":
+            ended = None
+            error = None
+            pid = p.get("pid")
         elif e.type == "chat_progress":
             progress = (progress + [_progress_line(p)])[-CHAT_PROGRESS_LINES:]
         elif e.type == "chat_commit":
@@ -205,7 +218,7 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
     state: ChatState
     if ended == "failed":
         state = "failed"
-    elif ended == "closed" or not _pid_alive(started.get("pid")):
+    elif ended == "closed" or not _pid_alive(pid):
         state = "closed"
     else:
         state = "working" if last_user else "waiting"
@@ -222,6 +235,8 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
         cost_usd=cost,
         commits=commits,
         error=error,
+        session_id=session_id,
+        updated_at=events[-1].ts.isoformat(),
     )
 
 
@@ -300,6 +315,7 @@ class SdkChatSession(SdkPlannerSession):
             max_turns=CHAT_MAX_TURNS,
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
+            resume=self.resume_id,
         )
 
 
@@ -325,6 +341,7 @@ class _Chat:
     thread: threading.Thread | None = None
     loop: asyncio.AbstractEventLoop | None = None
     turn: asyncio.Task[Any] | None = None
+    resume_id: str | None = None
 
 
 def _check_text(text: str) -> str:
@@ -481,6 +498,43 @@ class ChatManager:
             chat.last_text = stripped
             chat.inbox.put(stripped + attachment_note(self.repo, images))
 
+    def resume(self, chat_id: str, text: str, images: Sequence[str] = ()) -> None:
+        """Pick up an ended chat on its own Claude session, so the agent still knows
+        everything it did. Allowed for RESUME_WINDOW_S after its last event, while the log
+        holds a session id and no other chat of the tier is open."""
+        stripped = _check_text(text)
+        self._refuse_if_busy()
+        with self._lock:
+            if chat_id in self._chats:
+                raise ChatConflict("the chat is already open")
+            view = next((v for v in chats_from_log(self.repo) if v.chat_id == chat_id), None)
+            if view is None:
+                raise ChatConflict("unknown chat")
+            if view.state not in ("closed", "failed"):
+                raise ChatConflict("the chat is already open")
+            if not view.session_id:
+                raise ChatConflict("this chat has no saved session to resume")
+            last = datetime.fromisoformat(view.updated_at) if view.updated_at else None
+            if last is None or self._clock() - last.timestamp() > RESUME_WINDOW_S:
+                raise ChatConflict("this chat is older than 2 days and cannot be resumed")
+            if any(c.tier == view.tier for c in self._chats.values()):
+                raise ChatConflict(f"a {view.tier} chat is already open")
+            chat = _Chat(chat_id, view.tier, ChatLog(self.repo, chat_id))
+            chat.resume_id = view.session_id
+            chat.cost_usd = view.cost_usd
+            chat.log.emit("chat_resumed", {"pid": os.getpid(), "session_id": view.session_id})
+            payload: dict[str, Any] = {"text": stripped}
+            if images:
+                payload["images"] = list(images)
+            chat.log.emit("chat_user", payload)
+            chat.last_text = stripped
+            self._chats[chat_id] = chat
+            chat.inbox.put(stripped + attachment_note(self.repo, images))
+            chat.thread = threading.Thread(
+                target=self._thread_main, args=(chat,), name=f"harness-{chat_id}", daemon=True
+            )
+            chat.thread.start()
+
     def close_chat(self, chat_id: str) -> None:
         """End an open chat (logged chat_closed {"reason": "closed by the user"}); a turn in
         progress is cancelled."""
@@ -578,6 +632,8 @@ class ChatManager:
             chat.log.emit("chat_progress", payload)
 
         session = self._factory(self.repo, chat.tier, progress)
+        if chat.resume_id and hasattr(session, "resume_id"):
+            session.resume_id = chat.resume_id
         try:
             while True:
                 text = await asyncio.to_thread(chat.inbox.get)
@@ -637,7 +693,10 @@ class ChatManager:
                 chat.error = f"agent session failed: {turn.error}"
                 self._end(chat, "failed")
                 return False
-            chat.log.emit("chat_reply", {"text": turn.text, "cost_usd": chat.cost_usd})
+            reply: dict[str, Any] = {"text": turn.text, "cost_usd": chat.cost_usd}
+            if turn.session_id:
+                reply["session_id"] = turn.session_id
+            chat.log.emit("chat_reply", reply)
             chat.state = "waiting"
             chat.error = note
             chat.progress = []

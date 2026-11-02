@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,6 +74,14 @@ class OpusDesk(Protocol):
     def message(self, text: str, images: Sequence[str] = ()) -> None:
         """Send `text` to the current Opus session."""
         ...
+
+    def resume(self, session_id: str, text: str, images: Sequence[str] = ()) -> str:
+        """Continue the past planning session `session_id` on its own Claude session with
+        `text`; return the new session id. Raise HandoffRefused with a sentence if it cannot."""
+
+    def release(self) -> None:
+        """End the current session if it only waits for the user; raise HandoffRefused
+        while it works."""
 
     def live(self, session_id: str) -> bool:
         """True if `session_id` is the current session and it is busy/asking/ready/staging."""
@@ -195,7 +203,8 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
         return OrchestratorView(cost_usd=cost)
     thread_id = started.run_id
     thread = [e for e in events if e.run_id == thread_id]
-    if wanted is None and any(e.type == "orchestrator_closed" for e in thread):
+    last_start = max(i for i, e in enumerate(thread) if e.type == "orchestrator_started")
+    if wanted is None and any(e.type == "orchestrator_closed" for e in thread[last_start:]):
         return OrchestratorView(cost_usd=cost)
 
     items: list[tuple[datetime, OrchEntry]] = []
@@ -339,6 +348,23 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
 Target = tuple[Tier, Literal["chat", "opus"], str]  # (tier, target kind, chat id or session id)
 
 
+def last_agent_target(events: list[Event]) -> Target | None:
+    """The agent that took the thread's latest turn: a chat, or the Opus planning session."""
+    found: Target | None = None
+    for e in events:
+        if e.type != "orchestrator_turn":
+            continue
+        p = e.payload
+        tier, kind, tid = p.get("to"), p.get("target_kind"), p.get("target_id")
+        if kind == "chat" and tier in ("haiku", "sonnet") and isinstance(tid, str):
+            found = (cast(Tier, tier), "chat", tid)
+        elif kind == "opus" and isinstance(tid, str) and tid:
+            found = ("opus", "opus", tid)
+        else:
+            found = None
+    return found
+
+
 class Orchestrator:
     """Routes every office request through a one-turn session. Public calls: `message`,
     `new_thread` (each raises OrchestratorConflict with a sentence), `view`, `restore`,
@@ -385,6 +411,7 @@ class Orchestrator:
         self._log: PlannerLog | None = None
         self._pid_logged = False
         self._target: Target | None = None
+        self._resumable: Target | None = None  # an ended chat of a reopened thread
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[Any] | None = None
@@ -478,6 +505,36 @@ class Orchestrator:
                 self._state = "idle"
                 self._error = None
                 return
+            if holder is None and self._resumable is not None:
+                tier, kind, agent_id = self._resumable
+                self._resumable = None
+                try:
+                    if kind == "chat":
+                        self.chats.resume(agent_id, stripped, images=ids)
+                    else:
+                        agent_id = self.opus.resume(agent_id, stripped, images=ids)
+                except (ChatConflict, HandoffRefused):
+                    pass  # too old or no saved session: a fresh agent gets the thread's tail
+                else:
+                    reason = "resumed the same agent with its own history"
+                    plan = "project"
+                    self._emit(
+                        "orchestrator_turn",
+                        {
+                            "action": "forward",
+                            "to": tier,
+                            "plan": plan,
+                            "reason": reason,
+                            "target_kind": kind,
+                            "target_id": agent_id,
+                            "cost_usd": 0.0,
+                            "text": routing_line("forward", tier, plan, reason),
+                        },
+                    )
+                    self._target = (tier, kind, agent_id)
+                    self._state = "idle"
+                    self._error = None
+                    return
             self._state = "routing"
             self._error = None
             self._progress = []
@@ -490,20 +547,69 @@ class Orchestrator:
             )
             self._thread.start()
 
+    def _release_holder(self) -> None:
+        """Let go of the agent holding the current thread so the next request gets its own.
+        A waiting agent is closed (a chat keeps its session id, so it can be resumed); one
+        that is working keeps working on its own and is only detached from the thread.
+        Caller holds self._lock."""
+        live = self._live_holder()
+        if live is None:
+            return
+        (_tier, kind, target_id), chat_state = live
+        if kind == "chat":
+            if chat_state == "waiting":
+                try:
+                    self.chats.close_chat(target_id)
+                except ChatConflict:
+                    pass
+        elif self.opus.waiting(target_id):
+            try:
+                self.opus.release()
+            except HandoffRefused:
+                pass
+        self._target = None
+
+    def _leave_thread(self) -> None:
+        """Close the current thread in the log. Caller holds self._lock."""
+        if self._log is not None:
+            self._emit("orchestrator_closed", {"reason": "new request"})
+        self._thread_id = None
+        self._log = None
+        self._target = None
+        self._resumable = None
+        self._pid_logged = False
+        self._state = "idle"
+        self._error = None
+        self._progress = []
+
     def new_thread(self) -> None:
-        """Start over ("New request")."""
+        """Start over ("New request"): the agent of the old thread is released, so the new
+        request starts with new agents and none of the old one's state."""
         with self._lock:
             if self._state == "routing":
                 raise OrchestratorConflict(ROUTING_BUSY)
-            if self._log is not None:
-                self._emit("orchestrator_closed", {"reason": "new request"})
-            self._thread_id = None
-            self._log = None
-            self._target = None
-            self._pid_logged = False
-            self._state = "idle"
-            self._error = None
-            self._progress = []
+            self._release_holder()
+            self._leave_thread()
+
+    def open_thread(self, thread_id: str) -> None:
+        """Go back to a past request: it becomes the current thread, and its last chat agent
+        is resumed on the next message while it is within RESUME_WINDOW_S."""
+        with self._lock:
+            if self._state == "routing":
+                raise OrchestratorConflict(ROUTING_BUSY)
+            if thread_id == self._thread_id:
+                return
+            events = [e for e in read_planner_events(self.repo) if e.run_id == thread_id]
+            if not any(e.type == "orchestrator_started" for e in events):
+                raise OrchestratorConflict("unknown request")
+            self._release_holder()
+            self._leave_thread()
+            resumable = last_agent_target(events)
+            self._thread_id = thread_id
+            self._log = PlannerLog(self.repo, thread_id)
+            self._emit("orchestrator_started", {"pid": os.getpid(), "reopened": True})
+            self._pid_logged = True
+            self._resumable = resumable
 
     def view(self) -> OrchestratorView:
         """The log view with state, error, progress and holder from memory."""
@@ -548,6 +654,10 @@ class Orchestrator:
                 self._target = (v.holder, "opus" if v.holder == "opus" else "chat", v.holder_id)
             else:
                 self._target = None
+            self._resumable = None
+            if self._target is None and v.thread_id:
+                thread = [e for e in events if e.run_id == v.thread_id]
+                self._resumable = last_agent_target(thread)
 
     def close(self) -> None:
         """Server shutdown: interrupt a turn in progress, join the routing thread."""

@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from harness.config import planner_tier
 from harness.events import EVENTS_FILE
 from harness.models import Event
 from harness.plan import PlanError, load_plan
@@ -51,7 +52,14 @@ from harness.planner_log import (
 )
 from harness.state import STATE_FILE, StateError, latest_run, load_state, new_run_id, run_dir
 from harness.titles import ensure_request_title, ensure_title
-from harness.ui.chat import ChatConflict, ChatManager, ChatSessionFactory, ChatView, chats_from_log
+from harness.ui.chat import (
+    RESUME_WINDOW_S,
+    ChatConflict,
+    ChatManager,
+    ChatSessionFactory,
+    ChatView,
+    chats_from_log,
+)
 from harness.ui.demo import DemoPlannerSession
 from harness.ui.explain import ErrorExplainer
 from harness.ui.git_cmd import NoRepoError
@@ -107,11 +115,17 @@ APPROVAL_TEXT = (
 )
 
 OFFICE_DIR = Path(".harness") / "office"
+PLAN_TOUCH_SLACK_S = 5.0  # the agent's own last write lands just before its reply is logged
 
 RESUME_PROMPT = (
     "An earlier planning session was interrupted. The current draft is {project_plan}; "
     "read it first and continue planning from it with the user. "
     "Original description:\n\n{description}"
+)
+
+RESUMED_PROMPT = (
+    "Continue the planning you were doing earlier in this conversation. The plan on disk "
+    "is {project_plan}; read it first, as it may have changed. The user now says:\n\n{text}"
 )
 
 
@@ -484,6 +498,7 @@ class Office:
         max_cost: float | None = None,
         session_factory: SessionFactory | None = None,
         triage_session_factory: SessionFactory | None = None,
+        order_session_factory: SessionFactory | None = None,
         idle_timeout_s: float = 7200.0,
         launcher: Callable[..., Any] | None = None,
         chat_session_factory: ChatSessionFactory | None = None,
@@ -496,6 +511,7 @@ class Office:
     ) -> None:
         self.auto_advance = auto_advance
         self._resume_stamp: int | None = None
+        self._continuing = False
         self.repo = Path(repo).resolve()
         self.fake = fake
         self.fake_delay = fake_delay
@@ -523,6 +539,8 @@ class Office:
             if error_explainer is not None
             else ErrorExplainer(self.repo, use_model=not fake and not launcher).explain
         )
+        # the cheaper session for work orders; only the real Opus factory gets a real default
+        self._order_factory: SessionFactory | None = order_session_factory
         if session_factory is not None:
             self._factory: SessionFactory = session_factory
         elif fake:
@@ -531,6 +549,10 @@ class Office:
             )
         else:
             self._factory = lambda repo, progress: SdkPlannerSession(repo, progress=progress)
+            if self._order_factory is None:
+                self._order_factory = lambda repo, progress: SdkPlannerSession(
+                    repo, progress=progress, tier=planner_tier("staging")
+                )
         if triage_session_factory is not None:
             self._triage_factory: SessionFactory = triage_session_factory
         elif fake:
@@ -706,6 +728,26 @@ class Office:
 
     # ------------------------------------------------------------ view
 
+    def release(self) -> None:
+        """A new request starts: end the planner session if it is only waiting for the user
+        (asking or ready), logged as interrupted so the next request gets its own. Raises
+        OfficeConflict while it works. The draft on disk is kept."""
+        with self._lock:
+            if self._state in ("busy", "staging"):
+                raise OfficeConflict("opus is working; wait for its reply")
+            if self._state not in ("asking", "ready"):
+                return
+            thread = self._thread
+            if self._end_reason is None and self._log is not None:
+                self._end_reason = "interrupted: new request"
+                self._log.emit(
+                    "planner_failed",
+                    {"reason": self._end_reason, "cost_usd": self._current_cost()},
+                )
+        self._answers.put(None)
+        if thread is not None:
+            thread.join(JOIN_TIMEOUT_S)
+
     def _current_cost(self) -> float:
         return self._observed.cost_usd if self._observed is not None else self._cost
 
@@ -853,6 +895,61 @@ class Office:
                     name=f"title-{self._session_id}",
                 ).start()
 
+    def resume(self, session_id: str, text: str, images: Sequence[str] = ()) -> str:
+        """Continue an earlier project-planning session on its own Claude session, so Opus
+        still knows what it did. `session_id` is the planner session of the past request; it
+        must have a saved Claude session id, be at most RESUME_WINDOW_S old, and the plan on
+        disk must not have been touched by a later request. Returns the new planner session
+        id. Raises OfficeConflict when any of that does not hold."""
+        stripped = text.strip()
+        if not stripped:
+            raise OfficeConflict("the message is empty")
+        if len(stripped) > MAX_TEXT_CHARS:
+            raise OfficeConflict("the message is too long")
+        with self._lock:
+            self._guard_idle()
+            events = [e for e in read_planner_events(self.repo) if e.run_id == session_id]
+            if not events or events[0].type != "planner_started":
+                raise OfficeConflict("unknown planning session")
+            started = events[0].payload
+            if started.get("stage") != 1 or started.get("route") not in ("project", None):
+                raise OfficeConflict("only a project planning session can be resumed")
+            claude = next(
+                (
+                    e.payload["session_id"]
+                    for e in reversed(events)
+                    if e.type == "planner_reply"
+                    and e.payload.get("phase") == "project"
+                    and isinstance(e.payload.get("session_id"), str)
+                ),
+                None,
+            )
+            if claude is None:
+                raise OfficeConflict("this planning session has no saved Claude session")
+            last = events[-1].ts.timestamp()
+            if self._clock() - last > RESUME_WINDOW_S:
+                raise OfficeConflict("this planning session is older than 2 days")
+            plan = self.repo / PROJECT_PLAN_FILE
+            try:
+                changed = plan.stat().st_mtime
+            except OSError:
+                raise OfficeConflict("the plan this session wrote is gone") from None
+            if changed > last + PLAN_TOUCH_SLACK_S:
+                raise OfficeConflict("a later request changed the plan on disk")
+            shown = started.get("description")
+            self._begin(
+                RESUMED_PROMPT.format(
+                    project_plan=plan, text=stripped + attachment_note(self.repo, images)
+                ),
+                shown if isinstance(shown, str) and shown else stripped,
+                stage=1,
+                from_draft=True,
+                route="project",
+                resume_claude=claude,
+                user_text=stripped,
+            )
+            return self._session_id or ""
+
     def _previous_description(self) -> str:
         sess = last_session(read_planner_events(self.repo))
         value = sess[0].payload.get("description") if sess else None
@@ -878,6 +975,8 @@ class Office:
         auto: bool = False,
         staging_only: bool = False,
         images: Sequence[str] = (),
+        resume_claude: str | None = None,
+        user_text: str | None = None,
     ) -> None:
         """Start the planner thread. Caller holds the lock and has passed _guard_idle. With
         `staging_only` the session only writes work orders for `stage` (stage 1 too) from the
@@ -888,6 +987,7 @@ class Office:
         if from_draft or staging:
             route = "project"
         self._staging_only = staging_only
+        self._continuing = resume_claude is not None
         self._phase = "staging" if staging else "triage" if route == "auto" else route
         self._route_choice = route
         self._route = None if route == "auto" else route
@@ -915,8 +1015,11 @@ class Office:
             if route == "auto"
             else None
         )
+        opus = self._factory(self.repo, self._on_progress)
+        if resume_claude and hasattr(opus, "resume_id"):
+            opus.resume_id = resume_claude
         observed = ObservedSession(
-            self._factory(self.repo, self._on_progress),
+            opus,
             self.repo,
             log,
             lambda: self._phase,
@@ -934,8 +1037,11 @@ class Office:
                 "resumed_from_draft": from_draft,
                 "route": route,
                 "auto": auto,
+                "resumed_claude_session": resume_claude,
             },
         )
+        if user_text is not None:
+            log.emit("planner_user", {"text": user_text})
         if stage == 1 and not from_draft and not staging_only:
             payload: dict[str, Any] = {"text": shown}
             if images:
@@ -1105,6 +1211,15 @@ class Office:
     ) -> PlanResult:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
+        order_factory = None
+        if self._order_factory is not None and planner_tier("staging") != "opus":
+            make_order, log = self._order_factory, self._log
+            order_factory = lambda _tier: ObservedSession(  # noqa: E731
+                make_order(self.repo, self._on_progress),
+                self.repo,
+                log,
+                lambda: "quick" if self._phase == "quick" else "staging",
+            )
         return await run_planner(
             text,
             self.repo,
@@ -1117,6 +1232,8 @@ class Office:
             quick_dir=self._quick_dir,
             triage_session=triage,
             staging_only=self._staging_only,
+            order_session_factory=order_factory,
+            continuing=self._continuing,
         )
 
     def _on_triage(self, triage: Triage) -> None:
@@ -1518,6 +1635,18 @@ class _OfficeOpusDesk:
     def message(self, text: str, images: Sequence[str] = ()) -> None:
         try:
             self._office.message(text, images)
+        except OfficeConflict as err:
+            raise HandoffRefused(str(err)) from None
+
+    def resume(self, session_id: str, text: str, images: Sequence[str] = ()) -> str:
+        try:
+            return self._office.resume(session_id, text, images)
+        except OfficeConflict as err:
+            raise HandoffRefused(str(err)) from None
+
+    def release(self) -> None:
+        try:
+            self._office.release()
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
 

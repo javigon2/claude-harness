@@ -672,7 +672,7 @@ pre.patch .cut { color: #92400e; font-style: italic; }
       </div>
     </div>
     <div id="past-view">
-      <div id="past-banner"><strong>Past request, read only</strong></div>
+      <div id="past-banner"><strong>Past request, read only</strong> <button id="btn-past-continue" type="button">Continue this request</button></div>
       <p id="past-title" class="muted"></p>
       <p id="past-msg" role="alert"></p>
       <ol id="past-transcript"></ol>
@@ -1826,6 +1826,11 @@ pre.patch .cut { color: #92400e; font-style: italic; }
     byId('chat-search').addEventListener('input', function () {
       chatQuery = byId('chat-search').value;
       renderChatList();
+    });
+    setHidden('btn-past-continue', !interactive);
+    byId('btn-past-continue').addEventListener('click', function () {
+      // the request becomes the live thread; its agent resumes with its own history on the next message
+      if (pastId) act('/api/orchestrator/open', {thread_id: pastId}, function () { pastId = null; }, 'past-msg');
     });
     byId('btn-new-chat').addEventListener('click', function () {
       sidebarOpen(false);

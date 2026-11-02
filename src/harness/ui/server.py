@@ -82,7 +82,7 @@ POST_ROUTES = ("start", "message", "implement", "next-stage", "stage")
 CHAT_ROUTES = ("start", "message", "close")
 RUN_ROUTES = ("resume", "stop", "launch", "options")
 MAX_PLAN_PATH_CHARS = 500
-ORCH_ROUTES = ("message", "new", "explain")
+ORCH_ROUTES = ("message", "new", "explain", "open")
 PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
 MAX_PATH_CHARS = 4096
 ROUTE_CHOICES = ("auto", "quick", "project")
@@ -226,8 +226,8 @@ def _check_chat_body(route: str, body: object) -> dict:
 
 def _check_orch_body(route: str, body: object) -> dict:
     """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
-    keys: message {text} with an optional `images`; new {}; explain {who} ("orchestrator" or
-    "opus")."""
+    keys: message {text} with an optional `images`; new {}; open {thread_id}; explain {who}
+    ("orchestrator" or "opus")."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
@@ -236,6 +236,10 @@ def _check_orch_body(route: str, body: object) -> dict:
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
+    elif route == "open":
+        if keys != {"thread_id"}:
+            raise _BadBody("send exactly: thread_id")
+        _id_field(body, "thread_id")
     elif route == "explain":
         if keys != {"who"}:
             raise _BadBody("send exactly: who")
@@ -627,6 +631,8 @@ def make_handler(
                         return
                     if route == "message":
                         office.orchestrator.message(body["text"], images=images)
+                    elif route == "open":
+                        office.orchestrator.open_thread(body["thread_id"])
                     else:
                         office.orchestrator.new_thread()
                 elif route == "start":
