@@ -61,6 +61,33 @@ def test_cli_staging_turn_goes_to_order_session(cli_repo, monkeypatch):
     assert [e.payload["phase"] for e in msgs] == ["staging"]
 
 
+def test_cli_order_session_cost_includes_opus(cli_repo, monkeypatch):
+    def write_draft(_msg: str) -> PlannerTurn:
+        write_project(cli_repo, "draft")
+        return PlannerTurn(text="plan written", usage=Usage(cost_usd=1.0))
+
+    opus = FakePlannerSession([write_draft])
+    order = FakePlannerSession(
+        [
+            lambda _m: (
+                (cli_repo / ".harness" / "plans" / "stage-1").mkdir(parents=True, exist_ok=True),
+                (cli_repo / ".harness" / "plans" / "stage-1" / "plan.json").write_text(
+                    json.dumps(VALID_PLAN)
+                ),
+                PlannerTurn(text="orders", usage=Usage(cost_usd=0.25)),
+            )[-1]
+        ]
+    )
+    monkeypatch.setattr(harness.cli, "_make_planner_session", lambda repo: opus)
+    monkeypatch.setattr(harness.cli, "_make_order_session", lambda repo, tier: order)
+    res = runner.invoke(
+        harness.cli.app, ["plan", "a thing", "--stage", "1", "--repo", str(cli_repo)], input="\n"
+    )
+    replies = [e for e in read_planner_events(cli_repo) if e.type == "planner_reply"]
+    assert [e.payload["phase"] for e in replies] == ["project", "staging"], res.output
+    assert replies[-1].payload["cost_usd"] == pytest.approx(1.25)
+
+
 def test_cli_all_opus_never_builds_order_session(cli_repo, monkeypatch):
     monkeypatch.setenv(PLANNER_ALL_OPUS_ENV, "1")
     opus = scripted(cli_repo)

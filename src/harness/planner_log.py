@@ -120,6 +120,11 @@ class ObservedSession:
     def cost_usd(self) -> float:
         return self._cost_base() + self._own_cost
 
+    @property
+    def own_cost(self) -> float:
+        """What this session alone has cost, without `cost_base()`."""
+        return self._own_cost
+
     def _approved(self) -> bool:
         try:
             return is_approved(self._plan.read_text(encoding="utf-8"))

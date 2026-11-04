@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from harness.config import planner_tier
+from harness.config import Tier, planner_tier
 from harness.events import EVENTS_FILE
 from harness.models import Event
 from harness.plan import PlanError, load_plan
@@ -1214,12 +1214,20 @@ class Office:
         order_factory = None
         if self._order_factory is not None and planner_tier("staging") != "opus":
             make_order, log = self._order_factory, self._log
-            order_factory = lambda _tier: ObservedSession(  # noqa: E731
-                make_order(self.repo, self._on_progress),
-                self.repo,
-                log,
-                lambda: "quick" if self._phase == "quick" else "staging",
-            )
+            orders: list[ObservedSession] = []
+
+            def order_factory(_tier: Tier) -> ObservedSession:
+                earlier = list(orders)  # order sessions cost on top of Opus and each other
+                session = ObservedSession(
+                    make_order(self.repo, self._on_progress),
+                    self.repo,
+                    log,
+                    lambda: "quick" if self._phase == "quick" else "staging",
+                    cost_base=lambda: observed.cost_usd + sum(o.own_cost for o in earlier),
+                )
+                orders.append(session)
+                return session
+
         return await run_planner(
             text,
             self.repo,

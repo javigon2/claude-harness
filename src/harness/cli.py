@@ -423,9 +423,20 @@ def plan_cmd(
     )
     order_factory = None
     if planner_tier("staging") != "opus":  # HARNESS_PLANNER_ALL_OPUS=1 keeps everything on Opus
-        order_factory = lambda tier: ObservedSession(  # noqa: E731
-            _make_order_session(repo_path, tier), repo_path, log, lambda: "staging"
-        )
+        orders: list[ObservedSession] = []
+
+        def order_factory(tier: Tier) -> ObservedSession:
+            earlier = list(orders)  # order sessions cost on top of Opus and each other
+            order = ObservedSession(
+                _make_order_session(repo_path, tier),
+                repo_path,
+                log,
+                lambda: "staging",
+                cost_base=lambda: session.cost_usd + sum(o.own_cost for o in earlier),
+            )
+            orders.append(order)
+            return order
+
     try:
         result = asyncio.run(
             run_planner(
