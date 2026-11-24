@@ -657,6 +657,13 @@ pre.patch .cut { color: #92400e; font-style: italic; }
 .row-label::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: var(--space-2); border-radius: 50%; background: var(--model, var(--sn-slate)); }
 /* surfaces: the header sits above the page; cards, tables and messages lift slightly */
 header { position: relative; z-index: 2; box-shadow: var(--shadow-2); }
+/* navbar: gradient bar with a green accent line, pill buttons that lift on hover */
+header { background: linear-gradient(90deg, var(--sn-deep), var(--sn-navy) 55%, #0a4560); border-bottom: 2px solid var(--sn-green); padding: 10px 18px; }
+header button { border-radius: 999px; padding: 4px 14px; transition: background .15s, border-color .15s, transform .15s, box-shadow .15s; }
+header button:hover:not(:disabled) { border-color: var(--sn-green); transform: translateY(-1px); box-shadow: 0 3px 8px -3px rgba(99, 223, 78, .6); }
+header button:active:not(:disabled) { transform: translateY(0); }
+header button:focus-visible { outline: 2px solid var(--sn-sky); outline-offset: 2px; }
+header .chip { backdrop-filter: blur(2px); background: rgba(255,255,255,0.08); }
 table, .dash-card, .msg, #run-options { box-shadow: var(--shadow-1); }
 .dash-card { transition: box-shadow var(--ease), transform var(--ease); }
 .dash-card:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
