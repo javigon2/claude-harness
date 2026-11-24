@@ -685,7 +685,6 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   <button id="btn-report" type="button" class="hidden">Report</button>
   <button id="btn-dashboard" type="button" class="hidden">Dashboard</button>
   <button id="btn-git" type="button" class="hidden">Git</button>
-  <span id="git-branch-chip" class="chip hidden" title="The checked-out branch"></span>
   <button id="btn-stop-run" type="button" class="hidden">Stop run</button>
   <button id="btn-run-tests" type="button" class="hidden" title="Run the project's whole test suite now">Run tests</button>
   <span id="tests-status" class="chip hidden"></span>
@@ -3424,22 +3423,6 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     var node = byId('git-detail');
     node.replaceChildren.apply(node, parts);
   }
-  function showGitBranch(st) {
-    var chip = byId('git-branch-chip');
-    if (st && typeof st === 'object' && typeof st.branch === 'string' && st.branch !== '') {
-      chip.textContent = 'on ' + st.branch;
-      setHidden('git-branch-chip', false);
-    } else if (st && typeof st === 'object' && st.detached === true) {
-      chip.textContent = 'detached HEAD';
-      setHidden('git-branch-chip', false);
-    } else {
-      chip.textContent = '';
-      setHidden('git-branch-chip', true);
-    }
-  }
-  function loadGitBranchChip() {
-    fetch('/api/git/status').then(function (r) { return r.ok ? r.json() : null; }).then(showGitBranch).catch(function () { /* next poll retries */ });
-  }
   function gitBranchActs(b, current) {
     var acts = [];
     if (b.kind === 'local' && b.work && b.base) {
@@ -3767,7 +3750,6 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     setHidden('project-name', false);
     setHidden('btn-switch-project', !project);
     setHidden('btn-git', !project);
-    if (!project) showGitBranch(null);
     setHidden('btn-project-back', !project);
     byId('project-info').textContent = projectSummary(project);
     var acts = projectActions(project);
@@ -4245,7 +4227,6 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
 
   function poll() {
     if (hostMode && !project) return;
-    loadGitBranchChip();
     fetch('/api/runs').then(function (r) { return r.json(); }).then(function (d) {
       runs = Array.isArray(d.runs) ? d.runs : [];
       latest = d.latest || null;
