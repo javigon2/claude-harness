@@ -2466,7 +2466,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
 
   // ---- Timing: where a conversation's time went (a debugging view, GET only)
   var TIMING_COLORS = {routing: '#7661ff', handoff: '#d97706', startup: '#0891b2', model: '#1b6e94',
-    tools: '#63df4e', agent_other: '#9fb6c3', harness: '#d64545', waiting: '#e5e7eb'};
+    tools: '#63df4e', agent_other: '#9fb6c3', harness: '#d64545'};
   var timingThread = null, timingFollow = false, timingTimer = null;
   function timingRows(t) {
     // [key, label, ms, share of the total] per segment with time, biggest first
@@ -2487,8 +2487,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   function renderTiming(t) {
     byId('timing-title').textContent = 'Timing · ' + (t.title || t.thread_id);
     var rows = timingRows(t);
-    var busy = rows.reduce(function (a, r) { return r[0] === 'waiting' ? a : a + r[2]; }, 0);
-    byId('timing-sub').textContent = t.exchanges.length + ' message' + (t.exchanges.length === 1 ? '' : 's') + ' · wall time ' + fmtMs(t.wall_ms) + ' · office busy ' + fmtMs(busy) + ' · waiting for you ' + fmtMs((t.totals || {}).waiting || 0);
+    var busy = rows.reduce(function (a, r) { return a + r[2]; }, 0);
+    byId('timing-sub').textContent = t.exchanges.length + ' message' + (t.exchanges.length === 1 ? '' : 's') + ' · wall time ' + fmtMs(t.wall_ms) + ' · office busy ' + fmtMs(busy);
     var bar = byId('timing-bar');
     bar.replaceChildren.apply(bar, rows.map(function (r) {
       var sp = el('span'); sp.style.width = (r[3] * 100).toFixed(2) + '%'; sp.style.background = TIMING_COLORS[r[0]] || '#8a9199'; sp.title = r[1] + ': ' + fmtMs(r[2]);
@@ -2499,8 +2499,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       td.appendChild(sw); td.appendChild(document.createTextNode(r[1]));
       return [td, fmtMs(r[2]), (r[3] * 100).toFixed(0) + '%'];
     }));
-    var keys = ['routing', 'handoff', 'startup', 'model', 'tools', 'agent_other', 'harness', 'waiting'];
-    fillTable('timing-exchanges', ['Message', 'Agent', 'Response', 'Routing', 'Hand-off', 'Startup', 'Model', 'Tools', 'Other', 'Harness', 'Waiting'], t.exchanges.map(function (x) {
+    var keys = ['routing', 'handoff', 'startup', 'model', 'tools', 'agent_other', 'harness'];
+    fillTable('timing-exchanges', ['Message', 'Agent', 'Response', 'Routing', 'Hand-off', 'Startup', 'Model', 'Tools', 'Other', 'Harness'], t.exchanges.map(function (x) {
       var msg = el('td', null, '#' + x.index + ' ' + x.text); msg.title = x.ts + (x.notes.length ? '\n' + x.notes.join('\n') : '');
       var d = x.routing_detail || {}, rt = el('td', 'num', fmtMs(x.ms.routing));
       if (Object.keys(d).length) rt.title = Object.keys(d).map(function (k) { return k + ' ' + fmtMs(d[k]); }).join(' · ');
