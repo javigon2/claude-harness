@@ -606,6 +606,55 @@ def test_classroom_keeps_desk_nodes(tmp_path):
     ]  # fmt: skip
 
 
+DESK_METER_SCENARIO = """
+var out = [];
+function meter(id) { var m = deskNodes[id].children[4]; return [m.className, m.text]; }
+runView = {tasks: [
+  {task_id: 'a', tier: 'haiku', status: 'running', attempt: 1, cost_usd: 0.0123, steps: []},
+  {task_id: 'b', tier: 'sonnet', status: 'pending', attempt: 0, cost_usd: 0, steps: []},
+  {task_id: 'c', tier: 'sonnet', status: 'verifying', attempt: 2, cost_usd: 1.5, steps: []},
+  {task_id: 'd', tier: 'sonnet', status: 'running', steps: []}
+]};
+renderOffice();
+out.push([meter('a'), meter('b'), meter('c'), meter('d')]);
+runView = {tasks: [
+  {task_id: 'a', tier: 'sonnet', status: 'running', attempt: 2, cost_usd: 0.05, steps: []}
+]};
+var a = deskNodes.a;
+renderOffice();
+out.push([deskNodes.a === a, a.parentNode === nodes['desks-sonnet'], meter('a')]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_desk_meter_and_row_change(tmp_path):
+    text = _text()
+    section = _classroom_section(text)
+    for word in ["desk-meter", "moveDesk", "prefers-reduced-motion: reduce"]:
+        assert word in text, word
+    script = (
+        _page_helpers(text)
+        + "var office = null, interactive = false, runView = null, focused = 0;\n"
+        + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
+        + "var chatTier = null, chatDesks = {}, tlTask = null, hidden = {};\n"
+        + "function focusComposer() { focused++; }\n"
+        + "function setHidden(id, hide) { hidden[id] = hide; }\n"
+        + _chat_section(text)
+        + section
+        + DESK_METER_SCENARIO
+    )
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        [
+            ["desk-meter", "$0.012"],
+            ["desk-meter hidden", ""],
+            ["desk-meter", "$1.50 \u00b7 try 2"],
+            ["desk-meter hidden", ""],
+        ],
+        [True, True, ["desk-meter", "$0.050 \u00b7 try 2"]],
+    ]  # fmt: skip
+
+
 def test_timeline_markup():
     text = _text()
     for word in ['id="timeline-view"', "btn-back-opus", "tl-title", "tl-meta", 'id="timeline"']:
@@ -810,7 +859,7 @@ def _chat_section(text: str) -> str:
     return text[start:end]
 
 
-def test_open_chat_and_chat_send(tmp_path):
+def test_chat_send(tmp_path):
     chats = [
         {"chat_id": "c3", "tier": "haiku", "state": "closed"},
         {"chat_id": "c2", "tier": "sonnet", "state": "working"},
@@ -819,15 +868,12 @@ def test_open_chat_and_chat_send(tmp_path):
     script = (
         _chat_section(_text())
         + "var C = " + json.dumps(chats) + ";\n"
-        + "function id(c) { return c ? c.chat_id : null; }\n"
-        + "console.log(JSON.stringify([id(openChat(C, 'haiku')), id(openChat(C, 'sonnet')),"
-        + " id(openChat(C.slice(0, 1), 'haiku')), id(openChat(null, 'haiku')),"
-        + " chatSend(C[2], 'haiku', 'hi'), chatSend(C[1], 'sonnet', 'yo'),"
-        + " chatSend(C[0], 'haiku', 'again'), chatSend(null, 'sonnet', 'new')]));\n"
+        + "console.log(JSON.stringify([chatSend(C[2], 'haiku', 'hi'),"
+        + " chatSend(C[1], 'sonnet', 'yo'), chatSend(C[0], 'haiku', 'again'),"
+        + " chatSend(null, 'sonnet', 'new')]));\n"
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == [
-        "c1", "c2", None, None,
         {"path": "/api/chat/message", "body": {"chat_id": "c1", "text": "hi"}},
         {"path": "/api/chat/message", "body": {"chat_id": "c2", "text": "yo"}},
         {"path": "/api/chat/start", "body": {"tier": "haiku", "text": "again"}},
@@ -857,12 +903,17 @@ selectedTask = 'a';
 openChatPanel('haiku');
 out.push([JSON.parse(JSON.stringify(hidden)), selectedTask, chatTier, chatId, rendered,
   byId('chat-title').text, items(), hidden['btn-chat-close'], byId('chat-note').text]);
-office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'working', transcript: [U],
+office = {chats: [{chat_id: 'c7', tier: 'haiku', state: 'working', transcript: [U]}]};
+renderChat();
+out.push([chatId, byId('chat-title').text]);
+chatId = 'c1';  // the start reply named the new agent
+office = {chats: [{chat_id: 'c7', tier: 'haiku', state: 'working', transcript: [U]},
+  {chat_id: 'c1', tier: 'haiku', state: 'working', transcript: [U],
   progress: ['Read: README.md'], commits: [], cost_usd: 0, error: null, task_id: null}]};
 renderChat();
 var first = byId('chat-transcript').children[0];
 out.push([chatId, byId('chat-title').text, items(), texts('chat-progress'),
-  hidden['btn-chat-close']]);
+  hidden['btn-chat-close'], hidden['btn-chat-abort']]);
 office = {chats: [{chat_id: 'c1', tier: 'haiku', state: 'waiting', transcript: [U, A],
   progress: [], commits: ['abc1234 chat haiku: add a flag'], cost_usd: 0.002, error: null,
   task_id: 'demo-a'}]};
@@ -882,7 +933,8 @@ office = {chats: [{chat_id: 'c4', tier: 'haiku', state: 'working', transcript: [
   progress: [], commits: [], cost_usd: 0, error: null, task_id: null},
   {chat_id: 'c1', tier: 'haiku', state: 'closed', transcript: [U, A]}]};
 renderChat();
-out.push([chatId, items().length, byId('chat-transcript').children[0] === first]);
+out.push([chatId, items().length, byId('chat-transcript').children[0] === first,
+  hidden['btn-chat-abort']]);
 chatTier = null;
 byId('chat-title').text = 'untouched';
 renderChat();
@@ -900,7 +952,7 @@ def test_chat_panel_renders_in_place(tmp_path):
     end = text.index("  function fill(")
     script = (
         _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
-        + "var office = null, selectedTask = null, tlTask = null;\n"
+        + "var office = null, selectedTask = null, tlTask = null, interactive = true;\n"
         + "var chatTier = null, chatId = null, chatShown = null, chatCount = 0;\n"
         + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
         + _chat_section(text) + CHAT_SCENARIO
@@ -909,14 +961,15 @@ def test_chat_panel_renders_in_place(tmp_path):
     agent = "msg msg-agent|haiku"
     assert out == [
         [{"orch-view": True, "convo": True, "timeline-view": True, "chat-view": False,
-          "btn-chat-close": True},
+          "btn-chat-close": True, "btn-chat-abort": True},
          None, "haiku", None, 1, "haiku · new chat", [], True, ""],
-        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False],
+        [None, "haiku · new chat"],
+        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False, False],
         ["haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
          ["committed abc1234 chat haiku: add a flag"], 500],
         ["c1", "haiku · failed", "the agent failed", True],
         "This chat has ended; sending starts a new one.",
-        ["c4", 1, False],
+        ["c1", 2, True, True],
         "untouched",
     ]  # fmt: skip
 
@@ -938,8 +991,11 @@ def test_chat_desk_css_and_names():
 
 CHAT_DESK_SCENARIO = """
 var opened = [];
-function openChatPanel(tier) { opened.push(tier); chatTier = tier; }
+function openChatPanel(tier, seed, id) {
+  opened.push([tier, id || null]); chatTier = tier; chatId = id || null;
+}
 function desk(tier) { return nodes['desks-' + tier].children; }
+function ids(tier) { return desk(tier).map(function (d) { return d.id; }); }
 function info(d) {
   return [d.id, d.className, d.children[0].className, d.children[0].text, d.children[3].text];
 }
@@ -948,37 +1004,45 @@ runView = {tasks: [{task_id: 'a', tier: 'haiku', status: 'running', steps: []}]}
 renderOffice();
 out.push([desk('haiku').length, desk('sonnet').length, nodes['row-sonnet'].className]);
 interactive = true;
+runView = null;
 office = {state: 'idle', chats: []};
 renderOffice();
-var h = chatDesks.haiku;
-out.push([info(h), h.attrs.role, h.attrs.title, h.tabIndex, desk('haiku').length,
+var h = chatDesks['free-haiku'];
+out.push([info(h), h.attrs.role, h.attrs.title, h.tabIndex, ids('haiku'),
   nodes['row-sonnet'].className, nodes['row-opus'].className]);
+// two haiku agents at once; a detached one (left by New request) is not in the room
 office = {state: 'idle', chats: [
   {chat_id: 'c2', tier: 'sonnet', state: 'waiting', progress: []},
   {chat_id: 'c1', tier: 'haiku', state: 'working', progress: ['Read: a.md', 'Edit: notes.md']},
+  {chat_id: 'c3', tier: 'haiku', state: 'waiting', progress: []},
+  {chat_id: 'c5', tier: 'haiku', state: 'working', progress: [], detached: true},
   {chat_id: 'c0', tier: 'haiku', state: 'closed', progress: []}
 ]};
 renderOffice();
-out.push([chatDesks.haiku === h, info(h), info(chatDesks.sonnet)]);
+out.push([ids('haiku'), ids('sonnet'), info(chatDesks.c1), info(chatDesks.c2),
+  'c5' in chatDesks, chatDesks['free-haiku'] === h]);
+chatDesks.c1.on.click();
+renderOffice();
+out.push([opened.slice(), chatDesks.c1.className, h.className]);
 h.on.click();
 renderOffice();
-out.push([opened.slice(), h.className]);
-office.chats[1].progress = [];
-runView = null;
+out.push([opened.slice(-1), chatDesks.c1.className, h.className]);
+// New request: every old chat is detached, the room is clean again
+office.chats.forEach(function (c) { c.detached = true; });
 renderOffice();
-out.push([h.children[0].text, desk('haiku').length, h.parentNode === nodes['desks-haiku']]);
+out.push([ids('haiku'), ids('sonnet'), 'c1' in chatDesks]);
 office = {state: 'idle', handoff_chat: 'c9', chats: []};
 followHandoff();
 office = {state: 'idle', handoff_chat: 'c9', chats: [{chat_id: 'c9', tier: 'sonnet',
   state: 'working'}]};
 followHandoff();
 followHandoff();
-out.push([opened.slice(), lastHandoff]);
+out.push([opened.slice(-1), lastHandoff]);
 interactive = false;
 office = {state: 'idle', handoff_chat: 'c10', chats: [{chat_id: 'c10', tier: 'haiku',
   state: 'working'}]};
 followHandoff();
-out.push([opened.slice(), lastHandoff]);
+out.push([opened.length, lastHandoff]);
 console.log(JSON.stringify(out));
 """  # fmt: skip
 
@@ -989,7 +1053,7 @@ def test_chat_desks_and_handoff(tmp_path):
         _page_helpers(text)
         + "var office = null, interactive = false, runView = null;\n"
         + "var deskNodes = {}, bossNode = null, orchNode = null, selectedTask = null;\n"
-        + "var chatTier = null, chatDesks = {}, lastHandoff = null;\n"
+        + "var chatTier = null, chatId = null, chatDesks = {}, lastHandoff = null;\n"
         + "function focusComposer() {}\n"
         + _chat_section(text)
         + _classroom_section(text)
@@ -999,17 +1063,19 @@ def test_chat_desks_and_handoff(tmp_path):
     free = "bubble bubble-chat hidden"
     assert out == [
         [1, 0, "row row-sonnet hidden"],
-        [["desk-chat-haiku", "desk desk-chat chat-free", free, "", "haiku · chat"], "button",
-         "Chat with haiku", 0, 2, "row row-sonnet", "row row-opus"],
-        [True,
-         ["desk-chat-haiku", "desk desk-chat chat-working", "bubble bubble-chat",
-          "Edit: notes.md", "haiku · chat"],
-         ["desk-chat-sonnet", "desk desk-chat chat-waiting", "bubble bubble-chat", "your turn",
-          "sonnet · chat"]],
-        [["haiku"], "desk desk-chat chat-working selected"],
-        ["working…", 1, True],
-        [["haiku", "sonnet"], "c9"],
-        [["haiku", "sonnet"], "c9"],
+        [["desk-chat-haiku", "desk desk-chat chat-free", free, "", "haiku · new chat"], "button",
+         "New haiku chat", 0, ["desk-chat-haiku"], "row row-sonnet", "row row-opus"],
+        [["desk-chat-c1", "desk-chat-c3", "desk-chat-haiku"], ["desk-chat-c2", "desk-chat-sonnet"],
+         ["desk-chat-c1", "desk desk-chat chat-working", "bubble bubble-chat", "Edit: notes.md",
+          "haiku · chat"],
+         ["desk-chat-c2", "desk desk-chat chat-waiting", "bubble bubble-chat", "your turn",
+          "sonnet · chat"],
+         False, True],
+        [[["haiku", "c1"]], "desk desk-chat chat-working selected", "desk desk-chat chat-free"],
+        [[["haiku", None]], "desk desk-chat chat-working", "desk desk-chat chat-free selected"],
+        [["desk-chat-haiku"], ["desk-chat-sonnet"], False],
+        [[["sonnet", "c9"]], "c9"],
+        [3, "c9"],
     ]  # fmt: skip
 
 
@@ -2017,3 +2083,159 @@ def test_failed_desks_open_a_plain_english_summary():
     assert "explainFailure('orchestrator'" in text and "explainFailure('opus'" in text
     assert "byId('why').scrollIntoView(" in text
     assert "#why:not" not in text and not re.search(r"#why \{[^}]*display:", text)
+
+
+DASH_FILTER_SCENARIO = """
+var R = [
+  {run_id: 'r1', title: 'Login fix', started_at: '2026-10-01T10:00:00Z', finished: true,
+   fake: false, tiers: ['haiku'], values: {cost_usd: 0.5, wall_s: 100, first_try_pct: 100}},
+  {run_id: 'r2', title: 'Big refactor', started_at: '2026-10-03T10:00:00Z', finished: true,
+   fake: false, tiers: ['sonnet', 'opus'], values: {cost_usd: 4.0, wall_s: 900, first_try_pct: 50}},
+  {run_id: 'r3', title: 'Demo', started_at: '2026-10-02T10:00:00Z', finished: true, fake: true,
+   tiers: ['haiku'], values: {cost_usd: 0, wall_s: 5, first_try_pct: 100}},
+  {run_id: 'r4', title: null, started_at: '2026-10-04T10:00:00Z', finished: false, fake: false,
+   tiers: ['sonnet'], values: {cost_usd: 1.5, wall_s: null, first_try_pct: null}}
+];
+function ids(f) { return filterRuns(R, f).map(function (r) { return r.run_id; }); }
+var out = [
+  ids({kind: 'real'}),
+  ids({kind: ''}),
+  ids({kind: 'fake'}),
+  ids({kind: 'real', status: 'finished'}),
+  ids({kind: 'real', status: 'running'}),
+  ids({kind: 'real', tier: 'sonnet'}),
+  ids({kind: 'real', min: 1, max: 2}),
+  ids({kind: 'real', q: 'LOGIN'}),
+  ids({kind: 'real', q: 'r4'}),
+  ids({kind: 'real', sort: 'cost_usd'}),
+  ids({kind: 'real', sort: 'wall_s'}),
+  ids({kind: 'real', sort: 'first_try_pct'}),
+  periodOptions({current_start: null, periods: []}),
+  periodOptions({current_start: '2026-10-05T08:30:00+00:00', periods: [
+    {id: 'p1', label: 'first', start: null, end: '2026-10-02T00:00:00Z'},
+    {id: 'p2', label: 'second', start: '2026-10-02T00:00:00Z', end: '2026-10-05T08:30:00+00:00'}]})
+];
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_dashboard_run_filters_and_period_options(tmp_path):
+    text = _text()
+    start = text.index("  // ---- Dashboard periods")
+    end = text.index("  function runFilters(")
+    out = json.loads(_run_node(tmp_path, text[start:end] + DASH_FILTER_SCENARIO)[-1])
+    assert out == [
+        ["r4", "r2", "r1"],
+        ["r4", "r2", "r3", "r1"],
+        ["r3"],
+        ["r2", "r1"],
+        ["r4"],
+        ["r4", "r2"],
+        ["r4"],
+        ["r1"],
+        ["r4"],
+        ["r2", "r4", "r1"],
+        ["r2", "r1", "r4"],
+        ["r2", "r1", "r4"],
+        [["current", "Current period (everything so far)"], ["all", "All time"]],
+        [["current", "Current period (since 2026-10-05 08:30)"], ["p2", "History: second"],
+         ["p1", "History: first"], ["all", "All time"]],
+    ]  # fmt: skip
+
+
+def test_dashboard_history_markup():
+    text = _text()
+    for needle in [
+        'id="dash-period"', 'id="btn-dash-clear" type="button" class="hidden"', 'id="dash-runs"',
+        'id="f-status"', 'id="f-kind"', 'id="f-tier"', 'id="f-min-cost"', 'id="f-max-cost"',
+        'id="f-sort"', 'id="f-search"', "'/api/history/clear'", "'/api/dashboard-runs' + q",
+        "'/api/overview?period=' + encodeURIComponent(dashPeriod)",
+    ]:  # fmt: skip
+        assert needle in text, needle
+
+
+PAST_CONTINUE_SCENARIO = """
+var hidden = {}, fetched = [], acted = [], selected = 0;
+function setHidden(id, h) { hidden[id] = h; }
+function byId(id) { return document.getElementById(id); }
+function requestLabel(r) { return r.id; }
+function selectTask() { selected++; }
+function msgNode() { return mk('li'); }
+var chain = {then: function () { return chain; }, catch: function () { return chain; }};
+function fetch(u) { fetched.push(u); return chain; }
+function act(path, body, done, msg) { acted.push([path, body, done === null]); }
+var left = byId('left');
+left.classList = {on: {}, toggle: function (c, v) { this.on[c] = v; }};
+var interactive = true, pastId = null, pastSeq = 0;
+var office = {orchestrator: {thread_id: 'orch-new'}, session_id: null};
+var out = [];
+renderPast({id: 'orch-A'});
+out.push([pastId, left.classList.on.past, hidden['btn-past-continue']]);
+// the click: the request is opened, the callback leaves pastId alone
+pastClick();
+out.push([acted, pastId]);
+// the reply names orch-A the live thread: the read-only view closes
+office = {orchestrator: {thread_id: 'orch-A'}, session_id: null};
+renderPast({id: 'orch-A'});
+out.push([pastId, left.classList.on.past]);
+renderPast({id: 'planner-C'});
+out.push([pastId, hidden['btn-past-continue']]);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_continue_leaves_the_read_only_view(tmp_path):
+    text = _text()
+    click = re.search(
+        r"byId\('btn-past-continue'\)\.addEventListener\('click', (function \(\) \{.*?\n    \})\);",
+        text,
+        re.S,
+    )
+    assert click
+    script = (
+        DOM + _functions(text, "liveIds", "isPast", "renderPast")
+        + "var pastClick = " + click.group(1) + ";\n"
+        + PAST_CONTINUE_SCENARIO
+    )  # fmt: skip
+    out = json.loads(_run_node(tmp_path, script)[-1])
+    assert out == [
+        ["orch-A", True, False],
+        [[["/api/orchestrator/open", {"thread_id": "orch-A"}, True]], "orch-A"],
+        [None, False],
+        ["planner-C", True],
+    ]
+
+
+TIMING_SCENARIO = """
+var hidden = {}, fetched = [];
+function setHidden(id, h) { hidden[id] = h; }
+function byId(id) { return document.getElementById(id); }
+function setInterval() { return 1; }
+var chain = {then: function () { return chain; }, catch: function () { return chain; }};
+function fetch(u) { fetched.push(u); return chain; }
+byId('timing-view').classList = {contains: function () { return false; }};
+var office = {orchestrator: {thread_id: null}}, pastId = null;
+var out = [];
+renderTimingButtons();
+out.push(hidden['btn-orch-timing']);
+openTiming(currentThread(), true);
+out.push([hidden['timing-view'], byId('timing-sub').text, fetched.length]);
+office.orchestrator.thread_id = 'orch-1';  // the first message started the thread
+loadTiming();
+out.push(fetched);
+console.log(JSON.stringify(out));
+"""  # fmt: skip
+
+
+def test_timing_button_on_a_new_chat_counts_from_the_first_message(tmp_path):
+    text = _text()
+    start = text.index("  // ---- Timing: where")
+    end = text.index("  function wireTiming(")
+    out = json.loads(
+        _run_node(tmp_path, _page_helpers(text) + text[start:end] + TIMING_SCENARIO)[-1]
+    )
+    assert out == [
+        False,
+        [False, "Timing starts with your first message.", 0],
+        ["/api/orchestrator/timing/orch-1"],
+    ]
