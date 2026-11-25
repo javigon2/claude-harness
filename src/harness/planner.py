@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -24,11 +24,14 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from harness.config import MODEL_IDS, Tier
+from harness.config import MODEL_IDS, Tier, planner_tier
 from harness.models import Usage
+from harness.order_check import check_plan_quality
 from harness.plan import PlanError, load_plan
+from harness.repo_digest import load_or_build
+from harness.roles import DEFAULT_ROLE, ChatRole, role_or_default
 from harness.worker import (
     WORKER_ENV,
     ProgressFn,
@@ -94,9 +97,22 @@ FIX_PROMPT = (
     "Fix the plan and write it again to the same path."
 )
 
+QUALITY_FIX_PROMPT = (
+    "The work orders in {plan_path} have these problems:\n{issues}\n\n"
+    "Fix them and write the plan again to the same path."
+)
+
+FALLBACK_SAY = "Falling back to {tier} for the work orders: {reason}"
+
+DIGEST_SUFFIX = (
+    "\n\nRepo digest (git HEAD {head}; read files only for detail beyond it):\n\n{digest}"
+)
+
 PLANNER_INIT_FILE = Path(".harness") / "planner" / "session_init.json"
 
 Route = Literal["direct", "quick", "project"]
+
+OrderPhase = Literal["quick", "staging"]
 
 RouteChoice = Literal["auto", "quick", "project"]
 
@@ -166,22 +182,69 @@ ORCHESTRATOR_PROMPT = (
     "multiple stages or choices only the user can make. When unsure between direct "
     "and planning, choose sonnet; between quick and project, choose quick. "
     "Route from the request without reading the repo.\n"
-    "Holder: {holder}. A follow-up stays with the holder unless it is clearly beyond the "
-    "holder; never pick a lower tier than the holder.\n"
+    "Also pick the role: researcher for evals, experiments, benchmarks, measuring or "
+    "comparing things, data analysis, or a findings report (it runs them and writes a "
+    "report with charts); builder for everything else. A researcher is a direct agent on "
+    "any tier: haiku to re-plot or tweak an existing report, sonnet for most evals, opus "
+    "to design an experiment or for a heavy multi-source analysis; plan does not apply.\n"
+    "Holder: {holder}. Holder's role: {role}. Pick the tier this message needs now. "
+    "A follow-up stays with the holder unless it is clearly beyond the holder (pick "
+    "higher) or clearly much easier "
+    "than the holder's tier and does not build on its unfinished work, e.g. an unrelated "
+    "quick question or an unrelated small mechanical edit for a sonnet holder (pick "
+    "haiku). Thanks, ok, yes and tweaks to what the holder just did always stay with "
+    "the holder. When unsure, keep the holder.\n"
+    "Holder's effort: {effort}. Also pick the thinking effort: low for greetings, quick "
+    "questions and mechanical edits; medium for ordinary coding; high for debugging, "
+    "cross-cutting changes and design. When unsure, medium; for a follow-up, keep the "
+    "current effort unless the jump is clear.\n"
     'End with a ```json block: {{"to": "haiku" | "sonnet" | "opus", '
-    '"plan": "quick" | "project", "reason": "<one line>"}}.\n\n'
+    '"plan": "quick" | "project", "effort": "low" | "medium" | "high", '
+    '"role": "builder" | "researcher", '
+    '"reason": "<one line>"}}.\n\n'
     "Conversation so far:\n{tail}\n\nMessage:\n\n{text}"
 )
 
+Effort = Literal["low", "medium", "high"]
+
+EFFORTS: tuple[Effort, ...] = ("low", "medium", "high")
+
+DEFAULT_EFFORT: Effort = "medium"
+
+
+def effort_or_default(value: object) -> Effort:
+    """`value` when it is one of EFFORTS, else DEFAULT_EFFORT."""
+    return cast(Effort, value) if value in EFFORTS else DEFAULT_EFFORT
+
 
 class Routing(BaseModel):
-    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus."""
+    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus. A
+    missing or invalid `effort` is medium and a null `plan` is quick; neither fails the
+    routing."""
 
     model_config = ConfigDict(extra="forbid")
 
     to: Tier
     plan: Literal["quick", "project"] = "quick"
+    effort: Effort = DEFAULT_EFFORT
+    role: ChatRole = DEFAULT_ROLE
     reason: str = ""
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _plan(cls, value: object) -> object:
+        # the router sometimes sends "plan": null for a direct chat (2 of 240 bench calls)
+        return "quick" if value is None else value
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _role(cls, value: object) -> ChatRole:
+        return role_or_default(value)
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort(cls, value: object) -> Effort:
+        return effort_or_default(value.strip().lower() if isinstance(value, str) else value)
 
 
 def parse_routing(text: str) -> Routing | None:
@@ -247,6 +310,11 @@ class PlannerTurn(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     error: str | None = None
     session_init: dict[str, Any] | None = None
+    session_id: str | None = None
+    # timing of this turn, when the session measures it: starting the Claude process (first
+    # turn only), and the model's own time (ResultMessage.duration_api_ms)
+    connect_ms: int | None = None
+    api_ms: int | None = None
 
 
 class PlanResult(BaseModel):
@@ -259,6 +327,7 @@ class PlanResult(BaseModel):
     project_plan: Path
     plan_path: Path | None
     usage: Usage = Field(default_factory=Usage)
+    order_usage: Usage = Field(default_factory=Usage)
     rounds: int = 0
     session_init: dict[str, Any] | None = None
     route: Route = "project"
@@ -280,6 +349,7 @@ class PlannerSession(Protocol):
 
 Ask = Callable[[str], str | None]
 Say = Callable[[str], None]
+OrderSessionFactory = Callable[[Tier], PlannerSession]
 
 
 def check_skills(root: Path = HARNESS_ROOT) -> None:
@@ -310,6 +380,12 @@ def _approval_neutral_plan(text: str) -> str:
     return APPROVED_RE.sub("Status: draft", text)
 
 
+def _api_ms(result: Any) -> int | None:
+    """ResultMessage.duration_api_ms (time in model calls), or None."""
+    value = getattr(result, "duration_api_ms", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 class SdkPlannerSession:
     """A PlannerSession on one ClaudeSDKClient, connected on the first send()."""
 
@@ -321,6 +397,7 @@ class SdkPlannerSession:
         *,
         progress: ProgressFn | None = None,
         progress_interval_s: float = 2.0,
+        tier: Tier = "opus",
     ) -> None:
         """self.repo = Path(repo).resolve(); self.harness_root = Path(harness_root).resolve();
         self._factory = client_factory or ClaudeSDKClient (called as
@@ -331,11 +408,17 @@ class SdkPlannerSession:
         self.repo = Path(repo).resolve()
         self.harness_root = Path(harness_root).resolve()
         self._progress = progress
+        self.tier: Tier = tier
         self.progress_interval_s = progress_interval_s
         self._factory = client_factory or ClaudeSDKClient
         self._client: Any = None
         self._usage = Usage()
         self.tool_event: Callable[[str, dict[str, Any]], None] | None = None
+        # the Claude session to continue (ClaudeAgentOptions.resume); set before the first send()
+        self.resume_id: str | None = None
+        # thinking effort (ClaudeAgentOptions.effort); None is the SDK default. Fixed for the
+        # session's life: the SDK cannot change it on a live client. Set before the first send()
+        self.effort: Effort | None = None
 
     def _emit_tool(self, event: str, payload: dict[str, Any]) -> None:
         if self.tool_event is not None:
@@ -347,7 +430,7 @@ class SdkPlannerSession:
     def options(self) -> ClaudeAgentOptions:
         """The exact options; values in the `decision: planner SDK options` context item."""
         return ClaudeAgentOptions(
-            model=MODEL_IDS["opus"],
+            model=MODEL_IDS[self.tier],
             system_prompt={"type": "preset", "preset": "claude_code", "append": PLANNER_APPEND},
             tools=[*PLANNER_TOOLS, "Skill"],
             allowed_tools=list(PLANNER_TOOLS),
@@ -359,12 +442,16 @@ class SdkPlannerSession:
             max_turns=PLANNER_MAX_TURNS,
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
+            resume=self.resume_id,
+            effort=self.effort,
         )
 
     async def send(self, text: str) -> PlannerTurn:
         """Algorithm in the `decision: planner session` context item."""
+        connect_ms: int | None = None
         if self._client is None:
             client = self._factory(options=self.options())
+            connect_start = time.monotonic()
             try:
                 await client.connect()
             except Exception as err:
@@ -372,6 +459,7 @@ class SdkPlannerSession:
                     usage=self._usage,
                     error=f"connect failed: {type(err).__name__}: {err}"[:2000],
                 )
+            connect_ms = round((time.monotonic() - connect_start) * 1000)
             self._client = client
 
         result_msg: ResultMessage | None = None
@@ -466,7 +554,15 @@ class SdkPlannerSession:
                 if isinstance(errors, list) and errors:
                     error += ": " + "; ".join(str(e) for e in errors)
 
-        return PlannerTurn(text=reply, usage=self._usage, error=error, session_init=session_init)
+        return PlannerTurn(
+            text=reply,
+            usage=self._usage,
+            error=error,
+            session_init=session_init,
+            session_id=getattr(result_msg, "session_id", None) if result_msg else None,
+            connect_ms=connect_ms,
+            api_ms=_api_ms(result_msg),
+        )
 
     async def close(self) -> None:
         """If connected: await self._client.disconnect() (Exception ignored), then
@@ -514,6 +610,8 @@ class SdkRoutingSession(SdkTriageSession):
             max_turns=1,
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
+            effort="low",
+            thinking={"type": "disabled"},
         )
 
 
@@ -558,16 +656,28 @@ async def run_planner(
     quick_dir: Path | None = None,
     triage_session: PlannerSession | None = None,
     staging_only: bool = False,
+    order_session_factory: OrderSessionFactory | None = None,
+    continuing: bool = False,
 ) -> PlanResult:
     """Drive the planner for one request. Always closes both sessions (finally). Raises
     PlannerError when it stops without a valid plan.
+
+    With `continuing` (a resumed Claude session) the stage-1 project turn sends `description`
+    as it is, not wrapped in PROJECT_PROMPT: the session already knows the task.
 
     With `staging_only` the project-planning turn is skipped for any stage, stage 1 too: the
     approved PROJECT_PLAN.md on disk is the input (project route only).
 
     The "auto" route needs `triage_session`: it gets the one TRIAGE_PROMPT turn, and
     `session` (Opus) gets no message unless the route is quick or project. A triage turn
-    that fails or gives no valid route falls back to planning in full (NO_ROUTE_REASON)."""
+    that fails or gives no valid route falls back to planning in full (NO_ROUTE_REASON).
+
+    With `order_session_factory`, the order turns (quick-route plan turns, the draft-orders
+    turn and staging turns) run on one lazily created cheaper session. Each plan it writes
+    must pass load_plan and check_plan_quality; failures are sent back to that session up to
+    MAX_FIX_ROUNDS times. On exhaustion or a turn error, it is closed, FALLBACK_SAY is shown,
+    the prompt is rerun on `session` (Opus) and the rest of the call stays there. Order
+    prompts then carry the cached repo digest."""
     repo = Path(repo).resolve()
     project_plan = repo / PROJECT_PLAN_FILE
     rounds = 0
@@ -576,14 +686,20 @@ async def run_planner(
     session_init: dict[str, Any] | None = None
     plan_fp: str | None = None
     fixes = 0
+    order_usage = Usage()
+    order_sess: PlannerSession | None = None
+    fell_back = False
 
-    async def turn(msg: str) -> PlannerTurn:
-        nonlocal rounds, usage, session_init
+    async def turn(msg: str, sess: PlannerSession | None = None) -> PlannerTurn:
+        nonlocal rounds, usage, order_usage, session_init
         rounds += 1
         if rounds > max_rounds:
             raise PlannerError(f"no valid plan after {max_rounds} rounds")
-        t = await session.send(msg)
-        usage = t.usage
+        t = await (sess or session).send(msg)
+        if sess is None:
+            usage = t.usage
+        else:
+            order_usage = t.usage
         if t.session_init is not None and session_init is None:
             session_init = t.session_init
             say(format_session_init(session_init))
@@ -620,8 +736,66 @@ async def run_planner(
             raise PlannerError("aborted by the user")
         return a
 
-    async def plan_turn(msg: str, plan_path: Path) -> bool:
-        nonlocal plan_fp, fixes
+    def with_digest(prompt: str) -> str:
+        """Append the cached repo digest to an order prompt (only on the order session)."""
+        if order_session_factory is None or fell_back:
+            return prompt
+        try:
+            d = load_or_build(repo)
+        except Exception:
+            return prompt
+        say(
+            "Repo digest: reused"
+            if d.reused
+            else f"Repo digest: rebuilt ({len(d.text.splitlines())} lines)"
+        )
+        return prompt + DIGEST_SUFFIX.format(head=d.head, digest=d.text)
+
+    async def order_turn(msg: str, plan_path: Path) -> bool:
+        """plan_turn on the order session; raises PlannerError when it should fall back."""
+        nonlocal order_sess, plan_fp
+        assert order_session_factory is not None
+        if order_sess is None:
+            phase: OrderPhase = "quick" if effective == "quick" else "staging"
+            order_sess = order_session_factory(planner_tier(phase))
+        order_fixes = 0
+        while True:
+            before_mtime = plan_path.stat().st_mtime_ns if plan_path.is_file() else None
+            await turn(msg, order_sess)
+            fp = _fingerprint(plan_path)
+            after_mtime = plan_path.stat().st_mtime_ns if plan_path.is_file() else None
+            if fp is None or (fp == plan_fp and before_mtime == after_mtime):
+                return False
+            plan_fp = fp
+            try:
+                issues = check_plan_quality(load_plan(plan_path), repo)
+            except (PlanError, ValueError, OSError) as err:
+                problem = f"{err}"
+                next_msg = FIX_PROMPT.format(plan_path=plan_path, error=err)
+            else:
+                if not issues:
+                    return True
+                problem = "; ".join(issues)
+                next_msg = QUALITY_FIX_PROMPT.format(
+                    plan_path=plan_path, issues="\n".join(f"- {i}" for i in issues)
+                )
+            order_fixes += 1
+            if order_fixes > MAX_FIX_ROUNDS:
+                raise PlannerError(f"orders still invalid after {MAX_FIX_ROUNDS} fixes: {problem}")
+            msg = next_msg
+
+    async def plan_turn(msg: str, plan_path: Path, order: bool = False) -> bool:
+        nonlocal plan_fp, fixes, order_sess, fell_back
+        if order and order_session_factory is not None and not fell_back:
+            try:
+                return await order_turn(msg, plan_path)
+            except PlannerError as err:
+                fell_back = True
+                if order_sess is not None:
+                    await order_sess.close()
+                    order_sess = None
+                say(FALLBACK_SAY.format(tier=planner_tier("fallback"), reason=err))
+                plan_fp = _fingerprint(plan_path)
         while True:
             before_mtime = plan_path.stat().st_mtime_ns if plan_path.is_file() else None
             await turn(msg)
@@ -646,7 +820,8 @@ async def run_planner(
         return PlanResult(
             project_plan=project_plan,
             plan_path=plan_path,
-            usage=triage_usage.plus(usage),
+            usage=triage_usage.plus(usage).plus(order_usage),
+            order_usage=order_usage,
             rounds=rounds,
             session_init=session_init,
             route=route,
@@ -682,18 +857,21 @@ async def run_planner(
             plan_path = qdir / "plan.json"
             plan_fp = _fingerprint(plan_path)
             await plan_turn(
-                QUICK_PROMPT.format(repo=repo, stage_dir=qdir, description=description.strip()),
+                with_digest(
+                    QUICK_PROMPT.format(repo=repo, stage_dir=qdir, description=description.strip())
+                ),
                 plan_path,
+                order=True,
             )
             while True:
                 a = await answer()
                 if a != APPROVE_QUICK:
-                    await plan_turn(a, plan_path)
+                    await plan_turn(a, plan_path, order=True)
                     continue
                 try:
                     load_plan(plan_path)
                 except (PlanError, ValueError, OSError):
-                    await plan_turn(WRITE_PLAN_FIRST, plan_path)
+                    await plan_turn(WRITE_PLAN_FIRST, plan_path, order=True)
                     continue
                 return result(plan_path, "quick", triage)
 
@@ -703,8 +881,12 @@ async def run_planner(
         if stage == 1 and not staging_only:
             start_fp = _fingerprint(project_plan)
             draft_source: str | None = None
-            msg = PROJECT_PROMPT.format(
-                repo=repo, project_plan=project_plan, description=description.strip()
+            msg = (
+                description.strip()
+                if continuing
+                else PROJECT_PROMPT.format(
+                    repo=repo, project_plan=project_plan, description=description.strip()
+                )
             )
             while True:
                 await turn(msg)
@@ -726,10 +908,13 @@ async def run_planner(
                     if text != draft_source:
                         plan_fp = _fingerprint(plan_path)
                         if not await plan_turn(
-                            DRAFT_STAGE_PROMPT.format(
-                                project_plan=project_plan, stage=stage, stage_dir=stage_dir
+                            with_digest(
+                                DRAFT_STAGE_PROMPT.format(
+                                    project_plan=project_plan, stage=stage, stage_dir=stage_dir
+                                )
                             ),
                             plan_path,
+                            order=True,
                         ):
                             raise PlannerError(f"planner did not write work orders to {plan_path}")
                         draft_source = text
@@ -742,13 +927,17 @@ async def run_planner(
             )
 
         plan_fp = _fingerprint(plan_path)
-        msg = STAGE_PROMPT.format(project_plan=project_plan, stage=stage, stage_dir=stage_dir)
-        if not await plan_turn(msg, plan_path):
+        msg = with_digest(
+            STAGE_PROMPT.format(project_plan=project_plan, stage=stage, stage_dir=stage_dir)
+        )
+        if not await plan_turn(msg, plan_path, order=True):
             msg = f"Write plan.json and plan.md to {stage_dir} now. Invoke plan-stage; do not ask."
-            while not await plan_turn(msg, plan_path):
+            while not await plan_turn(msg, plan_path, order=True):
                 msg = await answer()
         return result(plan_path, "project", triage)
     finally:
         if triage_session is not None:
             await triage_session.close()
+        if order_sess is not None:
+            await order_sess.close()
         await session.close()

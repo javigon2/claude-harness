@@ -42,6 +42,21 @@ class StubOpus:
         self.messages: list[str] = []
         self.state = "asking"
         self.refuse: str | None = None
+        self.aborted = 0
+        self.detached = 0
+
+    def abort(self):
+        self.aborted += 1
+        self.state = "interrupted"
+
+    def detach(self):
+        self.detached += 1
+
+    def attach(self, session_id):
+        self.detached = 0
+
+    def release(self):
+        self.state = "interrupted"
 
     def start(self, text, plan):
         if self.refuse:
@@ -116,11 +131,7 @@ def test_new_message_to_haiku(env):
     env.waiting_chat()
     view = env.orch.view()
     assert view.holder == "haiku" and view.holder_id == chat.chat_id
-    assert [(e.role, e.who) for e in view.transcript] == [
-        ("user", "You"),
-        ("orchestrator", "Orchestrator"),
-        ("agent", "haiku"),
-    ]
+    assert [(e.role, e.who) for e in view.transcript] == [("user", "You"), ("agent", "haiku")]
 
 
 def test_new_message_to_opus_quick(env):
@@ -152,7 +163,7 @@ def test_default_orchestrator_uses_lightweight_router(tmp_path):
 def test_follow_up_forwarded_to_holder(env):
     env.say("do it", route("sonnet"))
     env.waiting_chat()
-    env.say("and more", route("haiku", reason="small"))
+    env.say("and more", route("sonnet", reason="same"))
     p = env.turns()[1].payload
     assert p["action"] == "forward" and p["to"] == "sonnet"
     assert p["text"] == "Passed to sonnet."
@@ -162,13 +173,43 @@ def test_follow_up_forwarded_to_holder(env):
     assert len(env.chats.views()) == 1 and chat.tier == "sonnet"
 
 
+def test_easier_follow_up_switches_down_and_says_so(env):
+    env.say("do it", route("sonnet"))
+    env.waiting_chat()
+    sonnet_id = env.chats.views()[0].chat_id
+    env.say("what is 2+2", route("haiku", reason="a quick question"))
+    p = env.turns()[1].payload
+    assert p["action"] == "switch" and p["to"] == "haiku"
+    assert p["text"] == "Switched down to haiku (medium effort): a quick question"
+    by_id = {v.chat_id: v for v in env.chats.views()}
+    assert by_id[sonnet_id].state == "closed"
+    (new,) = [v for v in by_id.values() if v.chat_id != sonnet_id]
+    assert new.tier == "haiku" and env.orch.view().holder_id == new.chat_id
+    first = new.transcript[0].text
+    assert first.startswith("You are taking over this work from sonnet")
+    assert first.endswith("The user now says:\nwhat is 2+2")
+    live = lambda: {v.chat_id: v.state for v in env.chats.views()}.get(new.chat_id)  # noqa: E731
+    wait_for(lambda: live() == "waiting")
+    lines = [e.text for e in env.orch.view().transcript if e.role == "orchestrator"]
+    assert lines == [
+        "Switched down to haiku (medium effort): a quick question"
+    ]  # the first hand-off is quiet
+    env.say("now the hard part", route("sonnet", reason="real coding"))
+    assert env.turns()[2].payload["action"] == "escalate"
+    lines = [e.text for e in env.orch.view().transcript if e.role == "orchestrator"]
+    assert lines[-1] == "Moved up to sonnet (medium effort): real coding"
+
+
 def test_escalate_sonnet_to_opus(env):
     env.say("do it", route("sonnet"))
     env.waiting_chat()
     sonnet_id = env.chats.views()[0].chat_id
     env.say("too hard", route("opus", plan="project", reason="beyond"))
     p = env.turns()[1].payload
-    assert p["action"] == "escalate" and p["text"] == "Moved up to opus (project plan): beyond"
+    assert (
+        p["action"] == "escalate"
+        and p["text"] == "Moved up to opus (project plan, medium effort): beyond"
+    )
     (text, plan) = env.opus.started[0]
     assert text.startswith("You are taking over this work from sonnet in the harness office.")
     assert "sonnet: Done (sonnet demo)" in text
@@ -281,10 +322,100 @@ def test_refused_handoffs(env):
     env.say("x", route("opus"))
     assert env.orch.view().error == "could not hand to opus: no room"
     env.opus.refuse = None
-    env.chats.start("haiku", "already")
-    env.say("y", route("haiku"))
-    assert env.orch.view().error == "could not hand to haiku: a haiku chat is already open"
     assert env.failures()[-1].payload["cost_usd"] == 0.02
+    other = env.chats.start("haiku", "already")
+    env.say("y", route("haiku"))  # another haiku agent is open: this request gets its own
+    view = env.orch.view()
+    assert view.error is None and view.holder == "haiku" and view.holder_id != other
+
+
+def test_new_request_detaches_a_working_chat_and_reopen_rejoins_it(tmp_path):
+    init_repo(tmp_path)
+    gate = threading.Event()
+
+    class Slow(FakePlannerSession):
+        async def send(self, text):
+            await asyncio.to_thread(gate.wait, 5)
+            return await super().send(text)
+
+    chats = ChatManager(tmp_path, session_factory=lambda r, t, p: Slow([PlannerTurn(text="done")]))
+    e = Env(tmp_path, chats)
+    try:
+        e.say("long job", route("haiku"))
+        old_thread = e.orch.view().thread_id
+        (old,) = chats.views()
+        assert old.state == "working" and not old.detached
+        e.orch.new_thread()
+        (view,) = chats.views()
+        assert view.state == "working" and view.detached  # still works, not in the room
+        assert e.orch.view().holder is None
+        e.say("next job", route("haiku"))  # the busy haiku agent is not reused
+        new = next(v for v in chats.views() if v.chat_id != old.chat_id)
+        assert e.orch.view().holder_id == new.chat_id and not new.detached
+        e.orch.open_thread(old_thread)
+        by_id = {v.chat_id: v for v in chats.views()}
+        assert not by_id[old.chat_id].detached and by_id[new.chat_id].detached
+        assert e.orch.view().holder_id == old.chat_id
+    finally:
+        gate.set()
+        e.orch.close()
+        chats.close()
+
+
+def test_abort_stops_the_working_holder(tmp_path):
+    init_repo(tmp_path)
+    gate = threading.Event()
+
+    class Stuck(FakePlannerSession):
+        async def send(self, text):
+            await asyncio.to_thread(gate.wait, 5)
+            return await super().send(text)
+
+    chats = ChatManager(tmp_path, session_factory=lambda r, t, p: Stuck([PlannerTurn(text="late")]))
+    e = Env(tmp_path, chats)
+    try:
+        with pytest.raises(OrchestratorConflict, match="no agent is working"):
+            e.orch.abort()
+        e.say("hangs", route("sonnet"))
+        cid = e.orch.view().holder_id
+        e.orch.abort()
+        assert e.orch.view().holder is None
+        (view,) = chats.views()
+        assert view.chat_id == cid and view.state == "closed"
+        gate.set()
+        time.sleep(0.1)
+        (view,) = chats.views()
+        assert [t.role for t in view.transcript] == ["user"]  # the late reply is dropped
+        e.opus.state = "busy"
+        e.say("plan it", route("opus"))
+        e.orch.abort()
+        assert e.opus.aborted == 1 and e.orch.view().holder is None
+    finally:
+        gate.set()
+        e.orch.close()
+        chats.close()
+
+
+def test_abort_cancels_a_stuck_routing_turn(env):
+    gate = threading.Event()
+
+    class Stuck(FakePlannerSession):
+        async def send(self, text):
+            await asyncio.to_thread(gate.wait, 5)
+            return await super().send(text)
+
+    env.factory = lambda repo, progress: Stuck([route("haiku")])
+    env.orch._factory = env.factory
+    env.orch.message("route me")
+    assert env.orch.view().state == "routing"
+    env.orch.abort()
+    view = env.orch.view()
+    assert view.state == "failed" and view.error == "aborted by the user"
+    gate.set()
+    time.sleep(0.2)
+    assert env.chats.views() == []  # the cancelled turn started nothing
+    env.say("again", route("haiku"))
+    assert env.orch.view().state == "idle" and env.orch.view().holder == "haiku"
 
 
 def test_close_while_routing(tmp_path):

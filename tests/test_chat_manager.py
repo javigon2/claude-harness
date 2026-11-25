@@ -86,8 +86,6 @@ def test_lifecycle(tmp_path):
         mgr.message(cid, "again")
         wait_for(lambda: len(view(mgr, cid).commits) == 2 and view(mgr, cid).state == "waiting")
         assert view(mgr, cid).cost_usd == pytest.approx(0.02)
-        with pytest.raises(ChatConflict, match="a haiku chat is already open"):
-            mgr.start("haiku", "x")
         mgr.close_chat(cid)
         wait_for(lambda: sessions[0].closed)
         assert view(mgr, cid).state == "closed"

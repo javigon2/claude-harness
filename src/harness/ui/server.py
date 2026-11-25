@@ -23,7 +23,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import ValidationError
 
@@ -31,12 +31,21 @@ from harness.events import EVENTS_FILE
 from harness.planner import PROJECT_PLAN_FILE
 from harness.report import report_data, report_text, status_text
 from harness.state import STATE_FILE, StateError, load_state, run_dir
+from harness.ui.assets import read_asset, report_bundle
 from harness.ui.chat import CHAT_TIERS, ChatConflict
 from harness.ui.git_routes import GIT_POST_ROUTES, BadGitBody, check_git_body, git_get, git_post
 from harness.ui.gitops import GitOpError, init_preview, init_project, pull_into_origin
+from harness.ui.history import (
+    MAX_LABEL_CHARS,
+    Window,
+    clear_history,
+    default_history_path,
+    load_history,
+    window_of,
+)
 from harness.ui.host import NO_PROJECT, Host, HostConflict
 from harness.ui.markdown import parse_markdown
-from harness.ui.metrics import build_dashboard, build_overview
+from harness.ui.metrics import build_dashboard, build_overview, run_rows
 from harness.ui.office import (
     MAX_TEXT_CHARS,
     Office,
@@ -52,6 +61,7 @@ from harness.ui.repofile import read_repo_file
 from harness.ui.requests import list_requests, request_thread, request_title_of_run, run_titles
 from harness.ui.runs import RunOptions, list_plans, unstaged_stages
 from harness.ui.testrun import TestRunConflict, runner_for
+from harness.ui.timing import build_thread_timing
 from harness.ui.uploads import (
     IMAGE_TYPES,
     MAX_IMAGE_BYTES,
@@ -78,11 +88,11 @@ _VIEW_ERRORS = (FileNotFoundError, StateError, OSError, ValueError)
 _TOKEN_META = '<meta name="harness-token" content="">'
 _MODE_META = '<meta name="harness-mode" content="read-only">'
 
-POST_ROUTES = ("start", "message", "implement", "next-stage", "stage")
-CHAT_ROUTES = ("start", "message", "close")
+POST_ROUTES = ("start", "message", "implement", "next-stage", "stage", "abort")
+CHAT_ROUTES = ("start", "message", "close", "abort")
 RUN_ROUTES = ("resume", "stop", "launch", "options")
 MAX_PLAN_PATH_CHARS = 500
-ORCH_ROUTES = ("message", "new", "explain")
+ORCH_ROUTES = ("message", "new", "explain", "open", "abort")
 PROJECT_ROUTES = ("browse", "open", "init-preview", "init", "pull-origin")
 MAX_PATH_CHARS = 4096
 ROUTE_CHOICES = ("auto", "quick", "project")
@@ -108,6 +118,13 @@ def _favicon_svg() -> str:
 
 
 FAVICON_SVG = _favicon_svg()
+
+
+def _attachment(name: str) -> str:
+    """Content-Disposition value for a download; quotes, backslashes and control characters
+    are dropped from the name and the UTF-8 form rides along."""
+    plain = "".join(c for c in name if c not in '"\\' and c.isprintable() and c.isascii())
+    return f"attachment; filename=\"{plain or 'download'}\"; filename*=UTF-8''{quote(name)}"
 
 
 def render_page(token: str, mode: str) -> bytes:
@@ -136,7 +153,7 @@ def _check_body(route: str, body: object) -> dict:
     """The body of a POST to /api/planner/<route> or /api/run/<route>, or _BadBody. Exactly
     the allowed keys: start {description}, {description, route} or {from_draft: true};
     message {text}; stage {stage} (an int of at least 1); launch {plan_path}; options
-    {review, max_parallel, max_cost, fake}; implement, next-stage, resume and stop {}.
+    {review, max_parallel, max_cost, fake}; implement, next-stage, abort, resume and stop {}.
     start with a description and message also accept an optional `images`."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
@@ -197,7 +214,7 @@ def _id_field(body: dict, key: str) -> str:
 def _check_chat_body(route: str, body: object) -> dict:
     """The body of a POST to /api/chat/<route>, or _BadBody. Exactly the allowed keys:
     start {tier, text} or {tier, text, run_id, task_id}; message {chat_id, text};
-    close {chat_id}. start and message also accept an optional `images`."""
+    close and abort {chat_id}. start and message also accept an optional `images`."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
@@ -217,7 +234,7 @@ def _check_chat_body(route: str, body: object) -> dict:
             raise _BadBody("send exactly: chat_id, text")
         _id_field(body, "chat_id")
         _text_field(body, "text")
-    elif route == "close":
+    elif route in ("close", "abort"):
         if keys != {"chat_id"}:
             raise _BadBody("send exactly: chat_id")
         _id_field(body, "chat_id")
@@ -226,8 +243,8 @@ def _check_chat_body(route: str, body: object) -> dict:
 
 def _check_orch_body(route: str, body: object) -> dict:
     """The body of a POST to /api/orchestrator/<route>, or _BadBody. Exactly the allowed
-    keys: message {text} with an optional `images`; new {}; explain {who} ("orchestrator" or
-    "opus")."""
+    keys: message {text} with an optional `images`; new {} and abort {}; open {thread_id};
+    explain {who} ("orchestrator" or "opus")."""
     if not isinstance(body, dict):
         raise _BadBody("body must be a JSON object")
     keys = set(body)
@@ -236,6 +253,10 @@ def _check_orch_body(route: str, body: object) -> dict:
         if keys != {"text"}:
             raise _BadBody("send exactly: text")
         _text_field(body, "text")
+    elif route == "open":
+        if keys != {"thread_id"}:
+            raise _BadBody("send exactly: thread_id")
+        _id_field(body, "thread_id")
     elif route == "explain":
         if keys != {"who"}:
             raise _BadBody("send exactly: who")
@@ -243,6 +264,19 @@ def _check_orch_body(route: str, body: object) -> dict:
             raise _BadBody("who must be orchestrator or opus")
     elif keys:
         raise _BadBody("this endpoint takes no fields")
+    return body
+
+
+def _check_history_body(body: object) -> dict:
+    """The body of POST /api/history/clear: {} or {label} (a string of at most
+    MAX_LABEL_CHARS characters)."""
+    if not isinstance(body, dict):
+        raise _BadBody("body must be a JSON object")
+    if set(body) - {"label"}:
+        raise _BadBody("send nothing, or exactly: label")
+    label = body.get("label")
+    if label is not None and (not isinstance(label, str) or len(label) > MAX_LABEL_CHARS):
+        raise _BadBody(f"label must be a string of at most {MAX_LABEL_CHARS} characters")
     return body
 
 
@@ -315,6 +349,7 @@ def make_handler(
     office: Office | None = None,
     token: str | None = None,
     host: Host | None = None,
+    history_path: Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """A request-handler class bound to `repo`. GET routes `/`, `/api/runs`,
     `/api/run/<run_id>`, `/api/stream/<run_id>`, `/api/office`, `/api/plan`, `/api/plans`,
@@ -323,8 +358,17 @@ def make_handler(
     `/api/chat/{start,message,close}`, POST `/api/run/{resume,stop,launch,options}` and POST
     `/api/orchestrator/{message,new}` and `/api/upload` are served (GET `/api/upload/<id>`
     always; `token` guards the POSTs; one is made if not
-    given) and every other method still answers 405. Request logging is silenced."""
+    given) and every other method still answers 405. Request logging is silenced.
+    `history_path` is the Dashboard history file (default: next to the Host's recent
+    projects, else harness.ui.history.default_history_path())."""
     fixed_repo, fixed_office = repo, office
+    if history_path is None:
+        history_path = (
+            host.recent_path.parent / "dashboard-history.json"
+            if host is not None
+            else default_history_path()
+        )
+    history_file = Path(history_path)
     interactive = office is not None or host is not None
     secret = (token or secrets.token_urlsafe(32)) if interactive else ""
     mode = "interactive" if interactive else "read-only"
@@ -512,6 +556,8 @@ def make_handler(
                 kind, route, known = "upload", "", True
             elif path == "/api/tests/run":
                 kind, route, known = "tests", "run", True
+            elif path == "/api/history/clear":
+                kind, route, known = "history", "clear", True
             elif path.startswith("/api/git/"):
                 kind, route = "git", path[len("/api/git/") :]
                 known = route in GIT_POST_ROUTES
@@ -559,6 +605,8 @@ def make_handler(
                     body = _check_project_body(route, parsed)
                 elif kind == "git":
                     body = check_git_body(route, parsed)
+                elif kind == "history":
+                    body = _check_history_body(parsed)
                 else:
                     body = _check_body(route, parsed)
             except (ValueError, UnicodeDecodeError) as err:
@@ -568,6 +616,17 @@ def make_handler(
             if kind in ("project", "server"):
                 assert host is not None
                 self._project_post(host, route, body)
+                return
+            if kind == "history":
+                period = clear_history(history_file, body.get("label"))
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "period": period.model_dump(mode="json"),
+                        "history": load_history(history_file).model_dump(mode="json"),
+                    },
+                )
                 return
             if kind == "tests":
                 if self._no_project:
@@ -598,10 +657,11 @@ def make_handler(
                 except ValueError as err:
                     self._json(400, {"error": str(err)})
                     return
+            started_chat: str | None = None
             try:
                 if kind == "chat":
                     if route == "start":
-                        office.chats.start(
+                        started_chat = office.chats.start(
                             body["tier"],
                             body["text"],
                             run_id=body.get("run_id"),
@@ -610,6 +670,8 @@ def make_handler(
                         )
                     elif route == "message":
                         office.chats.message(body["chat_id"], body["text"], images=images)
+                    elif route == "abort":
+                        office.chats.abort(body["chat_id"])
                     else:
                         office.chats.close_chat(body["chat_id"])
                 elif kind == "run":
@@ -627,6 +689,10 @@ def make_handler(
                         return
                     if route == "message":
                         office.orchestrator.message(body["text"], images=images)
+                    elif route == "open":
+                        office.orchestrator.open_thread(body["thread_id"])
+                    elif route == "abort":
+                        office.orchestrator.abort()
                     else:
                         office.orchestrator.new_thread()
                 elif route == "start":
@@ -640,6 +706,8 @@ def make_handler(
                     office.message(body["text"], images=images)
                 elif route == "implement":
                     office.implement()
+                elif route == "abort":
+                    office.abort()
                 elif route == "stage":
                     office.plan_stage(body["stage"])
                 else:
@@ -647,7 +715,10 @@ def make_handler(
             except (OfficeConflict, ChatConflict, OrchestratorConflict) as err:
                 self._json(409, {"error": str(err)})
                 return
-            self._json(200, {"ok": True, "office": office.view().model_dump(mode="json")})
+            reply: dict[str, object] = {"ok": True, "office": office.view().model_dump(mode="json")}
+            if started_chat is not None:
+                reply["chat_id"] = started_chat
+            self._json(200, reply)
 
         def _git_busy(self) -> str | None:
             """Why git writes are refused now, or None: the Host's busy reason, else a run
@@ -773,6 +844,34 @@ def make_handler(
                 else:
                     self._json(200, doc, extra={"X-Content-Type-Options": "nosniff"})
                 return
+            if path == "/api/asset":
+                query = parse_qs(urlsplit(self.path).query)
+                asset = read_asset(repo, query.get("path", [""])[0])
+                if asset is None:
+                    self._json(404, {"error": "unknown file"})
+                    return
+                data, ctype, name = asset
+                extra = {"X-Content-Type-Options": "nosniff"}
+                if ctype == "image/svg+xml":
+                    extra["Content-Security-Policy"] = "sandbox"
+                if query.get("download") == ["1"]:
+                    extra["Content-Disposition"] = _attachment(name)
+                self._send(200, data, ctype, extra)
+                return
+            if path == "/api/report-bundle":
+                bundle = report_bundle(
+                    repo, parse_qs(urlsplit(self.path).query).get("dir", [""])[0]
+                )
+                if bundle is None:
+                    self._json(404, {"error": "unknown folder"})
+                    return
+                data, name = bundle
+                extra = {
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": _attachment(name),
+                }
+                self._send(200, data, "application/zip", extra)
+                return
             if path.startswith("/api/upload/"):
                 upload_id = unquote(path[len("/api/upload/") :])
                 if parse_qs(urlsplit(self.path).query).get("view") == ["doc"]:
@@ -803,11 +902,24 @@ def make_handler(
             if path.startswith("/api/report/"):
                 self._report(unquote(path[len("/api/report/") :]))
                 return
-            if path == "/api/overview":
-                self._overview()
+            if path == "/api/history":
+                self._json(200, load_history(history_file).model_dump(mode="json"))
                 return
-            if path.startswith("/api/dashboard/"):
-                self._dashboard(unquote(path[len("/api/dashboard/") :]))
+            if path in ("/api/overview", "/api/dashboard-runs") or path.startswith(
+                "/api/dashboard/"
+            ):
+                period = parse_qs(urlsplit(self.path).query).get("period", ["current"])[0]
+                try:
+                    window = window_of(load_history(history_file), period)
+                except KeyError:
+                    self._json(404, {"error": "unknown period"})
+                    return
+                if path == "/api/overview":
+                    self._overview(window)
+                elif path == "/api/dashboard-runs":
+                    self._dashboard_runs(window)
+                else:
+                    self._dashboard(unquote(path[len("/api/dashboard/") :]), window)
                 return
             if path == "/api/runs":
                 try:
@@ -825,6 +937,15 @@ def make_handler(
                         "requests": [r.model_dump(mode="json") for r in requests],
                     },
                 )
+                return
+            if path.startswith("/api/orchestrator/timing/"):
+                timing = build_thread_timing(
+                    repo, unquote(path[len("/api/orchestrator/timing/") :])
+                )
+                if timing is None:
+                    self._json(404, {"error": "unknown request"})
+                    return
+                self._json(200, timing.model_dump(mode="json"))
                 return
             if path.startswith("/api/orchestrator/thread/"):
                 thread = request_thread(repo, unquote(path[len("/api/orchestrator/thread/") :]))
@@ -916,21 +1037,32 @@ def make_handler(
                 },
             )
 
-        def _overview(self) -> None:
+        def _overview(self, window: Window) -> None:
             """The cost and time of every remembered project, plus the open one."""
             recent = load_recent(host.recent_path) if host is not None else []
             repos = [self._repo, *(Path(p) for p in recent)]
             try:
-                body = build_overview(repos).model_dump_json().encode()
+                body = build_overview(repos, window).model_dump_json().encode()
             except (StateError, OSError, ValueError) as err:
                 self._json(500, {"error": str(err)})
                 return
             self._send(200, body)
 
-        def _dashboard(self, run_id: str) -> None:
+        def _dashboard_runs(self, window: Window) -> None:
+            """The runs of the period with every metric, for the Dashboard's Runs table."""
+            try:
+                runs = list_runs(self._repo)
+                titles = run_titles(self._repo, runs, list_requests(self._repo))
+                rows = run_rows(self._repo, window, titles)
+            except (StateError, OSError, ValueError) as err:
+                self._json(500, {"error": str(err)})
+                return
+            self._json(200, {"runs": [r.model_dump(mode="json") for r in rows]})
+
+        def _dashboard(self, run_id: str, window: Window) -> None:
             """The cost, time and latency numbers of a run next to the average of the others."""
             try:
-                body = build_dashboard(self._repo, run_id).model_dump_json().encode()
+                body = build_dashboard(self._repo, run_id, window).model_dump_json().encode()
             except FileNotFoundError:
                 self._json(404, {"error": "unknown run"})
                 return
@@ -1007,10 +1139,12 @@ def make_server(
     office: Office | None = None,
     token: str | None = None,
     host: Host | None = None,
+    history_path: Path | None = None,
 ) -> ThreadingHTTPServer:
     """A server bound to ("127.0.0.1", port); port 0 picks a free port. An OSError from the
     bind propagates. With an `office` the POST endpoints are on (see make_handler). The caller
     runs serve_forever() and later shutdown() + server_close()."""
     return _Server(
-        ("127.0.0.1", port), make_handler(repo, poll_interval, heartbeat_s, office, token, host)
+        ("127.0.0.1", port),
+        make_handler(repo, poll_interval, heartbeat_s, office, token, host, history_path),
     )

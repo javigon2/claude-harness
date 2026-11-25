@@ -120,6 +120,11 @@ class ObservedSession:
     def cost_usd(self) -> float:
         return self._cost_base() + self._own_cost
 
+    @property
+    def own_cost(self) -> float:
+        """What this session alone has cost, without `cost_base()`."""
+        return self._own_cost
+
     def _approved(self) -> bool:
         try:
             return is_approved(self._plan.read_text(encoding="utf-8"))
@@ -148,16 +153,19 @@ class ObservedSession:
         self._own_cost = turn.usage.cost_usd
         self.reply_text = turn.text
         self.ready = self.ready and self._phase() == "project" and not self._approved()
-        self._log.emit(
-            "planner_reply",
-            {
-                "text": turn.text,
-                "plan_changed": changed,
-                "cost_usd": self.cost_usd,
-                "duration_ms": duration_ms,
-                "phase": self._phase(),
-            },
-        )
+        reply: dict[str, Any] = {
+            "text": turn.text,
+            "plan_changed": changed,
+            "cost_usd": self.cost_usd,
+            "duration_ms": duration_ms,
+            "phase": self._phase(),
+        }
+        for key in ("connect_ms", "api_ms"):
+            if getattr(turn, key) is not None:
+                reply[key] = getattr(turn, key)
+        if turn.session_id:
+            reply["session_id"] = turn.session_id
+        self._log.emit("planner_reply", reply)
         if changed and self._phase() == "project" and not self._approved():
             self.ready = True
             self._log.emit(

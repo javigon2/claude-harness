@@ -35,9 +35,27 @@ def test_parse_routing_cases() -> None:
     assert Routing(to="haiku").reason == ""
 
 
+def test_null_plan_is_quick() -> None:
+    assert parse_routing(block({"to": "haiku", "plan": None})) == Routing(to="haiku")
+    assert parse_routing(block({"to": "opus", "plan": "big"})) is None
+
+
+def test_acknowledgements_and_tweaks_stay_with_the_holder() -> None:
+    prompt = ORCHESTRATOR_PROMPT.format(
+        repo="/r", holder="sonnet", effort="medium", role="builder", tail="(none)", text="ok"
+    )
+    assert "Thanks, ok, yes and tweaks to what the holder just did always stay" in prompt
+    assert "an unrelated quick question" in prompt
+
+
 def test_orchestrator_prompt_shape() -> None:
     prompt = ORCHESTRATOR_PROMPT.format(
-        repo="/r", holder="nobody (new work)", tail="(none)", text="fix x"
+        repo="/r",
+        holder="nobody (new work)",
+        effort="none (new work)",
+        role="none",
+        tail="(none)",
+        text="fix x",
     )
     assert prompt.startswith("Route this message in the harness office;")
     assert '{"to": "haiku" | "sonnet" | "opus"' in prompt
@@ -60,6 +78,23 @@ def test_office_router_is_one_tool_free_sonnet_turn(tmp_path: Path) -> None:
     assert options.setting_sources == []
 
 
+def test_office_router_runs_at_low_effort_without_thinking(tmp_path: Path) -> None:
+    options = SdkRoutingSession(tmp_path).options()
+    assert options.effort == "low"
+    assert options.thinking == {"type": "disabled"}
+
+
+def test_office_router_effort_reaches_cli_flags(tmp_path: Path) -> None:
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    options = SdkRoutingSession(tmp_path).options()
+    transport = SubprocessCLITransport(prompt="x", options=options)
+    transport._cli_path = "claude"  # only builds argv; nothing is run
+    cmd = transport._build_command()
+    assert cmd[cmd.index("--effort") + 1] == "low"
+    assert cmd[cmd.index("--thinking") + 1] == "disabled"
+
+
 async def test_demo_orchestrator_routes_by_first_word(tmp_path: Path) -> None:
     cases = [
         ("haiku x", "haiku", "project"),
@@ -70,7 +105,12 @@ async def test_demo_orchestrator_routes_by_first_word(tmp_path: Path) -> None:
         recorder = Recorder()
         s = DemoPlannerSession(tmp_path, progress=recorder, delay_s=0)
         prompt = ORCHESTRATOR_PROMPT.format(
-            repo=tmp_path, holder="haiku", tail="You: Message:\n\nopus", text=message
+            repo=tmp_path,
+            holder="haiku",
+            effort="medium",
+            role="builder",
+            tail="You: Message:\n\nopus",
+            text=message,
         )
         turn = await s.send(prompt)
         assert parse_routing(turn.text) == Routing(to=to, plan=plan, reason=f"demo routing: {to}")

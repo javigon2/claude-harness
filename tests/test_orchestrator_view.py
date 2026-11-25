@@ -4,7 +4,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 from harness.models import Event
-from harness.planner_log import PLANNER_EVENTS
+from harness.planner_log import PLANNER_EVENTS, PlannerLog
 from harness.ui.chat import CHAT_EVENTS
 from harness.ui.orchestrator import (
     OrchEntry,
@@ -115,8 +115,7 @@ def test_merged_order_and_holder(tmp_path):
     )
     v = orchestrator_view_from_log(tmp_path)
     assert [(e.who, e.text) for e in v.transcript] == [
-        ("You", "fix it"),
-        ("Orchestrator", "Sent to haiku: small"),
+        ("You", "fix it"),  # a hand-off to a chat agent has no line of its own
         ("haiku", "early reply"),
         ("haiku", "late reply"),
     ]
@@ -243,3 +242,18 @@ def test_routing_line():
     assert routing_line("escalate", "sonnet", "quick", "r") == "Moved up to sonnet: r"
     assert routing_line("forward", "opus", "project", "x") == "Passed to opus."
     assert routing_line("forward", "sonnet", "quick", "x") == "Passed to sonnet."
+
+
+def test_opus_hand_off_keeps_its_line_chat_hand_offs_do_not(tmp_path):
+    log = PlannerLog(tmp_path, TH)
+    log.emit("orchestrator_started", {"pid": 1})
+    for to, kind in (("sonnet", "chat"), ("opus", "opus")):
+        log.emit("orchestrator_user", {"text": "go"})
+        log.emit(
+            "orchestrator_turn",
+            {"action": "start", "to": to, "target_kind": kind, "target_id": f"{to}-1",
+             "text": f"Sent to {to}: x", "cost_usd": 0.0},
+        )  # fmt: skip
+    log.emit("orchestrator_failed", {"reason": "could not hand to haiku: no", "cost_usd": 0.0})
+    texts = [e.text for e in orchestrator_view_from_log(tmp_path).transcript if e.role != "user"]
+    assert texts == ["Sent to opus: x", "could not hand to haiku: no"]

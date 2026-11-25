@@ -1,6 +1,8 @@
 """Command-line entry point: `harness <command>`."""
 
 import asyncio
+import dataclasses
+import json
 import os
 import secrets
 import signal
@@ -9,7 +11,9 @@ from typing import Annotated, NoReturn, cast
 
 import typer
 
-from harness.config import TIER_LADDER, Tier
+from harness.config import TIER_LADDER, Tier, planner_tier
+from harness.doctor import render as render_checks
+from harness.doctor import run_checks
 from harness.events import EVENTS_FILE
 from harness.events import follow as follow_lines
 from harness.models import Plan, WorkOrder
@@ -22,6 +26,8 @@ from harness.planner import (
     run_planner,
 )
 from harness.planner_log import ObservedSession, PlannerLog, new_session_id
+from harness.planning_render import render_markdown
+from harness.planning_report import build_reports
 from harness.report import money, report_text, status_text
 from harness.review import FakeReviewer, Reviewer, SdkReviewer, fake_review
 from harness.scheduler import Scheduler, SchedulerError
@@ -225,6 +231,24 @@ def report(repo: RepoOpt = Path("."), run_id: RunIdOpt = None) -> None:
     typer.echo(report_text(_load_run_or_exit(repo.resolve(), run_id)))
 
 
+@app.command("planning-report")
+def planning_report(
+    repo: RepoOpt = Path("."),
+    last: Annotated[int, typer.Option("--last", min=1, help="Newest N sessions.")] = 5,
+    session: Annotated[str | None, typer.Option("--session", help="One session id.")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON.")] = False,
+) -> None:
+    """Show planner time per phase and tool, model time vs user wait, and cost."""
+    reports = build_reports(repo.resolve(), last=last, session_id=session)
+    if not reports:
+        typer.echo("No planner sessions found.", err=True)
+        raise typer.Exit(1)
+    if as_json:
+        typer.echo(json.dumps([dataclasses.asdict(r) for r in reports], indent=2))
+    else:
+        typer.echo(render_markdown(reports))
+
+
 @app.command("ui")
 def ui_cmd(
     repo: RepoOpt = Path("."),
@@ -320,9 +344,23 @@ def validate(plan: Path) -> None:
         typer.echo(f"wave {i}: {', '.join(wave)}")
 
 
+@app.command()
+def doctor(repo: RepoOpt = Path(".")) -> None:
+    """Check the environment before a run; exit 1 if any check fails."""
+    checks = run_checks(repo.resolve())
+    typer.echo(render_checks(checks))
+    if not all(c.ok for c in checks):
+        raise typer.Exit(code=1)
+
+
 def _make_planner_session(repo: Path) -> PlannerSession:
     """SdkPlannerSession(repo). Tests monkeypatch harness.cli._make_planner_session."""
     return SdkPlannerSession(repo)
+
+
+def _make_order_session(repo: Path, tier: Tier) -> PlannerSession:
+    """SdkPlannerSession(repo, tier=tier): the cheaper session for work orders."""
+    return SdkPlannerSession(repo, tier=tier)
 
 
 def _ask(prompt: str) -> str | None:
@@ -383,9 +421,33 @@ def plan_cmd(
             "resumed_from_draft": False,
         },
     )
+    order_factory = None
+    if planner_tier("staging") != "opus":  # HARNESS_PLANNER_ALL_OPUS=1 keeps everything on Opus
+        orders: list[ObservedSession] = []
+
+        def order_factory(tier: Tier) -> ObservedSession:
+            earlier = list(orders)  # order sessions cost on top of Opus and each other
+            order = ObservedSession(
+                _make_order_session(repo_path, tier),
+                repo_path,
+                log,
+                lambda: "staging",
+                cost_base=lambda: session.cost_usd + sum(o.own_cost for o in earlier),
+            )
+            orders.append(order)
+            return order
+
     try:
         result = asyncio.run(
-            run_planner(description or "", repo_path, session, _ask, typer.echo, stage=stage)
+            run_planner(
+                description or "",
+                repo_path,
+                session,
+                _ask,
+                typer.echo,
+                stage=stage,
+                order_session_factory=order_factory,
+            )
         )
     except PlannerError as err:
         log.emit("planner_failed", {"reason": str(err), "cost_usd": session.cost_usd})

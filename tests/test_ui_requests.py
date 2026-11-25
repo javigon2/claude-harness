@@ -167,11 +167,7 @@ def test_a_past_thread_is_rebuilt_by_id_read_only(repo):
     past = orchestrator_view_from_log(repo, "orch-A")
     assert past.thread_id == "orch-A"
     assert (past.state, past.holder, past.error) == ("idle", None, None)
-    assert [(e.role, e.who) for e in past.transcript] == [
-        ("user", "You"),
-        ("orchestrator", "Orchestrator"),
-        ("agent", "haiku"),
-    ]
+    assert [(e.role, e.who) for e in past.transcript] == [("user", "You"), ("agent", "haiku")]
     assert past.cost_usd == pytest.approx(0.01)
     assert orchestrator_view_from_log(repo, "orch-nope").thread_id is None
 
@@ -221,8 +217,8 @@ def test_past_thread_route_works_read_only(site):
     code, body = get(site + "/api/orchestrator/thread/orch-A")
     assert code == 200
     assert body["thread_id"] == "orch-A"
-    assert [e["who"] for e in body["transcript"]] == ["You", "Orchestrator", "haiku"]
-    assert body["transcript"][2]["blocks"]  # rendered like the live thread
+    assert [e["who"] for e in body["transcript"]] == ["You", "haiku"]
+    assert body["transcript"][1]["blocks"]  # rendered like the live thread
     code, body = get(site + "/api/orchestrator/thread/planner-C")
     assert code == 200 and len(body["transcript"]) == 2
     assert get(site + "/api/orchestrator/thread/orch-nope")[0] == 404

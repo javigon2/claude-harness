@@ -22,7 +22,7 @@ function click(b) { b.on.click({stopPropagation: function () {}}); }
 """
 
 NAMES = (
-    "gitBranchActs", "gitReview", "gitApprove", "renderGitCompare", "showGitBranch",
+    "gitBranchActs", "gitReview", "gitApprove", "renderGitCompare",
 )  # fmt: skip
 
 
@@ -33,13 +33,6 @@ def _script(body: str) -> str:
 
 def _run(tmp_path, body: str):
     return json.loads(_run_node(tmp_path, _script(body))[-1])
-
-
-def test_chip_markup():
-    text = _text()
-    a = '<button id="btn-git" type="button" class="hidden">Git</button>\n'
-    b = '<span id="git-branch-chip" class="chip hidden" title="The checked-out branch"></span>'
-    assert a + "  " + b in text
 
 
 def test_work_acts(tmp_path):
@@ -107,20 +100,3 @@ console.log(JSON.stringify([
     assert r3[1][2] == "3 commits to approve · main has 2 newer"
 
 
-def test_show_branch(tmp_path):
-    body = """
-var out = [];
-[{branch: 'work/r1'}, {branch: null, detached: true}, null].forEach(function (st) {
-  showGitBranch(st);
-  var c = byId('git-branch-chip');
-  out.push([c.text, c.hidden]);
-});
-console.log(JSON.stringify(out));
-"""
-    assert _run(tmp_path, body) == [["on work/r1", False], ["detached HEAD", False], ["", True]]
-
-
-def test_wiring():
-    text = _text()
-    assert "loadGitBranchChip();" in _functions(text, "poll")
-    assert "if (!project) showGitBranch(null);" in _functions(text, "applyProject")

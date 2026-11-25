@@ -1,4 +1,7 @@
+import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -133,16 +136,62 @@ def test_auto_direct_hands_to_a_chat(repo, make):
     assert log_view.triage_reason == "small"
 
 
-def test_direct_handoff_refused(repo, make):
+def test_direct_handoff_while_a_haiku_chat_is_open_gets_a_new_agent(repo, make):
     office, _s, _l = make([], [triage("direct")])
-    office.chats.start("haiku", "x")
+    first = office.chats.start("haiku", "x")
     wait_for(lambda: office.view().chats[0].state == "waiting")
     office.start("note this", route="auto")
-    wait_for(state_is(office, "failed"))
-    reason = "could not hand to haiku: a haiku chat is already open"
-    assert office.view().error == reason
-    last = read_planner_events(repo)[-1]
-    assert last.type == "planner_failed" and last.payload["reason"] == reason
+    wait_for(state_is(office, "idle"))
+    view = office.view()
+    assert view.handoff_chat and view.handoff_chat != first
+    assert {c.chat_id for c in view.chats} >= {first, view.handoff_chat}
+
+
+class _Blocking(FakePlannerSession):
+    """A session whose first send hangs until `gate` is set (a stuck Opus)."""
+
+    def __init__(self, steps, gate):
+        super().__init__(steps)
+        self.gate = gate
+
+    async def send(self, text):
+        await asyncio.to_thread(self.gate.wait, 5)
+        return await super().send(text)
+
+
+def test_abort_a_stuck_opus_then_start_again(repo):
+    gate = threading.Event()
+    sessions = [_Blocking([PlannerTurn(text="late")], gate), FakePlannerSession([])]
+    office = Office(
+        repo,
+        fake=True,
+        fake_delay=0,
+        session_factory=lambda _r, _p: sessions.pop(0),
+        launcher=Launches(),
+        clock=lambda: NOW,
+    )
+    try:
+        with pytest.raises(OfficeConflict, match="opus is not working"):
+            office.abort()
+        office.start("plan a thing")
+        assert office.view().state == "busy"
+        office.detach()
+        assert office.view().detached is True
+        with pytest.raises(OfficeConflict, match="busy with an earlier request"):
+            office.start("another")
+        office.abort()
+        view = office.view()
+        assert view.state == "interrupted" and view.detached is False
+        failed = [e for e in read_planner_events(repo) if e.type == "planner_failed"]
+        assert [e.payload["reason"] for e in failed] == ["interrupted: aborted by the user"]
+        gate.set()
+        time.sleep(0.2)  # the stuck thread returns late: it must change nothing
+        assert office.view().state == "interrupted"
+        office.start("plan it again")  # a new session may start at once
+        assert office.view().state in ("busy", "asking", "failed")
+    finally:
+        gate.set()
+        office.close()
 
 
 def test_quick_route_to_run(repo, make):
