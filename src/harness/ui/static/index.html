@@ -675,6 +675,26 @@ button:active:not(:disabled), .btn:active { transform: translateY(1px); }
 textarea:focus, input:focus, select:focus { outline: 2px solid var(--sn-sky); outline-offset: 0; box-shadow: 0 0 0 4px rgba(82, 184, 255, 0.2); }
 /* numbers line up and do not jitter while they update */
 td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-total, .pie-label, #run-progress-text { font-variant-numeric: tabular-nums; }
+
+/* role figures: each role wears its own accessory over the agent silhouette (same 100x100 frame) */
+.desk[class*="fig-"] .worker::after { display: block; content: ""; position: absolute; left: 0; top: 0; width: 100px; height: 100px; border-radius: 0; background: #06263a; transform: scale(0.28); transform-origin: 0 0; animation: none; }
+.desk.fig-builder .worker::after { background: #f5b73b; clip-path: path(evenodd, 'M14 30A36 30 0 0 1 86 30L94 30L94 38L6 38L6 30Z M46 2h8v12h-8Z'); }
+.desk.fig-researcher .worker::after { clip-path: path(evenodd, 'M25 46a12 12 0 1 0 24 0a12 12 0 1 0 -24 0Z M30 46a7 7 0 1 0 14 0a7 7 0 1 0 -14 0Z M51 46a12 12 0 1 0 24 0a12 12 0 1 0 -24 0Z M56 46a7 7 0 1 0 14 0a7 7 0 1 0 -14 0Z M48 43h4v4h-4Z M78 99V86h6v13Z M86 99V77h6v22Z M94 99V68h6v31Z'); }
+.desk.fig-planner .worker::after { clip-path: path(evenodd, 'M66 58h30v40h-30Z M71 68h20v4h-20Z M71 77h20v4h-20Z M71 86h13v4h-13Z M74 53h14v8h-14Z'); }
+.desk.fig-orchestrator .worker::after { clip-path: path(evenodd, 'M8 44A42 42 0 0 1 92 44L86 44A36 36 0 0 0 14 44Z M2 38h14v22h-14Z M84 38h14v22h-14Z M86 58C83 74 72 80 58 80v-6C69 74 78 70 80 58Z'); }
+.desk.fig-reviewer .worker::after { clip-path: path(evenodd, 'M64 66a16 16 0 1 0 32 0a16 16 0 1 0 -32 0Z M70 66a10 10 0 1 0 20 0a10 10 0 1 0 -20 0Z M68 77l6 6l-16 16l-6 -6Z'); }
+.artifacts { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.artifact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.artifact-fig { position: relative; margin: 0; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; overflow: hidden; }
+.artifact-fig img { display: block; width: 100%; height: 110px; object-fit: contain; cursor: zoom-in; background: #fff; }
+.artifact-fig figcaption { font-size: 11px; padding: 3px 6px; color: #334155; overflow-wrap: anywhere; border-top: 1px solid #e2e8f0; }
+#orch-view .artifact-dl, #chat-view .artifact-dl, #past-view .artifact-dl { margin: 0 !important; border: 0; font-weight: 400; position: absolute; top: 4px; right: 4px; font-size: 12px; line-height: 1; padding: 4px 6px !important; border-radius: 4px; background: rgba(15, 23, 42, .75) !important; color: #fff !important; text-decoration: none; }
+#orch-view .artifact-dl:hover, #chat-view .artifact-dl:hover, #past-view .artifact-dl:hover { background: rgba(15, 23, 42, .95) !important; }
+.artifact-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#orch-view .artifact-actions button, #chat-view .artifact-actions button, #past-view .artifact-actions button { margin: 0 !important; font: inherit; font-size: 12px; font-weight: 400; line-height: 1.3; padding: 4px 8px !important; border-radius: 4px; border: 1px solid #94a3b8; background: #f8fafc; color: #0f172a; text-decoration: none; cursor: pointer; }
+.md img.md-img { max-width: 100%; height: auto; display: block; margin: 8px 0; border: 1px solid #e2e8f0; border-radius: 4px; cursor: zoom-in; background: #fff; }
+#orch-view .artifact-actions button.artifact-open, #chat-view .artifact-actions button.artifact-open, #past-view .artifact-actions button.artifact-open { border-color: var(--sn-btn, #1b6e94); color: var(--sn-btn, #1b6e94); font-weight: 600; }
+#img-view .img-view-bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -1024,7 +1044,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   </div>
 </section>
 <dialog id="doc-view"><div id="doc-head"><strong id="doc-title"></strong><button type="button" id="doc-mode" class="hidden">Source</button><button type="button" id="doc-wide">Full screen</button><button type="button" id="doc-close">Close</button></div><div id="doc-body"></div></dialog>
-<dialog id="img-view"><img id="img-view-img" alt="attached image"><form method="dialog"><button type="submit">Close</button></form></dialog>
+<dialog id="img-view"><img id="img-view-img" alt="attached image"><div class="img-view-bar"><button type="button" id="img-view-dl" class="hidden">Download</button><form method="dialog"><button type="submit">Close</button></form></div></dialog>
 <script>
 (function () {
   var picker = document.getElementById('run-picker');
@@ -1385,6 +1405,14 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   }
 
   // ---- the classroom: the Orchestrator at the teacher's desk, the rest in rows by tier
+  // agent roles: the title and the figure of every desk
+  function roleTitle(role) {
+    var titles = {orchestrator: 'Orchestrator', planner: 'Planner', builder: 'Builder', reviewer: 'Reviewer', researcher: 'Researcher'};
+    return titles[role] || titles.builder;
+  }
+  function figClass(role) {
+    return ' fig-' + (/^(orchestrator|planner|builder|reviewer|researcher)$/.test(String(role)) ? role : 'builder');
+  }
   function bossText(o) {
     var st = o.state;
     if (st === 'busy') return (o.progress && o.progress.length) ? o.progress[o.progress.length - 1] : 'thinking\u2026';
@@ -1421,7 +1449,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       bossNode.appendChild(el('div', 'mark'));
       bossNode.appendChild(el('div', 'worker'));
       bossNode.appendChild(el('div', 'desk-top'));
-      bossNode.appendChild(el('div', 'desk-label', 'opus · agent'));
+      bossNode.appendChild(el('div', 'desk-label', 'Planner · opus'));
       bossNode.setAttribute('role', 'button');
       bossNode.setAttribute('title', 'Talk to Opus');
       bossNode.tabIndex = 0;
@@ -1438,7 +1466,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       o = Object.assign({}, o, {state: 'idle'});
     }
     // Opus still busy with an earlier request: not this request's agent, shown dimmed
-    setClass(bossNode, 'desk desk-boss boss-' + (o.detached ? 'idle detached' : str(o.state)) + ' clickable');
+    setClass(bossNode, 'desk desk-boss fig-planner boss-' + (o.detached ? 'idle detached' : str(o.state)) + ' clickable');
     var text = o.detached ? 'busy: earlier request' : bossText(o);
     setClass(bossNode.children[0], 'bubble bubble-boss' + (text ? '' : ' hidden'));
     setText(bossNode.children[0], text);
@@ -1452,7 +1480,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       return p.length ? String(p[p.length - 1]) : 'routing\u2026';
     }
     if (v.state === 'failed') return 'failed';
-    return v.holder ? '\u2192 ' + v.holder : '';
+    if (!v.holder) return '';
+    return '\u2192 ' + roleTitle(v.holder_role || (v.holder === 'opus' ? 'planner' : 'builder')) + ' \u00b7 ' + v.holder;
   }
 
   function orchClick() {
@@ -1481,7 +1510,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       document.getElementById('teacher').appendChild(orchNode);
     }
     var v = office ? office.orchestrator : null;
-    setClass(orchNode, 'desk desk-orch orch-' + (v && v.state ? v.state : 'idle'));
+    setClass(orchNode, 'desk desk-orch fig-orchestrator orch-' + (v && v.state ? v.state : 'idle'));
     var text = orchText(v);
     setClass(orchNode.children[0], 'bubble bubble-orch' + (text ? '' : ' hidden'));
     setText(orchNode.children[0], text);
@@ -1558,11 +1587,12 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   function updateDesk(d, t) {
     var st = str(t.status);
     var settled = !!FINISHED[st] && (' ' + d.className + ' ').indexOf(' settled ') >= 0;
-    setClass(d, 'desk desk-' + st + (settled ? ' settled' : '') + (selectedTask === t.task_id ? ' selected' : ''));
+    var taskRole = st === 'verifying' ? 'reviewer' : 'builder';
+    setClass(d, 'desk desk-' + st + figClass(taskRole) + (settled ? ' settled' : '') + (selectedTask === t.task_id ? ' selected' : ''));
     var talking = st === 'running' || st === 'verifying' || st === 'paused';
     setClass(d.children[0], 'bubble bubble-' + st + (talking ? '' : ' hidden'));
     if (talking) setText(d.children[0], bubbleText(t));
-    setText(d.children[3], (t.tier ? t.tier : '-') + ' · ' + str(t.task_id));
+    setText(d.children[3], roleTitle(taskRole) + ' · ' + (t.tier ? t.tier : '-') + ' · ' + str(t.task_id));
     setMeter(d, st === 'pending' ? '' : deskMeterText(t.cost_usd, t.attempt));
     var box = document.getElementById('desks-' + rowOf(t));
     if (d.parentNode !== box) moveDesk(d, box);
@@ -1607,16 +1637,18 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   }
 
   function chatDeskLabel(tier, chat) {
-    // "haiku · low" for an open chat (its thinking effort), "haiku · new chat" for the free desk
-    if (!chat) return tier + ' · new chat';
-    return tier + ' · ' + (chat.effort ? String(chat.effort) : 'chat');
+    // "Researcher · sonnet · low" for an open chat (its role and thinking effort),
+    // "Builder · haiku · new chat" for the free desk
+    var who = roleTitle(chat ? chat.role : 'builder') + ' · ' + tier;
+    if (!chat) return who + ' · new chat';
+    return who + ' · ' + (chat.effort ? String(chat.effort) : 'chat');
   }
 
   function updateChatDesk(d, tier, chat) {
     var st = chat ? chat.state : 'free';
     setText(d.children[3], chatDeskLabel(tier, chat));
     var shown = chatTier === tier && (chat ? chatId === chat.chat_id : chatId === null);
-    setClass(d, 'desk desk-chat chat-' + st + (shown ? ' selected' : ''));
+    setClass(d, 'desk desk-chat' + figClass(chat ? chat.role : 'builder') + ' chat-' + st + (shown ? ' selected' : ''));
     var text = chatBubble(chat);
     setClass(d.children[0], 'bubble bubble-chat' + (text ? '' : ' hidden'));
     setText(d.children[0], text);
@@ -1646,7 +1678,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     if (interactive) {
       var keep = {};
       roomChats().forEach(function (c) {
-        if (c.tier !== 'sonnet' && c.tier !== 'haiku') return;
+        if (c.tier !== 'sonnet' && c.tier !== 'haiku' && !(c.tier === 'opus' && c.role === 'researcher')) return;
         keep[c.chat_id] = true;
         if (!chatDesks[c.chat_id]) chatDesks[c.chat_id] = chatDesk(c.tier, c.chat_id);
         updateChatDesk(chatDesks[c.chat_id], c.tier, c);
@@ -1811,8 +1843,97 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     box.appendChild(pre);
     return box;
   }
+
+  // ---- files an agent produced (reports, charts, data), served by /api/asset
+  function assetUrl(path, download) {
+    return '/api/asset?path=' + encodeURIComponent(path) + (download ? '&download=1' : '');
+  }
+  function baseName(path) { var p = String(path).split('/'); return p[p.length - 1]; }
+  function dirName(path) { var p = String(path).split('/'); p.pop(); return p.join('/'); }
+  function joinPath(dir, rel) {
+    // `rel` against the folder `dir`, both repo-relative; null when it leaves the repo
+    var out = dir ? dir.split('/') : [];
+    var parts = String(rel).split('/');
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === '' || parts[i] === '.') continue;
+      if (parts[i] === '..') { if (!out.length) return null; out.pop(); } else out.push(parts[i]);
+    }
+    return out.join('/');
+  }
+  var mdBase = null; // the folder of the Markdown file being rendered, for relative images
+  function reportDir(path) {
+    // the report's own folder: reports/<name>, whatever subfolder the file is in
+    var p = String(path).split('/');
+    return p.length >= 2 && p[0] === 'reports' ? p[0] + '/' + p[1] : dirName(path);
+  }
+  function saveButton(label, url) {
+    var b = el('button', null, label);
+    b.type = 'button';
+    b.addEventListener('click', function () { saveUrl(url); });
+    return b;
+  }
+  function artifactsNode(list) {
+    // the gallery under a reply: chart thumbnails (enlarge, download), then the report
+    // and data links, and one zip of the whole report folder
+    var items = Array.isArray(list) ? list : [];
+    if (!items.length) return null;
+    var box = el('div', 'artifacts');
+    var images = items.filter(function (a) { return a && a.kind === 'image'; });
+    if (images.length) {
+      var grid = el('div', 'artifact-grid');
+      images.forEach(function (a) {
+        var path = String(a.path);
+        var fig = el('figure', 'artifact-fig');
+        var img = el('img');
+        img.src = assetUrl(path);
+        img.alt = baseName(path);
+        img.loading = 'lazy';
+        img.addEventListener('click', function () { openImage(assetUrl(path), img, assetUrl(path, true)); });
+        fig.appendChild(img);
+        var dl = saveButton('\u2b07', assetUrl(path, true));
+        dl.className = 'artifact-dl';
+        dl.title = 'Download ' + baseName(path);
+        fig.appendChild(dl);
+        fig.appendChild(el('figcaption', null, baseName(path)));
+        grid.appendChild(fig);
+      });
+      box.appendChild(grid);
+    }
+    var actions = el('div', 'artifact-actions');
+    var dirs = {};
+    items.forEach(function (a) {
+      if (!a) return;
+      var path = String(a.path);
+      if (a.kind === 'report') {
+        var open = el('button', 'artifact-open', 'Open ' + baseName(path));
+        open.type = 'button';
+        open.addEventListener('click', function () { openFile(path); });
+        actions.appendChild(open);
+        actions.appendChild(saveButton('Download ' + baseName(path), assetUrl(path, true)));
+      } else if (a.kind === 'data') {
+        actions.appendChild(saveButton('Download ' + baseName(path), assetUrl(path, true)));
+      }
+      if (path.indexOf('reports/') === 0) dirs[reportDir(path)] = true;
+    });
+    Object.keys(dirs).forEach(function (d) {
+      actions.appendChild(saveButton('Download all (' + baseName(d) + '.zip)', '/api/report-bundle?dir=' + encodeURIComponent(d)));
+    });
+    if (actions.children.length) box.appendChild(actions);
+    return box;
+  }
+
   function renderBlock(b) {
     var type = b && b.type, n, i;
+    if (type === 'image') {
+      var src = str(b.src);
+      var path = /^[a-z][a-z0-9+.-]*:/i.test(src) || src.charAt(0) === '/' ? null : joinPath(mdBase || '', src);
+      if (path === null) return el('p', null, '[image: ' + (b.alt ? String(b.alt) : src) + ']');
+      n = el('img', 'md-img');
+      n.src = assetUrl(path);
+      n.alt = b.alt ? String(b.alt) : baseName(path);
+      n.addEventListener('click', function () { openImage(assetUrl(path), n, assetUrl(path, true)); });
+      return n;
+    }
     if (type === 'heading') {
       var lv = Math.min(6, Math.max(1, Number(b.level) || 1));
       n = el('h' + lv);
@@ -1876,7 +1997,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     // `who` names a chat agent; without it the other side is Opus or the Orchestrator
     var user = entry.role === 'user', orch = entry.role === 'orchestrator';
     var li = el('li', 'msg ' + (user ? 'msg-user' : orch ? 'msg-orch' : who ? 'msg-agent' : 'msg-opus'));
-    li.appendChild(el('div', 'msg-who', user ? 'You' : orch ? 'Orchestrator' : who || 'Opus'));
+    var agentWho = who && entry.agent_role ? roleTitle(entry.agent_role) + ' \u00b7 ' + who : who;
+    li.appendChild(el('div', 'msg-who', user ? 'You' : orch ? 'Orchestrator' : agentWho || 'Opus'));
     if (user) {
       li.appendChild(el('div', 'msg-text', entry.text === null || entry.text === undefined ? '' : String(entry.text)));
       if (Array.isArray(entry.images) && entry.images.length) {
@@ -1902,6 +2024,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       var md = el('div', 'md');
       md.appendChild(renderBlocks(entry.blocks));
       li.appendChild(md);
+      var gallery = artifactsNode(entry.artifacts);
+      if (gallery) li.appendChild(gallery);
     }
     return li;
   }
@@ -1917,13 +2041,15 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     byId('doc-mode').textContent = rendered ? 'Source' : 'Rendered';
     if (rendered) {
       var md = el('div', 'md');
+      mdBase = d.repoFile ? dirName(d.id) : null;
       md.appendChild(renderBlocks(d.blocks));
+      mdBase = null;
       body.replaceChildren(md);
     } else {
       body.replaceChildren(el('pre', 'doc-src', d.text));
     }
   }
-  function loadDoc(url, label, rawUrl) {
+  function loadDoc(url, label, rawUrl, repoFile) {
     var dlg = byId('doc-view');
     if (!dlg || typeof dlg.showModal !== 'function') return;
     fetch(url).then(function (r) {
@@ -1935,6 +2061,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
       } else {
         docShown = d;
         d.source = false;
+        d.repoFile = !!repoFile;
       }
       showDoc();
       byId('doc-body').scrollTop = 0;
@@ -1946,7 +2073,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     loadDoc(u + '?view=doc', id, u);
   }
   function openFile(path) {
-    loadDoc('/api/file?path=' + encodeURIComponent(path), path, null);
+    loadDoc('/api/file?path=' + encodeURIComponent(path), path, null, true);
   }
   byId('doc-mode').addEventListener('click', function () {
     if (docShown) { docShown.source = !docShown.source; showDoc(); }
@@ -1957,11 +2084,22 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   });
   byId('doc-close').addEventListener('click', function () { byId('doc-view').close(); });
 
-  function openImage(src, thumb) {
-    // the large view: the native dialog when there is one, else the thumb grows in place
+  function saveUrl(url) {
+    // the server answers with Content-Disposition: attachment, so the browser saves the
+    // file and the page stays where it is (the page never uses anchors)
+    window.location.assign(url);
+  }
+  function openImage(src, thumb, download) {
+    // the large view: the native dialog when there is one, else the thumb grows in place;
+    // `download` (a URL) adds a Download link
     var dlg = document.getElementById('img-view');
     if (dlg && typeof dlg.showModal === 'function') {
       document.getElementById('img-view-img').src = src;
+      var dl = document.getElementById('img-view-dl');
+      if (dl && dl.classList) {
+        dl.classList.toggle('hidden', !download);
+        dl.onclick = download ? function () { saveUrl(download); } : null;
+      }
       if (!dlg.open) dlg.showModal();
       return;
     }
@@ -1987,7 +2125,9 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
   // ---- the Orchestrator's thread, appended in place
   function orchLine(v) {
     // the agent that holds the work, if any
-    return v && v.holder ? 'With ' + v.holder + ' (' + str(v.holder_id) + ')' : '';
+    if (!v || !v.holder) return '';
+    var role = v.holder_role || (v.holder === 'opus' ? 'planner' : 'builder');
+    return 'With ' + roleTitle(role) + ' \u00b7 ' + v.holder + ' (' + str(v.holder_id) + ')';
   }
 
   // ---- the sidebar: collapses to an icon strip (kept in localStorage); an overlay on narrow windows
@@ -2406,7 +2546,8 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     if (chatTier === null) return;
     var chat = currentChat();
     var ended = !!chat && (chat.state === 'closed' || chat.state === 'failed');
-    byId('chat-title').textContent = chatTier + ' · ' + (chat ? chat.state : 'new chat') + (chat && chat.task_id ? ' · task ' + chat.task_id : '');
+    var chatWho = roleTitle(chat ? chat.role : 'builder') + ' · ' + chatTier;
+    byId('chat-title').textContent = chatWho + ' · ' + (chat ? chat.state : 'new chat') + (chat && chat.task_id ? ' · task ' + chat.task_id : '');
     var list = byId('chat-transcript');
     var entries = chat && Array.isArray(chat.transcript) ? chat.transcript : [];
     var cid = chat ? chat.chat_id : null;
@@ -2417,7 +2558,7 @@ td, th, .chip, .status, .time, .dash-card .v, .dash-card .a, .bar-value, .pie-to
     }
     var atBottom = list.scrollHeight - list.scrollTop - list.clientHeight <= 40;
     var added = entries.length > chatCount;
-    for (var i = chatCount; i < entries.length; i++) list.appendChild(msgNode(entries[i], chatTier));
+    for (var i = chatCount; i < entries.length; i++) list.appendChild(msgNode(entries[i], chatWho));
     chatCount = entries.length;
     if (added && atBottom) list.scrollTop = list.scrollHeight;
     var progress = chat && chat.state === 'working' && Array.isArray(chat.progress) ? chat.progress : [];

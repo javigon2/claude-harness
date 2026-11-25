@@ -6,7 +6,8 @@ code, pipe tables, quotes, rules, and flat inline spans). Raw HTML is never inte
 here can inject markup. Pure functions, no I/O.
 
 Block shapes: heading {level, inline}, paragraph {inline}, list {ordered, items: [[block]]},
-code {lang, text}, table {header: [inline], rows: [[inline]]}, quote {blocks}, hr.
+code {lang, text}, image {alt, src} (a line that is only `![alt](src)`),
+table {header: [inline], rows: [[inline]]}, quote {blocks}, hr.
 An inline is a list of flat spans {"t": text|strong|em|code|link, "text"} (+ "href" for link).
 """
 
@@ -24,6 +25,7 @@ _QUOTE = re.compile(r"^ {0,3}>[ ]?(.*)$")
 _SEP = re.compile(r"^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
 _CODE_SPAN = re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
 _LINK = re.compile(r"\[([^\[\]]+)\]\(([^()\s]+)\)")
+_IMAGE = re.compile(r"^ {0,3}!\[([^\[\]]*)\]\(([^()\s]+)\)[ \t]*$")
 _ESCAPABLE = "\\`*_[]()#|"
 
 
@@ -50,6 +52,8 @@ def _starts_block(lines: list[str], i: int, interrupting_paragraph: bool = False
     ordered item numbered 1 (so a wrapped "2026. ..." stays in the paragraph)."""
     line = lines[i]
     if _FENCE.match(line) or _HEADING.match(line) or _HR.match(line) or _QUOTE.match(line):
+        return True
+    if _IMAGE.match(line):
         return True
     if _is_table_start(lines, i):
         return True
@@ -80,6 +84,11 @@ def _blocks(lines: list[str]) -> list[Block]:
             out.append(
                 {"type": "heading", "level": len(heading.group(1)), "inline": _inline(content)}
             )
+            i += 1
+            continue
+        image = _IMAGE.match(line)
+        if image:
+            out.append({"type": "image", "alt": image.group(1).strip(), "src": image.group(2)})
             i += 1
             continue
         if _HR.match(line):

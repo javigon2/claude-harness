@@ -86,7 +86,7 @@ def test_office_css_rules(cls):
 def test_office_labels_and_collapsible():
     text = _text()
     assert "'Opus'" in text
-    assert "'planner'" not in text
+    assert "'Planner · opus'" in text  # the Opus desk is titled by its role
     assert "'awaiting'" in text
     assert 'id="office"' in text
     assert text.count('<details class="fold">') == 2
@@ -359,7 +359,7 @@ def _transcript_script() -> str:
     return (
         STUB + "var shownSession = null, shownCount = 0;\n" + el.group(0) + "\n"
         + string.group(0) + "\n" + text[start:end] + "\n" + msg.group(0) + "\n"
-        + render.group(0) + "\n"
+        + _functions(text, "roleTitle") + render.group(0) + "\n"
     )  # fmt: skip
 
 
@@ -448,7 +448,7 @@ def test_classroom_markup():
     assert re.search(r"\.teacher \{[^}]*justify-content: center;", text)
     section = _classroom_section(text)
     assert "'Opus'" not in section
-    for word in ["'opus · agent'", "'Orchestrator'", "'desk-orch'", "'desk-opus'"]:
+    for word in ["'Planner · opus'", "'Orchestrator'", "'desk-orch'", "'desk-opus'"]:
         assert word in section, word
 
 
@@ -590,19 +590,21 @@ def test_classroom_keeps_desk_nodes(tmp_path):
     assert out == [
         [[None], ["a", "c"], ["b", "d"]],
         ["row row-opus", "row row-sonnet"],
-        ["desk desk-running", "bubble bubble-running", "Reading a.py", "sonnet · a",
+        ["desk desk-running fig-builder", "bubble bubble-running", "Reading a.py",
+         "Builder · sonnet · a",
          "button", 0],
-        ["desk desk-pending", "bubble bubble-pending hidden"],
-        ["desk desk-done settled", "- · c", "paused"],
-        [True, "desk desk-done", True],
+        ["desk desk-pending fig-builder", "bubble bubble-pending hidden"],
+        ["desk desk-done fig-builder settled", "Builder · - · c", "paused"],
+        [True, "desk desk-done fig-builder", True],
         [[None, "b"], ["a"], []],
         ["row row-haiku hidden", False, False],
-        ["desk desk-running selected", "Bash", "opus · b"],
+        ["desk desk-running fig-builder selected", "Bash", "Builder · opus · b"],
         [0, "row row-opus", "row row-sonnet hidden", "row row-haiku hidden"],
-        [1, True, True, True, "desk desk-boss boss-asking clickable", "bubble bubble-boss",
+        [1, True, True, True, "desk desk-boss fig-planner boss-asking clickable",
+         "bubble bubble-boss",
          "has a question", "button"],
         [1, False, True],
-        ["desk desk-boss boss-idle clickable", "bubble bubble-boss hidden", True],
+        ["desk desk-boss fig-planner boss-idle clickable", "bubble bubble-boss hidden", True],
     ]  # fmt: skip
 
 
@@ -952,22 +954,24 @@ def test_chat_panel_renders_in_place(tmp_path):
     end = text.index("  function fill(")
     script = (
         _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
+        + _functions(text, "roleTitle")
         + "var office = null, selectedTask = null, tlTask = null, interactive = true;\n"
         + "var chatTier = null, chatId = null, chatShown = null, chatCount = 0;\n"
         + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
         + _chat_section(text) + CHAT_SCENARIO
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
-    agent = "msg msg-agent|haiku"
+    agent = "msg msg-agent|Builder · haiku"
     assert out == [
         [{"orch-view": True, "convo": True, "timeline-view": True, "chat-view": False,
           "btn-chat-close": True, "btn-chat-abort": True},
-         None, "haiku", None, 1, "haiku · new chat", [], True, ""],
-        [None, "haiku · new chat"],
-        ["c1", "haiku · working", ["msg msg-user|You"], ["Read: README.md"], False, False],
-        ["haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
+         None, "haiku", None, 1, "Builder · haiku · new chat", [], True, ""],
+        [None, "Builder · haiku · new chat"],
+        ["c1", "Builder · haiku · working", ["msg msg-user|You"], ["Read: README.md"], False,
+         False],
+        ["Builder · haiku · waiting · task demo-a", ["msg msg-user|You", agent], True, [],
          ["committed abc1234 chat haiku: add a flag"], 500],
-        ["c1", "haiku · failed", "the agent failed", True],
+        ["c1", "Builder · haiku · failed", "the agent failed", True],
         "This chat has ended; sending starts a new one.",
         ["c1", 2, True, True],
         "untouched",
@@ -1063,16 +1067,21 @@ def test_chat_desks_and_handoff(tmp_path):
     free = "bubble bubble-chat hidden"
     assert out == [
         [1, 0, "row row-sonnet hidden"],
-        [["desk-chat-haiku", "desk desk-chat chat-free", free, "", "haiku · new chat"], "button",
+        [["desk-chat-haiku", "desk desk-chat fig-builder chat-free", free, "",
+         "Builder · haiku · new chat"], "button",
          "New haiku chat", 0, ["desk-chat-haiku"], "row row-sonnet", "row row-opus"],
         [["desk-chat-c1", "desk-chat-c3", "desk-chat-haiku"], ["desk-chat-c2", "desk-chat-sonnet"],
-         ["desk-chat-c1", "desk desk-chat chat-working", "bubble bubble-chat", "Edit: notes.md",
-          "haiku · chat"],
-         ["desk-chat-c2", "desk desk-chat chat-waiting", "bubble bubble-chat", "your turn",
-          "sonnet · chat"],
+         ["desk-chat-c1", "desk desk-chat fig-builder chat-working", "bubble bubble-chat",
+          "Edit: notes.md",
+          "Builder · haiku · chat"],
+         ["desk-chat-c2", "desk desk-chat fig-builder chat-waiting", "bubble bubble-chat",
+          "your turn",
+          "Builder · sonnet · chat"],
          False, True],
-        [[["haiku", "c1"]], "desk desk-chat chat-working selected", "desk desk-chat chat-free"],
-        [[["haiku", None]], "desk desk-chat chat-working", "desk desk-chat chat-free selected"],
+        [[["haiku", "c1"]], "desk desk-chat fig-builder chat-working selected",
+         "desk desk-chat fig-builder chat-free"],
+        [[["haiku", None]], "desk desk-chat fig-builder chat-working",
+         "desk desk-chat fig-builder chat-free selected"],
         [["desk-chat-haiku"], ["desk-chat-sonnet"], False],
         [[["sonnet", "c9"]], "c9"],
         [3, "c9"],
@@ -1185,12 +1194,12 @@ def test_orchestrator_texts(tmp_path):
     ]
     script = (
         money.group(0) + "\n" + string.group(0) + "\n"
-        + _functions(text, "orchLine")
+        + _functions(text, "orchLine", "roleTitle")
         + "var V = " + json.dumps(views) + ";\n"
         + "console.log(JSON.stringify([V.map(orchLine), orchLine(null)]));\n"
     )  # fmt: skip
     out = json.loads(_run_node(tmp_path, script)[-1])
-    assert out == [["With haiku (chat-1)", "", "With opus (?)"], ""]
+    assert out == [["With Builder · haiku (chat-1)", "", "With Planner · opus (?)"], ""]
 
 
 def test_orchestrator_message_nodes(tmp_path):
@@ -1261,6 +1270,7 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     orch_end = text.index("  // ---- a worker's timeline")
     script = (
         _page_helpers(text) + money.group(0) + "\n" + text[start:end] + msg.group(0) + "\n"
+        + _functions(text, "roleTitle")
         + "var orchShown = null, orchCount = 0, interactive = true, hidden = {};\n"
         + "function setHidden(id, hide) { hidden[id] = hide; }\n"
         + "document.createDocumentFragment = function () { return mk('#frag'); };\n"
@@ -1271,7 +1281,7 @@ def test_orchestrator_thread_renders_in_place(tmp_path):
     assert out == [
         [[], ""],
         [[you, routed], "", 500],
-        [[you, routed, "msg msg-agent|haiku"], True, "With haiku (c1)", 0],
+        [[you, routed, "msg msg-agent|haiku"], True, "With Builder · haiku (c1)", 0],
         [[you], False],
         False,
         [[], ""],
@@ -1386,12 +1396,13 @@ def test_orchestrator_desk_and_opus_desk(tmp_path):
     out = json.loads(_run_node(tmp_path, script)[-1])
     assert out == [
         [1, "desk-orch", "Orchestrator", "button", "Talk to the Orchestrator", 0,
-         ["desk desk-orch orch-idle", "bubble bubble-orch hidden", ""], ["desk-opus"],
-         "opus · agent"],
-        ["desk desk-orch orch-routing", "bubble bubble-orch", "routing…"],
-        ["desk desk-orch orch-routing", "bubble bubble-orch", "Grep: TODO"],
-        ["desk desk-orch orch-idle", "bubble bubble-orch", "→ sonnet"],
-        [["desk desk-orch orch-failed", "bubble bubble-orch", "failed"], True, 1],
+         ["desk desk-orch fig-orchestrator orch-idle", "bubble bubble-orch hidden", ""],
+          ["desk-opus"],
+         "Planner · opus"],
+        ["desk desk-orch fig-orchestrator orch-routing", "bubble bubble-orch", "routing…"],
+        ["desk desk-orch fig-orchestrator orch-routing", "bubble bubble-orch", "Grep: TODO"],
+        ["desk desk-orch fig-orchestrator orch-idle", "bubble bubble-orch", "→ Builder · sonnet"],
+        [["desk desk-orch fig-orchestrator orch-failed", "bubble bubble-orch", "failed"], True, 1],
         [[None, None], 2],
         ["desk-opus", "x"],
         ["x", "desk-opus"],
@@ -1953,28 +1964,36 @@ def test_request_picker_and_past_view_markup():
 
 REQUEST_SCENARIO = """
 var reqs = [
-  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'], first_message: 'm'},
+  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'],
+   first_message: 'm'},
   {id: 'orch-1', title: 'Fix login', state: 'waiting', runs: []},
 ];
 var ids = ['r2', 'r1', 'old'];
 function sel(h, fresh, reqList, runList, latest) {
-  var s = selection(reqList || reqs, runList || ids, latest === undefined ? 'r2' : latest, h, !!fresh);
+  var s = selection(reqList || reqs, runList || ids, latest === undefined ? 'r2' : latest, h,
+   !!fresh);
   return [s.request ? s.request.id : null, s.run];
 }
 var out = [];
 out.push(['running', 'waiting', 'done', 'attention', 'odd', undefined].map(function (s) {
   return requestLabel({id: 'x1', title: 'T', state: s});
 }));
-out.push([requestLabel({id: 'x1', state: 'done'}), requestLabel({id: 'x1', title: '', state: 'wat'})]);
-out.push([sel(''), sel('orch-1'), sel('r1'), sel('old'), sel('junk'), sel('', true), sel('orch-2', true)]);
-out.push([sel('r2', false, reqs, ['r1']), sel('orch-2', false, reqs, ['r1']), sel('orch-2', false, reqs, [])]);
-out.push([sel('', false, [], ids), sel('old', false, [], ids), sel('junk', false, [], ids), sel('', false, [], [], null)]);
+out.push([requestLabel({id: 'x1', state: 'done'}), requestLabel({id: 'x1', title: '',
+ state: 'wat'})]);
+out.push([sel(''), sel('orch-1'), sel('r1'), sel('old'), sel('junk'), sel('', true), sel('orch-2',
+ true)]);
+out.push([sel('r2', false, reqs, ['r1']), sel('orch-2', false, reqs, ['r1']), sel('orch-2', false,
+ reqs, [])]);
+out.push([sel('', false, [], ids), sel('old', false, [], ids), sel('junk', false, [], ids),
+ sel('', false, [], [], null)]);
 out.push([emptyText([]), emptyText(reqs)]);
 var office = null;
 out.push(isPast(reqs[0], {thread: null, session: null}));
 office = {};
-out.push([isPast(reqs[0], {thread: 'orch-2', session: null}), isPast(reqs[1], {thread: 'orch-2', session: null}),
-          isPast(reqs[1], {thread: null, session: 'orch-1'}), isPast(null, {thread: null, session: null})]);
+out.push([isPast(reqs[0], {thread: 'orch-2', session: null}), isPast(reqs[1], {thread: 'orch-2',
+ session: null}),
+          isPast(reqs[1], {thread: null, session: 'orch-1'}), isPast(null, {thread: null,
+           session: null})]);
 console.log(JSON.stringify(out));
 """  # noqa: E501
 
@@ -2017,9 +2036,11 @@ function byId(id) { return document.getElementById(id); }
 byId('run-sub-picker').getAttribute = function (k) { return this.attrs[k] === undefined ? null : this.attrs[k]; };
 document.querySelector = function () { return byId('header'); };
 function opts(n) { return n.children.map(function (o) { return [o.value, o.text]; }); }
-var runs = ['r2', 'r1', 'old'], titles = {old: 'Old run', r1: 'Build the dashboard', r2: 'Build the dashboard'};
+var runs = ['r2', 'r1', 'old'], titles = {old: 'Old run', r1: 'Build the dashboard',
+ r2: 'Build the dashboard'};
 var requests = [
-  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'], first_message: 'make it'},
+  {id: 'orch-2', title: 'Build the dashboard', state: 'running', runs: ['r1', 'r2'],
+   first_message: 'make it'},
   {id: 'orch-1', title: 'Fix login', state: 'done', runs: []},
 ];
 renderRuns();
@@ -2041,7 +2062,8 @@ out.push(byId('header').className);
 requests = [{id: 'orch-2', title: 'T', state: 'done', runs: ['r1', 'r2']}];
 runs = ['r2', 'r1'];
 renderPickers({request: requests[0], run: 'r1'});
-out.push([picker.value, opts(byId('run-sub-picker')), byId('run-sub-picker').value, hidden['run-sub-picker']]);
+out.push([picker.value, opts(byId('run-sub-picker')), byId('run-sub-picker').value,
+ hidden['run-sub-picker']]);
 renderPickers({request: {id: 'orch-1', runs: ['r1']}, run: 'r1'});
 out.push([picker.value, hidden['run-sub-picker']]);
 renderPickers({request: null, run: 'old'});

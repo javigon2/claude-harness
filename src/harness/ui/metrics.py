@@ -7,7 +7,10 @@ first `worker_progress` of that attempt; verification runs from `verify_started`
 `verify_finished`. A run's `wall_s` runs from `run_started` to `run_finished` (to its last event
 while it is still going) and so includes idle gaps; `active_s` is the sum of attempt durations
 and is the steadier number to compare. Runs made with fake workers are left out of the
-averages: their cost and times mean nothing."""
+averages: their cost and times mean nothing.
+
+Every builder takes a `window` (harness.ui.history): only runs that started in it, and
+planning/chat costs logged in it, are counted; the default is all time."""
 
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 from harness.models import Event
 from harness.state import RunState, load_state, run_dir
 from harness.titles import read_title
+from harness.ui.history import ALL_TIME, Window, in_window
 from harness.ui.view import _read_events, list_runs
 
 Unit = Literal["usd", "s", "count", "pct", "ratio"]
@@ -93,6 +97,8 @@ class RunStats(BaseModel):
     fake: bool
     values: dict[str, float | None]
     attempts: list[_Attempt]
+    started_at: datetime | None = None
+    tiers: list[str] = []
 
 
 # key, label, unit, lower_is_better
@@ -195,18 +201,23 @@ def run_stats(repo: Path, run_id: str) -> RunStats:
         "output_tokens": float(sum(t.usage.output_tokens for t in tasks)),
         "cache_read_tokens": float(sum(t.usage.cache_read_tokens for t in tasks)),
     }
+    used = {a.tier for a in attempts if a.tier} | {t.tier_used for t in tasks if t.tier_used}
     return RunStats(
         run_id=run_id,
         finished=bool(state.finished),
         fake=_is_fake(events),
         values=values,
         attempts=attempts,
+        started_at=starts[0] if starts else (events[0].ts if events else None),
+        tiers=[t for t in ("haiku", "sonnet", "opus") if t in used],
     )
 
 
-def _baseline(repo: Path, run_id: str) -> tuple[dict[str, float | None], int]:
-    """The average of every metric over the other finished, non-fake runs, and how many
-    runs that is. A run that cannot be read is skipped."""
+def _baseline(
+    repo: Path, run_id: str, window: Window = ALL_TIME
+) -> tuple[dict[str, float | None], int]:
+    """The average of every metric over the other finished, non-fake runs that started in
+    `window`, and how many runs that is. A run that cannot be read is skipped."""
     others: list[RunStats] = []
     for other in list_runs(repo):
         if other == run_id:
@@ -215,7 +226,7 @@ def _baseline(repo: Path, run_id: str) -> tuple[dict[str, float | None], int]:
             stats = run_stats(repo, other)
         except Exception:
             continue
-        if stats.finished and not stats.fake:
+        if stats.finished and not stats.fake and in_window(stats.started_at, window):
             others.append(stats)
     averages: dict[str, float | None] = {}
     for key, _label, _unit, _lower in METRICS:
@@ -224,13 +235,14 @@ def _baseline(repo: Path, run_id: str) -> tuple[dict[str, float | None], int]:
     return averages, len(others)
 
 
-def build_dashboard(repo: Path, run_id: str) -> Dashboard:
-    """The Dashboard of `run_id`. Raises FileNotFoundError for an unknown run."""
+def build_dashboard(repo: Path, run_id: str, window: Window = ALL_TIME) -> Dashboard:
+    """The Dashboard of `run_id`, compared with the runs of `window`. Raises
+    FileNotFoundError for an unknown run."""
     if run_id not in list_runs(repo):
         raise FileNotFoundError(run_id)
     repo = Path(repo)
     stats = run_stats(repo, run_id)
-    averages, count = _baseline(repo, run_id)
+    averages, count = _baseline(repo, run_id, window)
     metrics = [
         Metric(
             key=key,
@@ -341,12 +353,15 @@ def _cost_of(payload: dict) -> float:
     return float(v)
 
 
-def planning_cost(repo: Path) -> float:
-    """What planning and chatting cost in `repo`: each planner session's last (running)
-    cost, the Orchestrator's turns and the agent chats' replies, read from the planner and
-    chat logs. 0.0 when there are no logs."""
+def planning_cost(repo: Path, window: Window = ALL_TIME) -> float:
+    """What planning and chatting cost in `repo` within `window`: each planner session's
+    last (running) cost, the Orchestrator's turns and the agent chats' replies, read from
+    the planner and chat logs. 0.0 when there are no logs. A planner session counts in the
+    window its last cost was logged in."""
     planner = _read_events(Path(repo) / ".harness" / "planner" / "events.jsonl")
     chats = _read_events(Path(repo) / ".harness" / "chats" / "events.jsonl")
+    planner = [e for e in planner if in_window(e.ts, window)]
+    chats = [e for e in chats if in_window(e.ts, window)]
     sessions: dict[str, float] = {}
     total = 0.0
     for e in planner:
@@ -362,8 +377,9 @@ def planning_cost(repo: Path) -> float:
     return total
 
 
-def project_row(repo: Path) -> ProjectRow:
-    """The Overview row of one project folder. A run that cannot be read is skipped."""
+def project_row(repo: Path, window: Window = ALL_TIME) -> ProjectRow:
+    """The Overview row of one project folder over `window`. A run that cannot be read is
+    skipped."""
     repo = Path(repo)
     runs = run_cost = wall = active = 0.0
     for run_id in list_runs(repo):
@@ -371,13 +387,13 @@ def project_row(repo: Path) -> ProjectRow:
             stats = run_stats(repo, run_id)
         except Exception:
             continue
-        if stats.fake:
+        if stats.fake or not in_window(stats.started_at, window):
             continue
         runs += 1
         run_cost += stats.values.get("cost_usd") or 0.0
         wall += stats.values.get("wall_s") or 0.0
         active += stats.values.get("active_s") or 0.0
-    planning = planning_cost(repo)
+    planning = planning_cost(repo, window)
     return ProjectRow(
         name=repo.name or str(repo),
         path=str(repo),
@@ -390,8 +406,9 @@ def project_row(repo: Path) -> ProjectRow:
     )
 
 
-def build_overview(repos: list[Path]) -> Overview:
-    """The Overview over `repos` (duplicates and missing folders dropped), costliest first."""
+def build_overview(repos: list[Path], window: Window = ALL_TIME) -> Overview:
+    """The Overview over `repos` (duplicates and missing folders dropped) within `window`,
+    costliest first."""
     seen: set[Path] = set()
     rows: list[ProjectRow] = []
     for repo in repos:
@@ -399,7 +416,7 @@ def build_overview(repos: list[Path]) -> Overview:
         if repo in seen or not repo.is_dir():
             continue
         seen.add(repo)
-        rows.append(project_row(repo))
+        rows.append(project_row(repo, window))
     rows.sort(key=lambda r: r.cost_usd, reverse=True)
     return Overview(
         total_cost_usd=sum(r.cost_usd for r in rows),
@@ -410,3 +427,44 @@ def build_overview(repos: list[Path]) -> Overview:
         total_runs=sum(r.runs for r in rows),
         projects=rows,
     )
+
+
+class RunRow(BaseModel):
+    """One run in the Dashboard's filterable Runs table: what the filters and sorts use."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    title: str | None
+    started_at: datetime | None
+    finished: bool
+    fake: bool
+    tiers: list[str]
+    values: dict[str, float | None]
+
+
+def run_rows(
+    repo: Path, window: Window = ALL_TIME, titles: dict[str, str] | None = None
+) -> list[RunRow]:
+    """Every readable run of `repo` that started in `window`, newest first, with all its
+    METRICS values. Fake runs are included and flagged; the page filters them."""
+    rows: list[RunRow] = []
+    for run_id in list_runs(repo):
+        try:
+            stats = run_stats(repo, run_id)
+        except Exception:
+            continue
+        if not in_window(stats.started_at, window):
+            continue
+        rows.append(
+            RunRow(
+                run_id=run_id,
+                title=(titles or {}).get(run_id) or read_title(repo, run_id),
+                started_at=stats.started_at,
+                finished=stats.finished,
+                fake=stats.fake,
+                tiers=stats.tiers,
+                values=stats.values,
+            )
+        )
+    return rows

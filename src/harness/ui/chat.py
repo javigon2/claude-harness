@@ -9,6 +9,7 @@ chats, one thread each, and commits after every agent turn."""
 import asyncio
 import os
 import queue
+import re
 import secrets
 import threading
 import time
@@ -24,7 +25,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from harness.config import MODEL_IDS, Tier
 from harness.models import Event
 from harness.plan import PlanError, load_plan
-from harness.planner import PlannerSession, SdkPlannerSession
+from harness.planner import (
+    DEFAULT_EFFORT,
+    Effort,
+    PlannerSession,
+    SdkPlannerSession,
+    effort_or_default,
+)
+from harness.roles import DEFAULT_ROLE, ChatRole, researcher_prompt, role_or_default
 from harness.state import StateError, load_state, new_run_id, run_dir
 from harness.ui.chat_git import changed_paths, chat_commit_message, commit_paths, dirty_snapshot
 from harness.ui.demo import DemoChatSession
@@ -47,10 +55,73 @@ CHAT_JOIN_TIMEOUT_S = 10.0
 CHAT_APPEND = (
     "You are chatting with the user in the harness office page. Make the change they ask "
     "for in this repo, run its checks, and reply in a few lines. The harness commits your "
-    "edits after each turn; never run git commit, push or checkout."
+    "edits after each turn; never run git commit, push or checkout. The office picks "
+    "the model for every message and switches it on its own (and tells the user), so "
+    "there is no model selector here: never suggest switching models."
 )
 
+RESEARCH_TIERS: tuple[Tier, ...] = ("haiku", "sonnet", "opus")
+ARTIFACT_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+ARTIFACT_MAX = 40
+_REPORT_PATH_RE = re.compile(r"(?<![\w/.-])(reports/[\w./-]+\.(?:md|png|jpe?g|gif|webp|svg|csv))")
+
 ChatState = Literal["working", "waiting", "closed", "failed"]
+
+
+def chat_tier_ok(tier: object, role: object) -> bool:
+    """True if a chat of `role` may run on `tier`: builders on CHAT_TIERS (opus builds go
+    to the planning desk), researchers on haiku, sonnet or opus."""
+    tiers = RESEARCH_TIERS if role_or_default(role) == "researcher" else CHAT_TIERS
+    return tier in tiers
+
+
+def artifact_kind(path: str) -> str | None:
+    """ "image", "report" (a .md under reports/), "data" (.csv) or None for `path`."""
+    low = path.lower()
+    if low.endswith(ARTIFACT_IMAGE_EXTS):
+        return "image"
+    if low.endswith(".md") and low.startswith("reports/"):
+        return "report"
+    if low.endswith(".csv"):
+        return "data"
+    return None
+
+
+def collect_artifacts(repo: Path, paths: Sequence[str], text: str) -> list[dict[str, str]]:
+    """What a turn produced for the page: each changed path (repo-relative) that is an
+    image, a report or a CSV, in that order; plus `reports/...` paths named in the reply
+    text that exist (when the change snapshot was skipped). At most ARTIFACT_MAX."""
+    found: dict[str, str] = {}
+    for p in paths:
+        kind = artifact_kind(p)
+        if kind is not None:
+            found.setdefault(p, kind)
+    root = Path(repo)
+    for m in _REPORT_PATH_RE.finditer(text or ""):
+        p = m.group(1).rstrip(".")
+        kind = artifact_kind(p)
+        if kind is not None and p not in found and ".." not in p and (root / p).is_file():
+            found[p] = kind
+    order = {"report": 0, "image": 1, "data": 2}
+    items = sorted(found.items(), key=lambda kv: (order[kv[1]], kv[0]))
+    return [{"path": p, "kind": k} for p, k in items[:ARTIFACT_MAX]]
+
+
+def _artifacts(value: object) -> list[dict[str, str]]:
+    """The logged artifacts list, keeping only well-formed items."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in value:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and item.get("kind") in ("image", "report", "data")
+        ):
+            out.append({"path": item["path"], "kind": item["kind"]})
+    return out
+
+
 ChatSessionFactory = Callable[[Path, Tier, ProgressFn], PlannerSession]
 
 _WRITE_LOCK = threading.Lock()
@@ -72,6 +143,7 @@ class ChatEntry(BaseModel):
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
     images: list[str] = Field(default_factory=list)
+    artifacts: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ChatView(BaseModel):
@@ -93,6 +165,9 @@ class ChatView(BaseModel):
     error: str | None = None
     session_id: str | None = None
     updated_at: str | None = None
+    detached: bool = False
+    effort: Effort | None = None  # thinking effort of the agent's current session
+    role: ChatRole = DEFAULT_ROLE
 
 
 class ChatLog:
@@ -169,7 +244,8 @@ def _num(value: object, default: float) -> float:
 def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
     started = events[0].payload
     tier = started.get("tier")
-    if tier not in CHAT_TIERS:
+    role = role_or_default(started.get("role"))
+    if not chat_tier_ok(tier, role):
         return None
     transcript: list[ChatEntry] = []
     progress: list[str] = []
@@ -180,6 +256,7 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
     last_user = False
     pid = started.get("pid")
     session_id: str | None = None
+    effort: Effort | None = effort_or_default(started["effort"]) if "effort" in started else None
     for e in events[1:]:
         p = e.payload
         text = p.get("text")
@@ -191,7 +268,13 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
             last_user = True
         elif e.type == "chat_reply" and isinstance(text, str):
             transcript.append(
-                ChatEntry(role="agent", ts=e.ts.isoformat(), text=text, blocks=parse_markdown(text))
+                ChatEntry(
+                    role="agent",
+                    ts=e.ts.isoformat(),
+                    text=text,
+                    blocks=parse_markdown(text),
+                    artifacts=_artifacts(p.get("artifacts")),
+                )
             )
             progress = []
             cost = _num(p.get("cost_usd"), 0.0)
@@ -203,6 +286,10 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
             ended = None
             error = None
             pid = p.get("pid")
+            if "effort" in p:
+                effort = effort_or_default(p["effort"])
+        elif e.type == "chat_retuned":
+            effort = effort_or_default(p.get("to"))
         elif e.type == "chat_progress":
             progress = (progress + [_progress_line(p)])[-CHAT_PROGRESS_LINES:]
         elif e.type == "chat_commit":
@@ -237,6 +324,8 @@ def _build_view(chat_id: str, events: list[Event]) -> ChatView | None:
         error=error,
         session_id=session_id,
         updated_at=events[-1].ts.isoformat(),
+        effort=effort,
+        role=role,
     )
 
 
@@ -300,12 +389,17 @@ class SdkChatSession(SdkPlannerSession):
         self.tier = tier."""
         super().__init__(repo, progress=progress, progress_interval_s=0.0)
         self.tier = tier
+        self.role: ChatRole = DEFAULT_ROLE  # set by ChatManager before the first turn
 
     def options(self) -> ClaudeAgentOptions:
         """The exact options in the `decision: chat SDK options` context item."""
         return ClaudeAgentOptions(
             model=MODEL_IDS[self.tier],
-            system_prompt={"type": "preset", "preset": "claude_code", "append": CHAT_APPEND},
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": researcher_prompt() if self.role == "researcher" else CHAT_APPEND,
+            },
             tools=list(WORKER_TOOLS),
             allowed_tools=list(WORKER_TOOLS),
             skills=[],
@@ -316,6 +410,7 @@ class SdkChatSession(SdkPlannerSession):
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
             resume=self.resume_id,
+            effort=self.effort,
         )
 
 
@@ -342,6 +437,11 @@ class _Chat:
     loop: asyncio.AbstractEventLoop | None = None
     turn: asyncio.Task[Any] | None = None
     resume_id: str | None = None
+    detached: bool = False
+    effort: Effort = DEFAULT_EFFORT
+    session_id: str | None = None  # the Claude session of the latest reply
+    cost_base: float = 0.0  # cost of earlier sessions of this chat (before a retune)
+    role: ChatRole = DEFAULT_ROLE
 
 
 def _check_text(text: str) -> str:
@@ -354,7 +454,9 @@ def _check_text(text: str) -> str:
 
 
 class ChatManager:
-    """Owns the open chats of one `harness ui` server: at most one per tier in CHAT_TIERS.
+    """Owns the open chats of one `harness ui` server, any number per tier in CHAT_TIERS: a
+    new chat always gets its own agent, even while another agent of the tier is busy. A
+    chat left behind by "New request" is `detached` (still open, hidden from the room).
 
     Each chat runs on its own daemon thread with its own asyncio loop; messages cross over
     `_Chat.inbox`. `live_fn()` returns the id of a live run (default: office.live_run), and
@@ -444,18 +546,22 @@ class ChatManager:
         run_id: str | None = None,
         task_id: str | None = None,
         images: Sequence[str] = (),
+        effort: Effort = DEFAULT_EFFORT,
+        role: str = DEFAULT_ROLE,
     ) -> str:
-        """Open a chat on `tier` and send `text` (stripped) and `images` (ids) as its first
-        message; return the chat id. Checks in the order of the `decision: conflicts` item."""
-        if tier not in CHAT_TIERS:
+        """Open a `role` chat (builder or researcher) on `tier` at thinking `effort` and send
+        `text` (stripped) and `images` (ids) as its first message; return the chat id.
+        Checks in the order of the `decision: conflicts` item."""
+        chat_role = role_or_default(role)
+        if not chat_tier_ok(tier, chat_role):
+            if chat_role == "researcher":
+                raise ChatConflict(f"no {tier} researcher; use haiku, sonnet or opus")
             raise ChatConflict(f"no {tier} chat agent; use haiku or sonnet")
         stripped = _check_text(text)
         if (run_id is None) != (task_id is None):
             raise ChatConflict("send both run_id and task_id")
         self._refuse_if_busy()
         with self._lock:
-            if any(c.tier == tier for c in self._chats.values()):
-                raise ChatConflict(f"a {tier} chat is already open")
             note = attachment_note(self.repo, images)
             first = stripped + note
             if run_id is not None and task_id is not None:
@@ -463,9 +569,18 @@ class ChatManager:
                 first = f"{brief}\n\nThe user says:\n{stripped}{note}"
             chat_id = new_chat_id()
             chat = _Chat(chat_id, cast(Tier, tier), ChatLog(self.repo, chat_id))
+            chat.effort = effort_or_default(effort)
+            chat.role = chat_role
             chat.log.emit(
                 "chat_started",
-                {"tier": tier, "run_id": run_id, "task_id": task_id, "pid": os.getpid()},
+                {
+                    "tier": tier,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "pid": os.getpid(),
+                    "effort": chat.effort,
+                    "role": chat.role,
+                },
             )
             payload: dict[str, Any] = {"text": stripped}
             if images:
@@ -488,20 +603,18 @@ class ChatManager:
             chat = self._open_chat(chat_id)
             if chat.state == "working":
                 raise ChatConflict("the agent is still working")
-            payload: dict[str, Any] = {"text": stripped}
-            if images:
-                payload["images"] = list(images)
-            chat.log.emit("chat_user", payload)
-            chat.state = "working"
-            chat.error = None
-            chat.progress = []
-            chat.last_text = stripped
-            chat.inbox.put(stripped + attachment_note(self.repo, images))
+            self._send_locked(chat, stripped, images)
 
-    def resume(self, chat_id: str, text: str, images: Sequence[str] = ()) -> None:
+    def resume(
+        self,
+        chat_id: str,
+        text: str,
+        images: Sequence[str] = (),
+        effort: Effort | None = None,
+    ) -> None:
         """Pick up an ended chat on its own Claude session, so the agent still knows
         everything it did. Allowed for RESUME_WINDOW_S after its last event, while the log
-        holds a session id and no other chat of the tier is open."""
+        holds a session id. `effort` defaults to the chat's last logged effort."""
         stripped = _check_text(text)
         self._refuse_if_busy()
         with self._lock:
@@ -517,12 +630,15 @@ class ChatManager:
             last = datetime.fromisoformat(view.updated_at) if view.updated_at else None
             if last is None or self._clock() - last.timestamp() > RESUME_WINDOW_S:
                 raise ChatConflict("this chat is older than 2 days and cannot be resumed")
-            if any(c.tier == view.tier for c in self._chats.values()):
-                raise ChatConflict(f"a {view.tier} chat is already open")
             chat = _Chat(chat_id, view.tier, ChatLog(self.repo, chat_id))
-            chat.resume_id = view.session_id
+            chat.resume_id = chat.session_id = view.session_id
             chat.cost_usd = view.cost_usd
-            chat.log.emit("chat_resumed", {"pid": os.getpid(), "session_id": view.session_id})
+            chat.effort = effort_or_default(effort or view.effort)
+            chat.role = view.role
+            chat.log.emit(
+                "chat_resumed",
+                {"pid": os.getpid(), "session_id": view.session_id, "effort": chat.effort},
+            )
             payload: dict[str, Any] = {"text": stripped}
             if images:
                 payload["images"] = list(images)
@@ -535,6 +651,62 @@ class ChatManager:
             )
             chat.thread.start()
 
+    def retune(self, chat_id: str, effort: Effort, text: str, images: Sequence[str] = ()) -> bool:
+        """Change a waiting chat's thinking effort, then send `text` as its next message.
+        The SDK cannot change effort on a live session, so the chat's session thread is
+        stopped and a new one starts on the same chat id, resuming its Claude session (the
+        agent keeps its whole history) at the new effort; logged chat_retuned {"from", "to",
+        "session_id"}. Returns True when it was retuned. Without a saved session id the
+        effort stays, a chat_note says so, the message is sent as usual, and it returns
+        False. Refused like `message` (a working chat is "still working")."""
+        stripped = _check_text(text)
+        self._refuse_if_busy()
+        with self._lock:
+            old = self._open_chat(chat_id)
+            if old.state == "working":
+                raise ChatConflict("the agent is still working")
+            target = effort_or_default(effort)
+            if target == old.effort:
+                self._send_locked(old, stripped, images)
+                return False
+            if not old.session_id:
+                old.log.emit(
+                    "chat_note",
+                    {"text": f"no saved session to retune; kept {old.effort} effort"},
+                )
+                self._send_locked(old, stripped, images)
+                return False
+            chat = _Chat(chat_id, old.tier, old.log)
+            chat.resume_id = chat.session_id = old.session_id
+            chat.effort = target
+            chat.role = old.role
+            chat.cost_usd = chat.cost_base = old.cost_usd
+            chat.detached = old.detached
+            self._end(old, "closed")  # stops its thread; nothing is logged as closed
+            chat.log.emit(
+                "chat_retuned",
+                {"from": old.effort, "to": target, "session_id": old.session_id},
+            )
+            self._chats[chat_id] = chat
+            self._send_locked(chat, stripped, images)
+            chat.thread = threading.Thread(
+                target=self._thread_main, args=(chat,), name=f"harness-{chat_id}", daemon=True
+            )
+            chat.thread.start()
+            return True
+
+    def _send_locked(self, chat: _Chat, stripped: str, images: Sequence[str]) -> None:
+        """Log and queue one user message for `chat`. Caller holds _lock."""
+        payload: dict[str, Any] = {"text": stripped}
+        if images:
+            payload["images"] = list(images)
+        chat.log.emit("chat_user", payload)
+        chat.state = "working"
+        chat.error = None
+        chat.progress = []
+        chat.last_text = stripped
+        chat.inbox.put(stripped + attachment_note(self.repo, images))
+
     def close_chat(self, chat_id: str) -> None:
         """End an open chat (logged chat_closed {"reason": "closed by the user"}); a turn in
         progress is cancelled."""
@@ -542,6 +714,32 @@ class ChatManager:
             chat = self._open_chat(chat_id)
             chat.log.emit("chat_closed", {"reason": "closed by the user"})
             self._end(chat, "closed")
+
+    def abort(self, chat_id: str) -> None:
+        """Stop a working (or stuck) chat now: its turn is cancelled and the chat ends,
+        logged chat_closed {"reason": "aborted by the user"}. Its session id stays in the
+        log, so it can still be resumed. A late reply of the cancelled turn is dropped."""
+        with self._lock:
+            chat = self._open_chat(chat_id)
+            chat.log.emit("chat_closed", {"reason": "aborted by the user"})
+            self._end(chat, "closed")
+
+    def detach(self, keep: Sequence[str] = ()) -> None:
+        """A new request starts: every open chat except `keep` is detached, so the room shows
+        none of it; a working one keeps working."""
+        with self._lock:
+            for chat in self._chats.values():
+                chat.detached = chat.chat_id not in keep
+
+    def attach(self, chat_id: str) -> bool:
+        """Show an open chat in the room again (its request was reopened). False when it is
+        not open."""
+        with self._lock:
+            chat = self._chats.get(chat_id)
+            if chat is None:
+                return False
+            chat.detached = False
+            return True
 
     def working(self) -> bool:
         """True while any open chat is in state "working"."""
@@ -555,7 +753,7 @@ class ChatManager:
         with self._lock:
             open_chats = dict(self._chats)
             snapshot = {
-                cid: (c.state, list(c.progress), c.error, c.cost_usd)
+                cid: (c.state, list(c.progress), c.error, c.cost_usd, c.detached)
                 for cid, c in open_chats.items()
             }
         result: list[ChatView] = []
@@ -563,7 +761,7 @@ class ChatManager:
             mem = snapshot.get(view.chat_id)
             if mem is None:
                 continue
-            state, progress, error, cost = mem
+            state, progress, error, cost, detached = mem
             result.append(
                 view.model_copy(
                     update={
@@ -571,6 +769,7 @@ class ChatManager:
                         "progress": progress if state == "working" else [],
                         "error": error,
                         "cost_usd": cost,
+                        "detached": detached,
                     }
                 )
             )
@@ -634,6 +833,17 @@ class ChatManager:
         session = self._factory(self.repo, chat.tier, progress)
         if chat.resume_id and hasattr(session, "resume_id"):
             session.resume_id = chat.resume_id
+        if hasattr(session, "effort"):  # fixed for the session's life; see retune
+            session.effort = chat.effort
+        if hasattr(session, "role"):
+            session.role = chat.role
+        if hasattr(session, "tool_event"):  # per-tool durations for the Timing panel
+
+            def tool_event(event: str, payload: dict[str, Any]) -> None:
+                if event == "planner_tool_finished":
+                    chat.log.emit("chat_tool", payload)
+
+            session.tool_event = tool_event
         try:
             while True:
                 text = await asyncio.to_thread(chat.inbox.get)
@@ -657,6 +867,7 @@ class ChatManager:
     async def _turn(self, chat: _Chat, session: PlannerSession, text: str) -> bool:
         note: str | None = None
         before: dict[str, str | None] | None
+        git_start = time.monotonic()
         blocked = await asyncio.to_thread(self._prepare_branch)
         if blocked is not None:
             before = None
@@ -667,7 +878,15 @@ class ChatManager:
             except (WorktreeError, OSError) as err:
                 before = None
                 note = f"commit failed: {err}"
+        git_ms = round((time.monotonic() - git_start) * 1000)
+        agent_start = time.monotonic()
         turn = await session.send(text)
+        timing: dict[str, Any] = {"duration_ms": round((time.monotonic() - agent_start) * 1000)}
+        for key in ("connect_ms", "api_ms"):
+            if getattr(turn, key, None) is not None:
+                timing[key] = getattr(turn, key)
+        git_start = time.monotonic()
+        paths: list[str] = []
         if before is not None:
             try:
                 after = await asyncio.to_thread(dirty_snapshot, self.repo)
@@ -679,21 +898,31 @@ class ChatManager:
                     chat.log.emit("chat_commit", {"sha": sha, "subject": message})
             except (WorktreeError, OSError) as err:
                 note = f"commit failed: {err}"
+        timing["git_ms"] = git_ms + round((time.monotonic() - git_start) * 1000)
         if note:
             chat.log.emit("chat_note", {"text": note})
+        artifacts = [] if turn.error else collect_artifacts(self.repo, paths, turn.text or "")
         with self._lock:
             if self._chats.get(chat.chat_id) is not chat:
                 return False
-            chat.cost_usd = turn.usage.cost_usd
+            chat.cost_usd = chat.cost_base + turn.usage.cost_usd
+            if turn.session_id:
+                chat.session_id = turn.session_id
             if turn.error:
                 chat.log.emit(
                     "chat_failed",
-                    {"reason": f"agent session failed: {turn.error}", "cost_usd": chat.cost_usd},
+                    {
+                        "reason": f"agent session failed: {turn.error}",
+                        "cost_usd": chat.cost_usd,
+                        **timing,
+                    },
                 )
                 chat.error = f"agent session failed: {turn.error}"
                 self._end(chat, "failed")
                 return False
-            reply: dict[str, Any] = {"text": turn.text, "cost_usd": chat.cost_usd}
+            reply: dict[str, Any] = {"text": turn.text, "cost_usd": chat.cost_usd, **timing}
+            if artifacts:
+                reply["artifacts"] = artifacts
             if turn.session_id:
                 reply["session_id"] = turn.session_id
             chat.log.emit("chat_reply", reply)

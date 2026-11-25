@@ -160,6 +160,9 @@ class ObservedSession:
             "duration_ms": duration_ms,
             "phase": self._phase(),
         }
+        for key in ("connect_ms", "api_ms"):
+            if getattr(turn, key) is not None:
+                reply[key] = getattr(turn, key)
         if turn.session_id:
             reply["session_id"] = turn.session_id
         self._log.emit("planner_reply", reply)

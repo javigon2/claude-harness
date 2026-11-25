@@ -191,7 +191,8 @@ class DemoPlannerSession:
     """A PlannerSession with scripted behaviour chosen by the message:
 
     - the Orchestrator prompt: a JSON routing block: to = the message's first word when it
-      is haiku, sonnet or opus, else sonnet; plan quick when "quick" is one of its words.
+      is haiku, sonnet or opus, else sonnet; plan quick when "quick" is one of its words;
+      effort low/high when that word is one of its words, else medium.
     - the triage prompt: a JSON route block: direct or quick when the request starts with
       that word, else project; tier haiku.
     - the quick prompt: a quick plan (demo_stage_plan(1), stage "quick") in the directory
@@ -272,13 +273,24 @@ class DemoPlannerSession:
 
     async def _route(self, text: str) -> PlannerTurn:
         """Route by the message's first word: haiku, sonnet or opus, else sonnet; plan quick
-        when "quick" is one of its words, else project."""
+        when "quick" is one of its words, else project; effort low or high when that word is
+        one of its words, else medium."""
         message = text.rsplit("Message:\n\n", 1)[-1]
         words = message.lower().split()
         to = words[0] if words and words[0] in ("haiku", "sonnet", "opus") else "sonnet"
         plan = "quick" if "quick" in words else "project"
+        effort = next((w for w in words if w in ("low", "high")), "medium")
+        research = any(w in DEMO_RESEARCH_WORDS for w in words)
         await self._step("Read", "README.md")
-        block = json.dumps({"to": to, "plan": plan, "reason": f"demo routing: {to}"})
+        block = json.dumps(
+            {
+                "to": to,
+                "plan": plan,
+                "effort": effort,
+                "role": "researcher" if research else "builder",
+                "reason": f"demo routing: {to}",
+            }
+        )
         return self._turn(f"Routing to {to}.\n\n```json\n{block}\n```")
 
     async def _write_quick(self, text: str) -> PlannerTurn:
@@ -326,6 +338,52 @@ class DemoPlannerSession:
 CHAT_TURN_COST_USD = 0.002
 
 
+DEMO_RESEARCH_WORDS = ("research", "eval", "evaluate", "experiment", "benchmark", "report")
+DEMO_REPORT_DIR = "reports/demo-eval"
+_DEMO_ROWS = (("haiku", 0.62), ("sonnet", 0.81), ("opus", 0.88))
+
+
+def _demo_bar_svg(rows: tuple[tuple[str, float], ...]) -> str:
+    """A small horizontal bar chart as SVG text (no plotting library)."""
+    bars = []
+    for i, (name, value) in enumerate(rows):
+        y = 50 + i * 46
+        width = round(value * 360)
+        color = "#4269d0" if value == max(v for _, v in rows) else "#9aa5b1"
+        bars.append(
+            f'<text x="90" y="{y + 22}" text-anchor="end" font-size="14">{name}</text>'
+            f'<rect x="100" y="{y}" width="{width}" height="32" fill="{color}"/>'
+            f'<text x="{106 + width}" y="{y + 22}" font-size="13">{value:.0%}</text>'
+        )
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="200" '
+        'font-family="sans-serif"><rect width="520" height="200" fill="#ffffff"/>'
+        '<text x="12" y="28" font-size="16" font-weight="bold">'
+        "Opus passes the most demo orders</text>" + "".join(bars) + "</svg>\n"
+    )
+
+
+def write_demo_report(repo: Path) -> str:
+    """Write a scripted report (REPORT.md, one SVG chart, one CSV) under DEMO_REPORT_DIR;
+    return the report's repo-relative path."""
+    root = Path(repo) / DEMO_REPORT_DIR
+    (root / "figures").mkdir(parents=True, exist_ok=True)
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    (root / "figures" / "pass-rate.svg").write_text(_demo_bar_svg(_DEMO_ROWS), encoding="utf-8")
+    csv = "tier,pass_rate\n" + "".join(f"{n},{v}\n" for n, v in _DEMO_ROWS)
+    (root / "data" / "pass-rate.csv").write_text(csv, encoding="utf-8")
+    report = (
+        "# Demo eval: pass rate by tier\n\n"
+        "**TL;DR**: in this scripted demo, opus passes 88% of orders, sonnet 81%, haiku 62%.\n\n"
+        "## Results\n\n"
+        "![Pass rate by tier](figures/pass-rate.svg)\n\n"
+        "Opus leads, but sonnet is close at a fraction of the cost.\n\n"
+        "## Caveats\n\nDemo data, not measured.\n"
+    )
+    (root / "REPORT.md").write_text(report, encoding="utf-8")
+    return f"{DEMO_REPORT_DIR}/REPORT.md"
+
+
 class DemoChatSession:
     """A scripted chat agent for `harness ui --fake`: no model, no network. Every send()
     reports a Read of README.md and an Edit of notes.md, appends one line to
@@ -343,6 +401,7 @@ class DemoChatSession:
         self._progress = progress
         self._delay = delay_s
         self._cost = 0.0
+        self.role = "builder"  # set by ChatManager; a researcher writes a demo report
 
     async def _step(self, tool: str, detail: str) -> None:
         if self._progress is not None:
@@ -360,6 +419,15 @@ class DemoChatSession:
         add CHAT_TURN_COST_USD to the cost and return PlannerTurn(text=f"Done ({self.tier}
         demo): noted it in notes.md.", usage=Usage(cost_usd=round(cost, 4)))."""
         self.sent.append(text)
+        if self.role == "researcher":
+            await self._step("Bash", "python scripts/eval.py")
+            await self._step("Write", f"{DEMO_REPORT_DIR}/REPORT.md")
+            path = write_demo_report(self.repo)
+            self._cost += CHAT_TURN_COST_USD
+            return PlannerTurn(
+                text=f"Opus passes 88% of demo orders, sonnet 81%, haiku 62%. Report: {path}",
+                usage=Usage(cost_usd=round(self._cost, 4)),
+            )
         await self._step("Read", "README.md")
         await self._step("Edit", "notes.md")
         line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "note")

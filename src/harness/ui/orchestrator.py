@@ -6,7 +6,9 @@ Every turn is written to the planner event log (`run_id` = the thread id, `orch-
 a restart or a read-only page rebuilds the thread with `orchestrator_view_from_log`."""
 
 import asyncio
+import inspect
 import os
+import secrets
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -19,18 +21,25 @@ from pydantic import BaseModel, ConfigDict, Field
 from harness.config import TIER_LADDER, Tier
 from harness.models import Event
 from harness.planner import (
+    DEFAULT_EFFORT,
+    EFFORTS,
     ORCHESTRATOR_PROMPT,
+    Effort,
     PlannerSession,
     PlannerTurn,
     Routing,
     SdkRoutingSession,
+    effort_or_default,
     parse_routing,
 )
 from harness.planner_log import PlannerLog, last_session, read_planner_events
+from harness.roles import DEFAULT_ROLE, ChatRole, role_or_default, role_title
 from harness.state import new_run_id
 from harness.ui.chat import (
+    CHAT_TIERS,
     ChatConflict,
     ChatManager,
+    _artifacts,
     _pid_alive,
     _progress_line,
     chats_from_log,
@@ -42,7 +51,7 @@ from harness.ui.uploads import attachment_note, image_ids
 from harness.worker import ProgressFn
 
 OrchState = Literal["idle", "routing", "failed"]
-OrchAction = Literal["start", "forward", "escalate"]
+OrchAction = Literal["start", "forward", "escalate", "switch", "retune", "handoff"]
 OrchSessionFactory = Callable[[Path, ProgressFn], PlannerSession]
 TAIL_ENTRIES = 12
 TAIL_CHARS = 500
@@ -54,6 +63,8 @@ NO_ROUTING_FOLLOW = "the orchestrator gave no route; passing it on"
 OPUS_HOLDS = "opus holds the work"
 ROUTING_BUSY = "the orchestrator is still routing the last message"
 OPUS_BUSY = "opus is working; wait for its reply"
+ABORTED = "aborted by the user"
+NOTHING_TO_ABORT = "no agent is working on this request"
 
 
 class OrchestratorConflict(Exception):
@@ -66,9 +77,14 @@ class HandoffRefused(Exception):
 
 class OpusDesk(Protocol):
     def start(
-        self, text: str, plan: Literal["quick", "project"], images: Sequence[str] = ()
+        self,
+        text: str,
+        plan: Literal["quick", "project"],
+        images: Sequence[str] = (),
+        effort: Effort | None = None,
     ) -> str:
-        """Start an Opus planning session on `text`; return its session id."""
+        """Start an Opus planning session on `text` at thinking `effort`; return its
+        session id."""
         ...
 
     def message(self, text: str, images: Sequence[str] = ()) -> None:
@@ -78,6 +94,20 @@ class OpusDesk(Protocol):
     def resume(self, session_id: str, text: str, images: Sequence[str] = ()) -> str:
         """Continue the past planning session `session_id` on its own Claude session with
         `text`; return the new session id. Raise HandoffRefused with a sentence if it cannot."""
+
+    def abort(self) -> None:
+        """Stop the planning session now, whatever it is doing. HandoffRefused when there is
+        none."""
+        ...
+
+    def detach(self) -> None:
+        """A new request starts while the planning session is still working: it keeps
+        working but no longer belongs to the shown request."""
+        ...
+
+    def attach(self, session_id: str) -> None:
+        """Its request was reopened: the planning session belongs to it again."""
+        ...
 
     def release(self) -> None:
         """End the current session if it only waits for the user; raise HandoffRefused
@@ -104,6 +134,8 @@ class OrchEntry(BaseModel):
     text: str
     blocks: list[dict[str, Any]] = Field(default_factory=list)
     images: list[str] = Field(default_factory=list)
+    agent_role: str | None = None  # an agent reply's role: builder, researcher or planner
+    artifacts: list[dict[str, str]] = Field(default_factory=list)
 
 
 class OrchestratorView(BaseModel):
@@ -117,6 +149,7 @@ class OrchestratorView(BaseModel):
     state: OrchState = "idle"
     holder: Tier | None = None
     holder_id: str | None = None
+    holder_role: str | None = None
     transcript: list[OrchEntry] = Field(default_factory=list)
     reason: str | None = None
     progress: list[str] = Field(default_factory=list)
@@ -130,8 +163,9 @@ def rank(tier: Tier) -> int:
 
 
 def new_thread_id() -> str:
-    """f"orch-{new_run_id()}", e.g. orch-20261023-101500."""
-    return f"orch-{new_run_id()}"
+    """f"orch-{new_run_id()}-{4 hex}", e.g. orch-20261023-101500-9f3a: unique even for two
+    requests in the same second (New request then a message)."""
+    return f"orch-{new_run_id()}-{secrets.token_hex(2)}"
 
 
 def tail_text(entries: list[OrchEntry]) -> str:
@@ -154,16 +188,51 @@ def handoff_brief(entries: list[OrchEntry], text: str, from_tier: Tier) -> str:
     )
 
 
-def routing_line(action: OrchAction, to: Tier, plan: str, reason: str) -> str:
+def routing_line(
+    action: OrchAction,
+    to: Tier,
+    plan: str,
+    reason: str,
+    effort: Effort | None = None,
+    previous: Effort | None = None,
+    role: str | None = None,
+) -> str:
     """The Orchestrator's line in the thread for one turn. `shown` is f"opus ({plan} plan)"
     when to is "opus", else to. start: f"Sent to {shown}: {reason}"; escalate:
-    f"Moved up to {shown}: {reason}"; forward: f"Passed to {to}." (no plan, no reason)."""
+    f"Moved up to {shown}: {reason}"; switch (down to an easier tier): f"Switched down to
+    {to}: {reason}"; forward: f"Passed to {to}." (no plan, no reason). With `effort`, a
+    model change names it: "Moved up to sonnet (high effort): ..." or "opus (project plan,
+    high effort)". retune (same agent, new effort): f"Effort raised to {effort}: {reason}"
+    or "lowered", against `previous`. handoff (a different role takes over): f"Handed to
+    {Title} ({to}): {reason}". A researcher is always named: "Sent to Researcher (sonnet)"."""
+    if action == "handoff" or (role == "researcher" and action in ("start", "escalate", "switch")):
+        named = f"{to}, {effort} effort" if effort is not None and action != "start" else to
+        verb = {
+            "handoff": "Handed to",
+            "start": "Sent to",
+            "escalate": "Moved up to",
+            "switch": "Switched down to",
+        }[action]
+        return f"{verb} {role_title(role)} ({named}): {reason}"
+    if action == "retune":
+        up = previous is None or EFFORTS.index(effort or DEFAULT_EFFORT) > EFFORTS.index(previous)
+        return f"Effort {'raised' if up else 'lowered'} to {effort}: {reason}"
     shown = f"opus ({plan} plan)" if to == "opus" else to
+    if action in ("escalate", "switch") and effort is not None:
+        named = f"{plan} plan, {effort} effort" if to == "opus" else f"{effort} effort"
+        shown = f"{to} ({named})"
     if action == "start":
         return f"Sent to {shown}: {reason}"
     if action == "escalate":
         return f"Moved up to {shown}: {reason}"
+    if action == "switch":
+        return f"Switched down to {shown}: {reason}"
     return f"Passed to {to}."
+
+
+def big_effort_jump(current: Effort, wanted: Effort) -> bool:
+    """True for a two-step change (low <-> high): only that retunes a live agent."""
+    return abs(EFFORTS.index(wanted) - EFFORTS.index(current)) >= 2
 
 
 def _cost(payload: dict[str, Any]) -> float:
@@ -227,7 +296,14 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
             last_user = e
         elif e.type == "orchestrator_turn":
             t = _text(p)
-            if t:
+            # a first hand-off to a chat agent is not shown: its desk bubble already says
+            # who has it; a model change (up or down) and an Opus hand-off (plan kind) are
+            shown = (
+                p.get("target_kind") != "chat"
+                or p.get("action") in ("escalate", "switch", "retune", "handoff")
+                or p.get("role") == "researcher"
+            )
+            if t and shown:
                 items.append(
                     (
                         e.ts,
@@ -268,13 +344,16 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
         if kind == "chat":
             mine = [e for e in chat_events if e.run_id == tid]
             who = to if isinstance(to, str) else ""
+            agent_role = DEFAULT_ROLE
             for e in mine:
                 if e.type == "chat_started" and isinstance(e.payload.get("tier"), str):
                     who = e.payload["tier"]
+                    agent_role = role_or_default(e.payload.get("role"))
                     break
             cands = [e for e in mine if e.type == "chat_reply"]
         else:
             who = "opus"
+            agent_role = "planner"
             cands = [e for e in all_planner if e.run_id == tid and e.type == "planner_reply"]
         for e in cands:
             t = _text(e.payload)
@@ -288,6 +367,8 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
                             ts=e.ts.isoformat(),
                             text=t,
                             blocks=parse_markdown(t),
+                            agent_role=agent_role,
+                            artifacts=_artifacts(e.payload.get("artifacts")),
                         ),
                     )
                 )
@@ -300,6 +381,7 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
     reason: str | None = None
     holder: Tier | None = None
     holder_id: str | None = None
+    holder_role: str | None = None
     if last_turn is not None:
         r = last_turn.payload.get("reason")
         reason = r if isinstance(r, str) else None
@@ -311,7 +393,7 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
             for v in chats_from_log(repo):
                 if v.chat_id == tid:
                     if v.state in ("working", "waiting"):
-                        holder, holder_id = v.tier, tid
+                        holder, holder_id, holder_role = v.tier, tid, v.role
                     break
         elif kind == "opus":
             sess = last_session(all_planner)
@@ -320,7 +402,7 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
                 and sess[0].run_id == tid
                 and not any(e.type in ("planner_done", "planner_failed") for e in sess)
             ):
-                holder, holder_id = "opus", tid
+                holder, holder_id, holder_role = "opus", tid, "planner"
 
     last = thread[-1]
     state: OrchState = "idle"
@@ -337,6 +419,7 @@ def orchestrator_view_from_log(repo: Path, thread_id: str | None = None) -> Orch
         state=state,
         holder=holder,
         holder_id=holder_id,
+        holder_role=holder_role,
         transcript=transcript,
         reason=reason,
         progress=[],
@@ -356,12 +439,31 @@ def last_agent_target(events: list[Event]) -> Target | None:
             continue
         p = e.payload
         tier, kind, tid = p.get("to"), p.get("target_kind"), p.get("target_id")
-        if kind == "chat" and tier in ("haiku", "sonnet") and isinstance(tid, str):
+        if kind == "chat" and tier in ("haiku", "sonnet", "opus") and isinstance(tid, str):
             found = (cast(Tier, tier), "chat", tid)
         elif kind == "opus" and isinstance(tid, str) and tid:
             found = ("opus", "opus", tid)
         else:
             found = None
+    return found
+
+
+def _takes(fn: Callable[..., Any], name: str) -> bool:
+    """True if `fn` accepts a keyword argument `name`."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def agent_efforts(events: list[Event]) -> dict[str, Effort]:
+    """agent id -> the effort of its latest orchestrator_turn that logged one."""
+    found: dict[str, Effort] = {}
+    for e in events:
+        tid = e.payload.get("target_id")
+        if e.type == "orchestrator_turn" and isinstance(tid, str) and "effort" in e.payload:
+            found[tid] = effort_or_default(e.payload["effort"])
     return found
 
 
@@ -412,10 +514,12 @@ class Orchestrator:
         self._pid_logged = False
         self._target: Target | None = None
         self._resumable: Target | None = None  # an ended chat of a reopened thread
+        self._efforts: dict[str, Effort] = {}  # agent id -> its session's thinking effort
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[Any] | None = None
         self._closed = False
+        self._gen = 0  # bumped by abort, so a cancelled routing turn that returns late is dropped
 
     # -- helpers (caller holds self._lock) ----------------------------------------------
 
@@ -433,6 +537,16 @@ class Orchestrator:
             return target, ""
         self._target = None
         return None
+
+    def _role_of(self, target: Target | None) -> ChatRole | None:
+        """The chat role of `target`'s agent (builder or researcher); None for the Opus
+        planning desk or no target. Caller holds self._lock."""
+        if target is None or target[1] != "chat":
+            return None
+        for view in self.chats.views():
+            if view.chat_id == target[2]:
+                return view.role
+        return DEFAULT_ROLE
 
     def _emit(self, type: str, payload: dict[str, Any]) -> None:
         if self._log is not None:
@@ -498,6 +612,7 @@ class Orchestrator:
                         "reason": OPUS_HOLDS,
                         "target_kind": "opus",
                         "target_id": holder[2],
+                        "effort": self._efforts.get(holder[2], DEFAULT_EFFORT),
                         "cost_usd": 0.0,
                         "text": routing_line("forward", "opus", "project", OPUS_HOLDS),
                     },
@@ -508,9 +623,10 @@ class Orchestrator:
             if holder is None and self._resumable is not None:
                 tier, kind, agent_id = self._resumable
                 self._resumable = None
+                effort = self._efforts.get(agent_id, DEFAULT_EFFORT)
                 try:
                     if kind == "chat":
-                        self.chats.resume(agent_id, stripped, images=ids)
+                        self.chats.resume(agent_id, stripped, images=ids, effort=effort)
                     else:
                         agent_id = self.opus.resume(agent_id, stripped, images=ids)
                 except (ChatConflict, HandoffRefused):
@@ -527,10 +643,12 @@ class Orchestrator:
                             "reason": reason,
                             "target_kind": kind,
                             "target_id": agent_id,
+                            "effort": effort,
                             "cost_usd": 0.0,
                             "text": routing_line("forward", tier, plan, reason),
                         },
                     )
+                    self._efforts[agent_id] = effort
                     self._target = (tier, kind, agent_id)
                     self._state = "idle"
                     self._error = None
@@ -539,9 +657,20 @@ class Orchestrator:
             self._error = None
             self._progress = []
             assert self._log is not None
+            holder_effort = self._efforts.get(holder[2], DEFAULT_EFFORT) if holder else None
+            holder_role = self._role_of(holder)
             self._thread = threading.Thread(
                 target=self._thread_main,
-                args=(stripped, holder, entries, self._log, ids),
+                args=(
+                    stripped,
+                    holder,
+                    entries,
+                    self._log,
+                    ids,
+                    self._gen,
+                    holder_effort,
+                    holder_role,
+                ),
                 name="harness-orchestrator",
                 daemon=True,
             )
@@ -550,8 +679,9 @@ class Orchestrator:
     def _release_holder(self) -> None:
         """Let go of the agent holding the current thread so the next request gets its own.
         A waiting agent is closed (a chat keeps its session id, so it can be resumed); one
-        that is working keeps working on its own and is only detached from the thread.
-        Caller holds self._lock."""
+        that is working keeps working on its own and is only detached from the thread, so
+        the room shows none of it. Caller holds self._lock."""
+        self.chats.detach()
         live = self._live_holder()
         if live is None:
             return
@@ -567,6 +697,8 @@ class Orchestrator:
                 self.opus.release()
             except HandoffRefused:
                 pass
+        else:
+            self.opus.detach()
         self._target = None
 
     def _leave_thread(self) -> None:
@@ -577,6 +709,7 @@ class Orchestrator:
         self._log = None
         self._target = None
         self._resumable = None
+        self._efforts = {}
         self._pid_logged = False
         self._state = "idle"
         self._error = None
@@ -610,6 +743,47 @@ class Orchestrator:
             self._emit("orchestrator_started", {"pid": os.getpid(), "reopened": True})
             self._pid_logged = True
             self._resumable = resumable
+            self._efforts = agent_efforts(events)
+            if resumable is not None:  # its agent may still be working or waiting: rejoin it
+                tier, kind, agent_id = resumable
+                if kind == "chat" and self.chats.attach(agent_id):
+                    self._target, self._resumable = resumable, None
+                elif kind == "opus" and self.opus.live(agent_id):
+                    self.opus.attach(agent_id)
+                    self._target, self._resumable = resumable, None
+
+    def abort(self) -> None:
+        """Stop what is working on the current request now: a routing turn is cancelled, and
+        the agent holding the request (chat or Opus) is aborted, working, waiting or stuck.
+        The next message is routed afresh. Raises OrchestratorConflict when nothing works."""
+        with self._lock:
+            done = False
+            if self._state == "routing":
+                self._gen += 1
+                if self._loop is not None and self._task is not None:
+                    try:
+                        self._loop.call_soon_threadsafe(self._task.cancel)
+                    except RuntimeError:
+                        pass
+                self._emit("orchestrator_failed", {"reason": ABORTED, "cost_usd": 0.0})
+                self._state = "failed"
+                self._error = ABORTED
+                self._progress = []
+                done = True
+            live = self._live_holder()
+            if live is not None:
+                (_tier, kind, target_id), _chat_state = live
+                try:
+                    if kind == "chat":
+                        self.chats.abort(target_id)
+                    else:
+                        self.opus.abort()
+                except (ChatConflict, HandoffRefused):
+                    pass
+                self._target = None
+                done = True
+            if not done:
+                raise OrchestratorConflict(NOTHING_TO_ABORT)
 
     def view(self) -> OrchestratorView:
         """The log view with state, error, progress and holder from memory."""
@@ -651,12 +825,14 @@ class Orchestrator:
             self._state = "failed" if v.state == "failed" else "idle"
             self._error = v.error if v.state == "failed" else None
             if v.holder and v.holder_id:
-                self._target = (v.holder, "opus" if v.holder == "opus" else "chat", v.holder_id)
+                kind = "chat" if v.holder_id.startswith("chat-") else "opus"
+                self._target = (v.holder, kind, v.holder_id)
             else:
                 self._target = None
             self._resumable = None
+            thread = [e for e in events if e.run_id == v.thread_id] if v.thread_id else []
+            self._efforts = agent_efforts(thread)
             if self._target is None and v.thread_id:
-                thread = [e for e in events if e.run_id == v.thread_id]
                 self._resumable = last_agent_target(thread)
 
     def close(self) -> None:
@@ -680,10 +856,15 @@ class Orchestrator:
     # -- the routing thread -------------------------------------------------------------
 
     def _fail(
-        self, log: PlannerLog, reason: str, cost: float, routing_ms: int | None = None
+        self,
+        log: PlannerLog,
+        reason: str,
+        cost: float,
+        routing_ms: int | None = None,
+        gen: int | None = None,
     ) -> None:
         with self._lock:
-            if self._closed:
+            if self._closed or (gen is not None and gen != self._gen):
                 return
             payload: dict[str, Any] = {"reason": reason, "cost_usd": cost}
             if routing_ms is not None:
@@ -700,13 +881,18 @@ class Orchestrator:
         entries: list[OrchEntry],
         log: PlannerLog,
         images: tuple[str, ...] = (),
+        gen: int = 0,
+        holder_effort: Effort | None = None,
+        holder_role: ChatRole | None = None,
     ) -> None:
         try:
-            asyncio.run(self._route(text, holder, entries, log, images))
+            asyncio.run(
+                self._route(text, holder, entries, log, images, gen, holder_effort, holder_role)
+            )
         except asyncio.CancelledError:
             return
         except Exception as err:
-            self._fail(log, f"unexpected error: {type(err).__name__}: {err}", 0.0)
+            self._fail(log, f"unexpected error: {type(err).__name__}: {err}", 0.0, gen=gen)
 
     def _start_target(
         self,
@@ -714,12 +900,26 @@ class Orchestrator:
         plan: Literal["quick", "project"],
         text: str,
         images: tuple[str, ...] = (),
+        effort: Effort = DEFAULT_EFFORT,
+        role: ChatRole = DEFAULT_ROLE,
     ) -> Target:
+        if role == "researcher":  # a direct agent on any tier, Opus included
+            return (to, "chat", self._start_chat(to, text, images, effort, role))
         if to == "opus":
-            if images:
-                return ("opus", "opus", self.opus.start(text, plan, images=images))
-            return ("opus", "opus", self.opus.start(text, plan))
-        return (to, "chat", self.chats.start(to, text, images=images))
+            # older desks take neither images nor effort (see test_old_opus_signature)
+            extra: dict[str, Any] = {"images": images} if images else {}
+            if _takes(self.opus.start, "effort"):
+                extra["effort"] = effort
+            return ("opus", "opus", self.opus.start(text, plan, **extra))
+        return (to, "chat", self._start_chat(to, text, images, effort, role))
+
+    def _start_chat(
+        self, to: Tier, text: str, images: tuple[str, ...], effort: Effort, role: ChatRole
+    ) -> str:
+        # older chat managers (test fakes) take no role
+        if _takes(self.chats.start, "role"):
+            return self.chats.start(to, text, images=images, effort=effort, role=role)
+        return self.chats.start(to, text, images=images, effort=effort)
 
     async def _route(
         self,
@@ -728,12 +928,18 @@ class Orchestrator:
         entries: list[OrchEntry],
         log: PlannerLog,
         images: tuple[str, ...] = (),
+        gen: int = 0,
+        holder_effort: Effort | None = None,
+        holder_role: ChatRole | None = None,
     ) -> None:
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
+        current: Effort = holder_effort or DEFAULT_EFFORT
         prompt = ORCHESTRATOR_PROMPT.format(
             repo=self.repo,
             holder=holder[0] if holder else "nobody (new work)",
+            role=(holder_role or "planner") if holder else "none",
+            effort=current if holder else "none (new work)",
             tail=tail_text(entries),
             text=text + attachment_note(self.repo, images),
         )
@@ -757,44 +963,97 @@ class Orchestrator:
         routing_ms = round((time.monotonic() - started) * 1000)
         cost = turn.usage.cost_usd
         if turn.error:
-            self._fail(log, f"orchestrator session failed: {turn.error}", cost, routing_ms)
+            self._fail(log, f"orchestrator session failed: {turn.error}", cost, routing_ms, gen)
             return
         routing = parse_routing(turn.text)
         with self._lock:
-            if self._closed:
+            if self._closed or gen != self._gen:
                 return
         action: OrchAction
         to: Tier = "sonnet"
+        effort: Effort = DEFAULT_EFFORT
+        role: ChatRole = holder_role or DEFAULT_ROLE
+        dispatch_start = time.monotonic()
         try:
             if holder is None:
                 routing = routing or Routing(to="sonnet", reason=NO_ROUTING_NEW)
                 to = routing.to
+                effort = routing.effort
+                role = routing.role
                 action = "start"
-                target = self._start_target(to, routing.plan, text, images)
-            elif routing is None or rank(routing.to) <= rank(holder[0]):
-                action = "forward"
-                routing = Routing(
-                    to=holder[0],
-                    plan=routing.plan if routing else "project",
-                    reason=routing.reason if routing else NO_ROUTING_FOLLOW,
-                )
-                to = holder[0]
-                self.chats.message(holder[2], text, images=images)
-                target = holder
-            else:
-                action = "escalate"
+                target = self._start_target(to, routing.plan, text, images, effort, role)
+            elif (
+                routing is not None
+                and holder[1] == "chat"
+                and routing.role != (holder_role or DEFAULT_ROLE)
+            ):
+                # a different kind of work (build <-> research): a new agent of that role
+                # takes over with the thread's tail, whatever the tier
+                action = "handoff"
                 to = routing.to
+                effort = routing.effort
+                role = routing.role
                 brief = handoff_brief(entries, text, holder[0])
                 try:
                     self.chats.close_chat(holder[2])
                 except ChatConflict:
                     pass
-                target = self._start_target(to, routing.plan, brief, images)
+                target = self._start_target(to, routing.plan, brief, images, effort, role)
+            elif (
+                routing is not None
+                and routing.to in CHAT_TIERS
+                and rank(routing.to) < rank(holder[0])
+                and holder[1] == "chat"
+            ):
+                action = "switch"  # easier than the holder: a cheaper, faster agent takes it
+                to = routing.to
+                effort = routing.effort
+                brief = handoff_brief(entries, text, holder[0])
+                try:
+                    self.chats.close_chat(holder[2])
+                except ChatConflict:
+                    pass
+                target = self._start_target(to, routing.plan, brief, images, effort, role)
+            elif routing is None or rank(routing.to) <= rank(holder[0]):
+                to = holder[0]
+                effort = current
+                target = holder
+                if (
+                    routing is not None
+                    and holder[1] == "chat"
+                    and big_effort_jump(current, routing.effort)
+                ):
+                    # same model, a low <-> high jump: the agent restarts on its own Claude
+                    # session at the new effort (a one-step change keeps the agent as is)
+                    if self.chats.retune(holder[2], routing.effort, text, images=images):
+                        action = "retune"
+                        effort = routing.effort
+                    else:
+                        action = "forward"  # no saved session: the chat noted it, kept effort
+                else:
+                    action = "forward"
+                    self.chats.message(holder[2], text, images=images)
+                routing = Routing(
+                    to=holder[0],
+                    plan=routing.plan if routing else "project",
+                    effort=effort,
+                    reason=routing.reason if routing else NO_ROUTING_FOLLOW,
+                )
+            else:
+                action = "escalate"
+                to = routing.to
+                effort = routing.effort
+                brief = handoff_brief(entries, text, holder[0])
+                try:
+                    self.chats.close_chat(holder[2])
+                except ChatConflict:
+                    pass
+                target = self._start_target(to, routing.plan, brief, images, effort, role)
         except (ChatConflict, HandoffRefused) as err:
-            self._fail(log, f"could not hand to {to}: {err}", cost, routing_ms)
+            self._fail(log, f"could not hand to {to}: {err}", cost, routing_ms, gen)
             return
         with self._lock:
-            if self._closed:
+            if self._closed or gen != self._gen:
                 return
             log.emit(
                 "orchestrator_turn",
@@ -805,11 +1064,26 @@ class Orchestrator:
                     "reason": routing.reason,
                     "target_kind": target[1],
                     "target_id": target[2],
+                    "effort": effort,
+                    "role": role if target[1] == "chat" else "planner",
                     "cost_usd": cost,
                     "routing_ms": routing_ms,
-                    "text": routing_line(action, target[0], routing.plan, routing.reason),
+                    # timing breakdown for the Timing panel (harness.ui.timing)
+                    "routing_connect_ms": turn.connect_ms,
+                    "routing_api_ms": turn.api_ms,
+                    "dispatch_ms": round((time.monotonic() - dispatch_start) * 1000),
+                    "text": routing_line(
+                        action,
+                        target[0],
+                        routing.plan,
+                        routing.reason,
+                        effort,
+                        current,
+                        role if target[1] == "chat" else None,
+                    ),
                 },
             )
+            self._efforts[target[2]] = effort
             self._target = target
             self._state = "idle"
             self._error = None

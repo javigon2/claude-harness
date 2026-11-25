@@ -67,7 +67,6 @@ def test_route_escalate_new_and_restart(repo):
         got = [(e["role"], e["who"], e["text"]) for e in view["orchestrator"]["transcript"]]
         assert got == [
             ("user", "You", "haiku fix the typo"),
-            ("orchestrator", "Orchestrator", "Sent to haiku: demo routing: haiku"),
             ("agent", "haiku", "Done (haiku demo): noted it in notes.md."),
         ]
 
@@ -97,7 +96,7 @@ def test_route_escalate_new_and_restart(repo):
         assert (
             "orchestrator",
             "Orchestrator",
-            "Moved up to opus (quick plan): demo routing: opus",
+            "Moved up to opus (quick plan, medium effort): demo routing: opus",
         ) in got
         assert any(r == "agent" and w == "opus" and t.startswith("Quick plan: ") for r, w, t in got)
 

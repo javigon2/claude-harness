@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -24,13 +24,14 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from harness.config import MODEL_IDS, Tier, planner_tier
 from harness.models import Usage
 from harness.order_check import check_plan_quality
 from harness.plan import PlanError, load_plan
 from harness.repo_digest import load_or_build
+from harness.roles import DEFAULT_ROLE, ChatRole, role_or_default
 from harness.worker import (
     WORKER_ENV,
     ProgressFn,
@@ -181,22 +182,69 @@ ORCHESTRATOR_PROMPT = (
     "multiple stages or choices only the user can make. When unsure between direct "
     "and planning, choose sonnet; between quick and project, choose quick. "
     "Route from the request without reading the repo.\n"
-    "Holder: {holder}. A follow-up stays with the holder unless it is clearly beyond the "
-    "holder; never pick a lower tier than the holder.\n"
+    "Also pick the role: researcher for evals, experiments, benchmarks, measuring or "
+    "comparing things, data analysis, or a findings report (it runs them and writes a "
+    "report with charts); builder for everything else. A researcher is a direct agent on "
+    "any tier: haiku to re-plot or tweak an existing report, sonnet for most evals, opus "
+    "to design an experiment or for a heavy multi-source analysis; plan does not apply.\n"
+    "Holder: {holder}. Holder's role: {role}. Pick the tier this message needs now. "
+    "A follow-up stays with the holder unless it is clearly beyond the holder (pick "
+    "higher) or clearly much easier "
+    "than the holder's tier and does not build on its unfinished work, e.g. an unrelated "
+    "quick question or an unrelated small mechanical edit for a sonnet holder (pick "
+    "haiku). Thanks, ok, yes and tweaks to what the holder just did always stay with "
+    "the holder. When unsure, keep the holder.\n"
+    "Holder's effort: {effort}. Also pick the thinking effort: low for greetings, quick "
+    "questions and mechanical edits; medium for ordinary coding; high for debugging, "
+    "cross-cutting changes and design. When unsure, medium; for a follow-up, keep the "
+    "current effort unless the jump is clear.\n"
     'End with a ```json block: {{"to": "haiku" | "sonnet" | "opus", '
-    '"plan": "quick" | "project", "reason": "<one line>"}}.\n\n'
+    '"plan": "quick" | "project", "effort": "low" | "medium" | "high", '
+    '"role": "builder" | "researcher", '
+    '"reason": "<one line>"}}.\n\n'
     "Conversation so far:\n{tail}\n\nMessage:\n\n{text}"
 )
 
+Effort = Literal["low", "medium", "high"]
+
+EFFORTS: tuple[Effort, ...] = ("low", "medium", "high")
+
+DEFAULT_EFFORT: Effort = "medium"
+
+
+def effort_or_default(value: object) -> Effort:
+    """`value` when it is one of EFFORTS, else DEFAULT_EFFORT."""
+    return cast(Effort, value) if value in EFFORTS else DEFAULT_EFFORT
+
 
 class Routing(BaseModel):
-    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus."""
+    """The Orchestrator's pick for one message. `plan` matters only when `to` is opus. A
+    missing or invalid `effort` is medium and a null `plan` is quick; neither fails the
+    routing."""
 
     model_config = ConfigDict(extra="forbid")
 
     to: Tier
     plan: Literal["quick", "project"] = "quick"
+    effort: Effort = DEFAULT_EFFORT
+    role: ChatRole = DEFAULT_ROLE
     reason: str = ""
+
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _plan(cls, value: object) -> object:
+        # the router sometimes sends "plan": null for a direct chat (2 of 240 bench calls)
+        return "quick" if value is None else value
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _role(cls, value: object) -> ChatRole:
+        return role_or_default(value)
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort(cls, value: object) -> Effort:
+        return effort_or_default(value.strip().lower() if isinstance(value, str) else value)
 
 
 def parse_routing(text: str) -> Routing | None:
@@ -263,6 +311,10 @@ class PlannerTurn(BaseModel):
     error: str | None = None
     session_init: dict[str, Any] | None = None
     session_id: str | None = None
+    # timing of this turn, when the session measures it: starting the Claude process (first
+    # turn only), and the model's own time (ResultMessage.duration_api_ms)
+    connect_ms: int | None = None
+    api_ms: int | None = None
 
 
 class PlanResult(BaseModel):
@@ -328,6 +380,12 @@ def _approval_neutral_plan(text: str) -> str:
     return APPROVED_RE.sub("Status: draft", text)
 
 
+def _api_ms(result: Any) -> int | None:
+    """ResultMessage.duration_api_ms (time in model calls), or None."""
+    value = getattr(result, "duration_api_ms", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 class SdkPlannerSession:
     """A PlannerSession on one ClaudeSDKClient, connected on the first send()."""
 
@@ -358,6 +416,9 @@ class SdkPlannerSession:
         self.tool_event: Callable[[str, dict[str, Any]], None] | None = None
         # the Claude session to continue (ClaudeAgentOptions.resume); set before the first send()
         self.resume_id: str | None = None
+        # thinking effort (ClaudeAgentOptions.effort); None is the SDK default. Fixed for the
+        # session's life: the SDK cannot change it on a live client. Set before the first send()
+        self.effort: Effort | None = None
 
     def _emit_tool(self, event: str, payload: dict[str, Any]) -> None:
         if self.tool_event is not None:
@@ -382,12 +443,15 @@ class SdkPlannerSession:
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
             resume=self.resume_id,
+            effort=self.effort,
         )
 
     async def send(self, text: str) -> PlannerTurn:
         """Algorithm in the `decision: planner session` context item."""
+        connect_ms: int | None = None
         if self._client is None:
             client = self._factory(options=self.options())
+            connect_start = time.monotonic()
             try:
                 await client.connect()
             except Exception as err:
@@ -395,6 +459,7 @@ class SdkPlannerSession:
                     usage=self._usage,
                     error=f"connect failed: {type(err).__name__}: {err}"[:2000],
                 )
+            connect_ms = round((time.monotonic() - connect_start) * 1000)
             self._client = client
 
         result_msg: ResultMessage | None = None
@@ -495,6 +560,8 @@ class SdkPlannerSession:
             error=error,
             session_init=session_init,
             session_id=getattr(result_msg, "session_id", None) if result_msg else None,
+            connect_ms=connect_ms,
+            api_ms=_api_ms(result_msg),
         )
 
     async def close(self) -> None:
@@ -543,6 +610,8 @@ class SdkRoutingSession(SdkTriageSession):
             max_turns=1,
             strict_mcp_config=True,
             env=dict(WORKER_ENV),
+            effort="low",
+            thinking={"type": "disabled"},
         )
 
 

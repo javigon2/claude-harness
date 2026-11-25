@@ -133,12 +133,21 @@ def test_start_message_close_over_http(site):
     wait_for(lambda: chat_state(site, chat_id) == "closed")
 
 
-def test_second_haiku_start_while_open_is_409(site):
-    code, _, _ = site.post(START, {"tier": "haiku", "text": "hi"})
+def test_second_haiku_start_gets_its_own_agent_and_abort(site):
+    code, _, first = site.post(START, {"tier": "haiku", "text": "hi"})
     assert code == 200
-    code, _, body = site.post(START, {"tier": "haiku", "text": "again"})
-    assert code == 409
-    assert "already open" in body["error"]
+    code, _, second = site.post(START, {"tier": "haiku", "text": "again"})
+    assert code == 200
+    assert first["chat_id"] != second["chat_id"]
+    assert {c["chat_id"] for c in second["office"]["chats"]} >= {
+        first["chat_id"],
+        second["chat_id"],
+    }
+    code, _, body = site.post("/api/chat/abort", {"chat_id": first["chat_id"]})
+    assert code == 200
+    wait_for(lambda: chat_state(site, first["chat_id"]) == "closed")
+    code, _, body = site.post("/api/chat/abort", {"chat_id": first["chat_id"]})
+    assert code == 409 and body["error"] == "the chat is closed"
 
 
 def test_message_to_unknown_chat_is_409(site):

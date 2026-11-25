@@ -31,6 +31,7 @@ from harness.plan import PlanError, load_plan
 from harness.planner import (
     APPROVE_QUICK,
     PROJECT_PLAN_FILE,
+    Effort,
     PlannerError,
     PlannerSession,
     PlanResult,
@@ -39,6 +40,7 @@ from harness.planner import (
     SdkPlannerSession,
     SdkTriageSession,
     Triage,
+    effort_or_default,
     quick_plan_dir,
     run_planner,
     stage_plan_dir,
@@ -183,6 +185,7 @@ class OfficeView(BaseModel):
     run_options: RunOptions = Field(default_factory=RunOptions)
     options_summary: str = ""
     stoppable_run: str | None = None
+    detached: bool = False
 
 
 # ---------------------------------------------------------------- small helpers
@@ -585,6 +588,7 @@ class Office:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[Any] | None = None
         self._answers: queue.Queue[str | None] = queue.Queue()
+        self._detached = False  # Opus works on for a request the user left (New request)
         self._stopping = threading.Event()
         self._waiting = False
         self._last_activity = 0.0
@@ -748,6 +752,51 @@ class Office:
         if thread is not None:
             thread.join(JOIN_TIMEOUT_S)
 
+    def abort(self) -> None:
+        """Stop the planning session now, whatever it does (thinking, asking, staging, or
+        stuck): logged planner_failed "interrupted: aborted by the user", the boss shows
+        interrupted at once and a new session may start. The turn is cancelled; a thread
+        that comes back late is no longer the office's and changes nothing. The draft on
+        disk is kept. Raises OfficeConflict when no session is live."""
+        with self._lock:
+            if self._state not in ("busy", "asking", "ready", "staging"):
+                raise OfficeConflict("opus is not working")
+            reason = "interrupted: aborted by the user"
+            if self._end_reason is None and self._log is not None:
+                self._end_reason = reason
+                self._log.emit(
+                    "planner_failed", {"reason": reason, "cost_usd": self._current_cost()}
+                )
+            self._state = "interrupted"
+            self._error = _reason_note(reason, self.idle_timeout_s)
+            self._progress_lines = []
+            self._detached = False
+            self._thread = None  # the old thread is stale from here on
+            answers, loop, task = self._answers, self._loop, self._task
+        answers.put(None)  # a session parked in _ask ends
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass
+
+    def detach(self) -> None:
+        """A new request starts while Opus still works for the old one: it goes on, and the
+        view says it is `detached` (busy on an earlier request)."""
+        with self._lock:
+            if self._state in ("busy", "asking", "ready", "staging"):
+                self._detached = True
+
+    def attach(self, session_id: str) -> None:
+        with self._lock:
+            if self._session_id == session_id:
+                self._detached = False
+
+    def _stale(self) -> bool:
+        """True on a planner thread that abort() let go of. Caller holds the lock."""
+        current = threading.current_thread()
+        return current.name == "harness-planner" and current is not self._thread
+
     def _current_cost(self) -> float:
         return self._observed.cost_usd if self._observed is not None else self._cost
 
@@ -803,6 +852,7 @@ class Office:
                 ),
                 quick_plan=self._quick_plan,
                 handoff_chat=self._handoff_chat,
+                detached=self._detached and state in ("busy", "asking", "ready", "staging"),
                 **_plan_fields(self.repo),
             )
         chats = self.chats.views()
@@ -834,6 +884,8 @@ class Office:
         """Raise OfficeConflict unless a new planner session may start. Caller holds the lock."""
         self._refresh_supervising()
         if self._state in ("busy", "asking", "ready", "staging"):
+            if self._detached:
+                raise OfficeConflict("opus is still busy with an earlier request; abort it or wait")
             raise OfficeConflict("a planning session is already in progress")
         live = live_run(self.repo, self._clock())
         if live is not None:
@@ -855,10 +907,12 @@ class Office:
         route: RouteChoice = "project",
         title_request: bool = True,
         images: Sequence[str] = (),
+        effort: Effort | None = None,
     ) -> None:
-        """Start a stage-1 planner session. With `description`, an existing PROJECT_PLAN.md is
-        first archived as PROJECT_PLAN.<UTC timestamp>.md. With `from_draft`, the session is
-        told to pick up the draft on disk. Raises OfficeConflict if a session or run is
+        """Start a stage-1 planner session (at thinking `effort`; None is the SDK default).
+        With `description`, an existing PROJECT_PLAN.md is first archived as
+        PROJECT_PLAN.<UTC timestamp>.md. With `from_draft`, the session is told to pick up
+        the draft on disk. Raises OfficeConflict if a session or run is
         active, a terminal planner is busy, or the input does not fit. `title_request` is off
         for a session the Orchestrator started: its thread is the request and gets the title."""
         with self._lock:
@@ -886,6 +940,7 @@ class Office:
                 from_draft=from_draft,
                 route="project" if from_draft else route,
                 images=() if from_draft else images,
+                effort=effort,
             )
             if title_request and not from_draft and self._request_titler is not None:
                 threading.Thread(
@@ -937,6 +992,7 @@ class Office:
             if changed > last + PLAN_TOUCH_SLACK_S:
                 raise OfficeConflict("a later request changed the plan on disk")
             shown = started.get("description")
+            effort = started.get("effort")
             self._begin(
                 RESUMED_PROMPT.format(
                     project_plan=plan, text=stripped + attachment_note(self.repo, images)
@@ -947,6 +1003,7 @@ class Office:
                 route="project",
                 resume_claude=claude,
                 user_text=stripped,
+                effort=effort_or_default(effort) if effort is not None else None,
             )
             return self._session_id or ""
 
@@ -977,6 +1034,7 @@ class Office:
         images: Sequence[str] = (),
         resume_claude: str | None = None,
         user_text: str | None = None,
+        effort: Effort | None = None,
     ) -> None:
         """Start the planner thread. Caller holds the lock and has passed _guard_idle. With
         `staging_only` the session only writes work orders for `stage` (stage 1 too) from the
@@ -987,6 +1045,7 @@ class Office:
         if from_draft or staging:
             route = "project"
         self._staging_only = staging_only
+        self._detached = False
         self._continuing = resume_claude is not None
         self._phase = "staging" if staging else "triage" if route == "auto" else route
         self._route_choice = route
@@ -1018,6 +1077,8 @@ class Office:
         opus = self._factory(self.repo, self._on_progress)
         if resume_claude and hasattr(opus, "resume_id"):
             opus.resume_id = resume_claude
+        if effort is not None and hasattr(opus, "effort"):
+            opus.effort = effort
         observed = ObservedSession(
             opus,
             self.repo,
@@ -1038,6 +1099,7 @@ class Office:
                 "route": route,
                 "auto": auto,
                 "resumed_claude_session": resume_claude,
+                "effort": effort,
             },
         )
         if user_text is not None:
@@ -1137,6 +1199,8 @@ class Office:
 
     async def _on_progress(self, info: dict[str, Any]) -> None:
         with self._lock:
+            if self._stale():
+                return
             self._progress_lines = [*self._progress_lines, _progress_line(info)][-PROGRESS_LINES:]
             log = self._log
         if log is not None:
@@ -1151,6 +1215,9 @@ class Office:
         Returns None on shutdown or after the idle timeout."""
         observed = self._observed
         with self._lock:
+            if self._stale():
+                return None
+            answers = self._answers
             self._reply = observed.reply_text if observed is not None else self._reply
             if self._phase == "quick" and self._quick_dir is not None:
                 rel = (self._quick_dir / "plan.json").as_posix()
@@ -1180,7 +1247,7 @@ class Office:
         try:
             while True:
                 try:
-                    return self._answers.get(timeout=poll)
+                    return answers.get(timeout=poll)
                 except queue.Empty:
                     pass
                 if self._stopping.is_set():
@@ -1200,7 +1267,8 @@ class Office:
                     return None
         finally:
             with self._lock:
-                self._waiting = False
+                if not self._stale():
+                    self._waiting = False
 
     async def _plan(
         self,
@@ -1280,6 +1348,8 @@ class Office:
         """The session ended without a plan. Logs planner_failed unless shutdown or the idle
         timeout already did."""
         with self._lock:
+            if self._stale():
+                return
             if self._end_reason is None and self._log is not None:
                 self._end_reason = reason
                 self._log.emit(
@@ -1292,6 +1362,8 @@ class Office:
     def _done(self, result: PlanResult) -> None:
         """run_planner returned a valid stage plan: log it, then launch the run."""
         with self._lock:
+            if self._stale():
+                return
             shown: str | None = None
             if result.plan_path is not None:
                 try:
@@ -1631,10 +1703,16 @@ class _OfficeOpusDesk:
         self._office = office
 
     def start(
-        self, text: str, plan: Literal["quick", "project"], images: Sequence[str] = ()
+        self,
+        text: str,
+        plan: Literal["quick", "project"],
+        images: Sequence[str] = (),
+        effort: Effort | None = None,
     ) -> str:
         try:
-            self._office.start(description=text, route=plan, title_request=False, images=images)
+            self._office.start(
+                description=text, route=plan, title_request=False, images=images, effort=effort
+            )
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
         session_id, _state = self._office.boss_status()
@@ -1657,6 +1735,18 @@ class _OfficeOpusDesk:
             self._office.release()
         except OfficeConflict as err:
             raise HandoffRefused(str(err)) from None
+
+    def abort(self) -> None:
+        try:
+            self._office.abort()
+        except OfficeConflict as err:
+            raise HandoffRefused(str(err)) from None
+
+    def detach(self) -> None:
+        self._office.detach()
+
+    def attach(self, session_id: str) -> None:
+        self._office.attach(session_id)
 
     def live(self, session_id: str) -> bool:
         current, state = self._office.boss_status()
